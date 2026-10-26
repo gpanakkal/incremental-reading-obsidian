@@ -3224,6 +3224,11 @@ input.ir-queue-page-input {
   padding-top: var(--size-2-1);
 }
 
+/* Its tooltip says why */
+.ir-leftover-modal .ir-leftover-error[aria-label] {
+  cursor: help;
+}
+
 /* The list scrolls, not the whole modal, so Confirm and Cancel stay in view
    however long it gets, previews and all */
 .ir-leftover-modal .modal-content {
@@ -3277,7 +3282,11 @@ input.ir-queue-page-input {
   max-height: 40vh;
   overflow: auto;
   margin-bottom: var(--size-4-2);
-  padding: 0 var(--size-4-3);
+  /* Obsidian zeroes the margins of the first and last blocks of rendered
+     Markdown and leaves the spacing to its container's padding; a footnote's
+     hover popover, its own small box of it, pads `var(--size-4-3)` above and
+     below (read from obsidian.asar) */
+  padding: var(--size-4-3);
   border: var(--border-width) solid var(--background-modifier-border);
   border-radius: var(--radius-s);
   background-color: var(--background-primary);
@@ -3290,18 +3299,54 @@ input.ir-queue-page-input {
 }
 
 .ir-leftover-modal .ir-leftover-preview-error {
-  padding: var(--size-4-2) 0;
   color: var(--text-error);
 }
 
-/* A line's "Keep as" box, in front of its dropdown, and the box over the
-   lines, at their end, over the lines' own boxes. The label is a click target
-   too. */
+/* The brush that strips a note of its incremental reading properties, in
+   yellow, through the `--text-color` Obsidian's buttons are drawn in, as
+   `mod-destructive` makes the trash red (read from obsidian.asar). Pressed, it
+   sits on the accent fill, which the user picks and which yellow can vanish on
+   (the default purple gives it under 2:1 in the light theme), so it takes the
+   colour Obsidian puts on the accent instead, as `button.mod-cta` would were
+   this rule not above it */
+.ir-leftover-modal .ir-leftover-strip {
+  --text-color: var(--color-yellow);
+}
+
+.ir-leftover-modal .ir-leftover-strip.mod-cta {
+  --text-color: var(--text-on-accent);
+}
+
+/* The light theme's yellow is about 2:1 on a plain button, too faint for an
+   icon, so the yellow goes in a tint behind a normal icon instead; hovered,
+   the tint deepens in place of Obsidian's hover fill, which it covers */
+.theme-light .ir-leftover-modal .ir-leftover-strip:not(.mod-cta) {
+  --text-color: var(--text-normal);
+  background-color: rgba(var(--color-yellow-rgb), 0.2);
+}
+
+@media (hover: hover) {
+  .theme-light .ir-leftover-modal .ir-leftover-strip:not(.mod-cta):hover {
+    background-color: rgba(var(--color-yellow-rgb), 0.3);
+  }
+}
+
+/* A line's "Keep as" toggle, in front of its dropdown, and the toggle over
+   the lines, at their end, over the lines' own toggles: Obsidian's slider
+   toggle (`.checkbox-container`) at its own size, centred on the line, then
+   the label of its text, a click target too. Only those two are: "Keep all"
+   spans the modal's width, its toggle at the end. */
 .ir-leftover-modal .ir-leftover-keep,
 .ir-leftover-modal .ir-leftover-all {
   display: inline-flex;
   align-items: center;
   white-space: nowrap;
+}
+
+/* The space between the toggle and its text is the label's own, so a click
+   there flips it too */
+.ir-leftover-modal .checkbox-container + label {
+  padding-inline-start: var(--size-4-2);
   cursor: pointer;
 }
 
@@ -3311,39 +3356,67 @@ input.ir-queue-page-input {
   padding-bottom: var(--size-4-2);
 }
 
-.ir-leftover-modal .ir-leftover-keep input[type='checkbox'],
-.ir-leftover-modal .ir-leftover-all input[type='checkbox'] {
+/* Obsidian's toggle takes `cursor: var(--cursor)`, the arrow unless the user
+   asks for pointers; its own `.is-disabled` rule gives the not-allowed one */
+.ir-leftover-modal .checkbox-container:not(.is-disabled) {
   cursor: pointer;
 }
 
-.ir-leftover-modal .ir-leftover-keep:has(input:disabled),
-.ir-leftover-modal .ir-leftover-all:has(input:disabled) {
+/* A toggle turned off, and its text: `ToggleComponent.setDisabled` marks it
+   `is-disabled` and leaves its input enabled (read from obsidian.asar) */
+.ir-leftover-modal .checkbox-container.is-disabled + label {
   color: var(--text-faint);
   cursor: not-allowed;
 }
 
-.ir-leftover-modal .ir-leftover-keep input[type='checkbox']:disabled,
-.ir-leftover-modal .ir-leftover-all input[type='checkbox']:disabled {
-  cursor: not-allowed;
-}
-
-/* On a phone Obsidian stretches every input in a modal's setting control to
-   its full width (`.is-phone .modal .setting-item-control input`, read from
-   obsidian.asar), checkboxes too, drawing the box as a wide empty field; keep
-   it the size of its own checkbox rule */
-.is-phone
-  .ir-leftover-modal
+/* On a phone Obsidian stretches a modal's setting control to the line
+   (`.is-phone .modal .setting-item-control`) and its selects and buttons to
+   `width: 100%` (`.is-phone .modal .setting-item-control select, ...
+   button:not(.clickable-icon)`, read from obsidian.asar), so the dropdown and
+   the buttons split the line as wide pills. Size them to their content as on
+   desktop; a long option still truncates at the line's width */
+.is-mobile .modal.ir-leftover-modal .setting-item-control select.dropdown,
+.is-mobile
+  .modal.ir-leftover-modal
   .setting-item-control
-  .ir-leftover-keep
-  input[type='checkbox'] {
-  width: var(--checkbox-size);
-  margin: 0;
-  margin-inline-end: 6px;
+  button.ir-leftover-toggle {
+  flex: 0 0 auto;
+  width: auto;
+  max-width: 100%;
 }
 
-/* A phone's line has no room for the text next to the box, which squeezes the
-   dropdown until its type is cut off; "Keep all" over the lines says what the
-   boxes are. Hidden but for screen readers, which name the box by it */
+/* Obsidian rounds mobile inputs and buttons by `--input-radius`, which is
+   their height there (`--touch-radius-m`, 44px), so the dropdown and buttons
+   are full pills, their corners half their height; halve that. Set on the
+   elements, as `--button-radius` is resolved on `body` and won't follow a
+   token changed lower down */
+.is-mobile .modal.ir-leftover-modal .setting-item-control select.dropdown,
+.is-mobile
+  .modal.ir-leftover-modal
+  .setting-item-control
+  button.ir-leftover-toggle {
+  border-radius: calc(var(--input-height) / 4);
+}
+
+/* Obsidian fits a settings dropdown to the option shown: DropdownComponent
+   measures that option in a hidden twin select (`.dropdown.is-measuring`)
+   and sets `--dropdown-fitted-width` on the select, which
+   `.setting-item-control select.dropdown` takes as its width (undocumented,
+   read from obsidian.asar 1.14.5). The phone's `width: 100%` outranks that,
+   and the `width: auto` above undoing it leaves the select as wide as its
+   longest option, "Save as…", so "Article" sits in front of a gap; take the
+   fitted width back. It is measured by script, so it holds on any engine,
+   iOS WebKit included. A build without the variable falls back to `auto`,
+   which `field-sizing` (Chromium 123+, Safari 26.2+) still fits */
+.is-mobile .modal.ir-leftover-modal .setting-item-control select.dropdown {
+  width: var(--dropdown-fitted-width, auto);
+  field-sizing: content;
+}
+
+/* A phone's line has no room for the text next to the toggle, which squeezes
+   the dropdown until its type is cut off; "Keep all" over the lines says what
+   the toggles are. Hidden but for screen readers, which name the toggle by
+   it */
 .is-phone .ir-leftover-modal .ir-leftover-keep-text {
   position: absolute;
   width: 1px;

@@ -1,7 +1,10 @@
 import {
   type Leftover,
   type LeftoverDeps,
+  type LeftoverFailure,
   actionsFor,
+  failureDetail,
+  failureOf,
   findLeftovers,
   holdsItems,
   leftoversMessage,
@@ -18,6 +21,7 @@ import {
   MarkdownRenderer,
   Modal,
   setIcon,
+  ToggleComponent,
 } from 'obsidian';
 
 /** A type a leftover can be saved as from the modal. */
@@ -44,7 +48,7 @@ const FAILED: Readonly<Record<SaveType | 'trash' | 'strip', string>> = {
   article: "Couldn't save this note as an article.",
   snippet: "Couldn't save this note as a snippet.",
   trash: "Couldn't move this note to the trash.",
-  strip: "Couldn't remove this note's IR properties.",
+  strip: "Couldn't remove this note's incremental reading properties.",
 };
 
 /** The folder path of the note at `path`, `''` for the vault root. */
@@ -56,12 +60,12 @@ function folderOf(path: string): string {
 /**
  * One leftover's line in a {@link LeftoverModal}, and what is chosen on it.
  * A note made as a type it can be saved as starts with that type in its
- * "Save as…" dropdown and its "Keep as" box checked, so Confirm saves it as
- * that unless the user changes it; any other starts with no type and the box
- * unchecked, Confirm leaving it be. Unchecking the box leaves a note be,
- * whatever type the dropdown shows; picking a type checks it. The trash or
+ * "Save as…" dropdown and its "Keep as" toggle on, so Confirm saves it as
+ * that unless the user changes it; any other starts with no type and the
+ * toggle off, Confirm leaving it be. Turning the toggle off leaves a note be,
+ * whatever type the dropdown shows; picking a type turns it on. The trash or
  * stripping, while pressed, stands in for keeping it, and taking either back
- * returns the line to the type and box it had before.
+ * returns the line to the type and toggle it had before.
  */
 interface Row {
   leftover: Leftover;
@@ -74,8 +78,8 @@ interface Row {
   /** The type in the line's dropdown, `null` while it shows none. */
   type: SaveType | null;
   /**
-   * Whether the line's "Keep as" box is checked, which it shows only while
-   * the box can be (see {@link keepable}): picking a type checks it.
+   * Whether the line's "Keep as" toggle is on, which it shows only while
+   * the toggle can be (see {@link keepable}): picking a type turns it on.
    */
   kept: boolean;
   /** The trash or stripping, while pressed, in place of keeping the note. */
@@ -93,10 +97,66 @@ function choiceOf({ type, kept, other }: Row): LeftoverChoice | null {
 }
 
 /**
- * Whether `row`'s "Keep as" box can be checked: while its dropdown shows a
+ * Whether `row`'s "Keep as" toggle can be on: while its dropdown shows a
  * type, which it doesn't while the trash or stripping is pressed.
  */
 const keepable = (row: Row) => row.type !== null && row.other === null;
+
+/** A slider toggle that answers the user's flips only (see {@link userToggle}). */
+interface UserToggle {
+  readonly toggle: ToggleComponent;
+  /** Show `on`, turned off if `disabled`, without answering it. */
+  show(on: boolean, disabled: boolean): void;
+}
+
+/** Tells apart the ids {@link userToggle} gives its toggles' inputs. */
+let toggleIds = 0;
+
+/**
+ * An Obsidian slider toggle appended to `parent`, then a label holding `text`
+ * that flips it too, calling `onUser` when the user flips it. Its `setValue`
+ * calls the `onChange` callback too, not only a click or key (read from
+ * obsidian.asar), which would take showing a state worked out elsewhere for
+ * the user's flip.
+ */
+function userToggle(
+  parent: HTMLElement,
+  text: { cls: string; text: string },
+  onUser: (on: boolean) => void
+): UserToggle {
+  const toggle = new ToggleComponent(parent);
+  // Obsidian's toggle is a label around a hidden checkbox, and a label can't
+  // hold another, so the text's label points at that checkbox by id instead:
+  // a click on the text clicks it, and its `change` flips the toggle. The
+  // input isn't public API; markup read from obsidian.asar 1.14.5
+  const input = toggle.toggleEl.querySelector('input');
+  const label = createEl('label', { ...text, parent });
+  if (input) {
+    input.id = `ir-leftover-toggle-${++toggleIds}`;
+    label.htmlFor = input.id;
+  }
+  let showing = false;
+  toggle.onChange((on) => {
+    if (!showing) onUser(on);
+  });
+  return {
+    toggle,
+    show(on, disabled) {
+      showing = true;
+      try {
+        toggle.setValue(on);
+      } finally {
+        showing = false;
+      }
+      toggle.setDisabled(disabled);
+      // Obsidian keeps a disabled toggle in the tab order, though its extra
+      // buttons leave it (read from obsidian.asar); leave it, as a disabled
+      // control would
+      if (disabled) toggle.toggleEl.removeAttribute('tabindex');
+      else toggle.toggleEl.tabIndex = 0;
+    },
+  };
+}
 
 /** A preview open in a {@link LeftoverModal}. */
 interface OpenPreview {
@@ -122,14 +182,11 @@ export class LeftoverModal extends Modal {
   readonly #resolve: (
     leftover: Leftover,
     choice: LeftoverChoice
-  ) => Promise<boolean>;
+  ) => Promise<boolean | LeftoverFailure>;
   #rows: Row[] = [];
   #buttonsEl: HTMLElement | null = null;
-  /**
-   * The box that checks or unchecks every line's "Keep as" box, kept across
-   * openings, as the lines are put back under it each time.
-   */
-  readonly #all = createEl('input', { type: 'checkbox' });
+  /** The toggle that turns every line's "Keep as" toggle on or off. */
+  #all: UserToggle | null = null;
   #confirm: ButtonComponent | null = null;
   /** Whether Confirm is under way. */
   #running = false;
@@ -138,30 +195,32 @@ export class LeftoverModal extends Modal {
   #open: OpenPreview | null = null;
 
   /**
-   * @param resolve does what was chosen for a leftover, answering whether it
-   *   was done
+   * @param resolve does what was chosen for a leftover, answering `true` once
+   *   done; else `false`, or why it failed, which the line's tooltip says
    */
   constructor(
     app: App,
     leftovers: readonly Leftover[],
-    resolve: (leftover: Leftover, choice: LeftoverChoice) => Promise<boolean>
+    resolve: (
+      leftover: Leftover,
+      choice: LeftoverChoice
+    ) => Promise<boolean | LeftoverFailure>
   ) {
     super(app);
     this.#leftovers = leftovers;
     this.#resolve = resolve;
-    this.#all.addEventListener('change', () => this.#keepAll());
   }
 
   onOpen() {
     this.#closed = false;
     this.setTitle('Notes not found in the database');
     this.modalEl.classList.add('ir-leftover-modal');
-    // Above the lines, at the end, over their own boxes
-    createEl('label', {
-      cls: 'ir-leftover-all',
-      text: 'Keep all',
-      parent: this.contentEl,
-    }).prepend(this.#all);
+    // Above the lines, at the end, over their own toggles
+    this.#all = userToggle(
+      createDiv({ cls: 'ir-leftover-all', parent: this.contentEl }),
+      { cls: 'ir-leftover-all-text', text: 'Keep all' },
+      (on) => this.#keepAll(on)
+    );
     this.#rows = this.#leftovers.map((leftover) => this.#addRow(leftover));
     // In `modalEl`, below the content, where Obsidian puts its own
     const buttons = createDiv({
@@ -187,6 +246,7 @@ export class LeftoverModal extends Modal {
     this.#buttonsEl?.remove();
     this.#buttonsEl = null;
     this.#confirm = null;
+    this.#all = null;
     this.#rows = [];
   }
 
@@ -250,32 +310,23 @@ export class LeftoverModal extends Modal {
     const actions = actionsFor(leftover);
     /** Whether the line's controls are turned off. */
     let disabled = false;
-    /** Show what is chosen on the line's "Keep as" box, if it has one. */
+    /** Show what is chosen on the line's "Keep as" toggle, if it has one. */
     let showBox = () => {};
     let dropdown: DropdownComponent | null = null;
     if (actions.includes('adopt')) {
-      // In front of the dropdown, its label a click target too. The text is
-      // its own span, which a phone hides but for screen readers (see
-      // styles.css)
-      const label = createEl('label', {
-        cls: 'ir-leftover-keep',
-        parent: controls,
-      });
-      const input = createEl('input', { type: 'checkbox', parent: label });
-      createSpan({
-        cls: 'ir-leftover-keep-text',
-        text: 'Keep as',
-        parent: label,
-      });
-      // Never fires while no type is shown, as the box is off then
-      input.addEventListener('change', () => {
-        row.kept = input.checked;
-        changed();
-      });
-      showBox = () => {
-        input.checked = keepable(row) && row.kept;
-        input.disabled = disabled || !keepable(row);
-      };
+      // In front of the dropdown, its label's text a click target too,
+      // which a phone hides but for screen readers (see styles.css). Never
+      // flipped while no type is shown, as the toggle is off then
+      const box = userToggle(
+        createDiv({ cls: 'ir-leftover-keep', parent: controls }),
+        { cls: 'ir-leftover-keep-text', text: 'Keep as' },
+        (on) => {
+          row.kept = on;
+          changed();
+        }
+      );
+      showBox = () =>
+        box.show(keepable(row) && row.kept, disabled || !keepable(row));
       dropdown = new DropdownComponent(controls)
         .addOption('', 'Save as…')
         .addOptions(SAVE_TYPES)
@@ -297,11 +348,14 @@ export class LeftoverModal extends Modal {
           row.other = row.other === action ? null : action;
           changed();
         });
+    // Both labelled on the button, never the icon: an aria-label on an SVG
+    // crashes Obsidian's tooltip handler
     const strip = actions.includes('strip')
-      ? toggle('strip').setButtonText('Remove IR properties')
+      ? toggle('strip')
+          .setClass('ir-leftover-strip')
+          .setIcon('paintbrush')
+          .setTooltip('Remove incremental reading properties')
       : null;
-    // Labelled on the button, never the icon: an aria-label on an SVG crashes
-    // Obsidian's tooltip handler
     const trash = actions.includes('trash')
       ? toggle('trash')
           .setIcon('trash-2')
@@ -413,13 +467,12 @@ export class LeftoverModal extends Modal {
   }
 
   /**
-   * Check every line's "Keep as" box that can be, or uncheck them all if
-   * every one is checked already. A line with no type, or with the trash or
-   * stripping pressed, is left as it is.
+   * Turn every line's "Keep as" toggle that can be on, or off, as `keep` says:
+   * the toggle over the lines, flipped. A line with no type, or with the trash
+   * or stripping pressed, is left as it is.
    */
-  #keepAll() {
+  #keepAll(keep: boolean) {
     const rows = this.#rows.filter(keepable);
-    const keep = !rows.every((row) => row.kept);
     for (const row of rows) {
       row.kept = keep;
       row.show();
@@ -429,21 +482,16 @@ export class LeftoverModal extends Modal {
 
   /**
    * Confirm is on while something is chosen and nothing is under way. The
-   * box over the lines is checked while every "Keep as" box that can be is,
-   * unchecked while none is, and indeterminate in between; off while none
-   * can be, or something is under way.
+   * toggle over the lines is on while every "Keep as" toggle that can be is,
+   * so flipping it with only some on turns the rest on; it is turned off
+   * while none can be, or something is under way.
    */
   #update() {
-    const all = this.#all;
     const rows = this.#rows.filter(keepable);
-    const kept = rows.filter((row) => row.kept).length;
-    all.checked = kept > 0 && kept === rows.length;
-    all.indeterminate = kept > 0 && kept < rows.length;
-    // Obsidian's checkbox, drawn by its own CSS, shows the dash for this
-    // attribute set to "true" only, not the `indeterminate` property (read
-    // from obsidian.asar)
-    all.setAttribute('data-indeterminate', String(all.indeterminate));
-    all.disabled = this.#running || rows.length === 0;
+    this.#all?.show(
+      rows.length > 0 && rows.every((row) => row.kept),
+      this.#running || rows.length === 0
+    );
     this.#confirm?.setDisabled(
       this.#running || !this.#rows.some((row) => choiceOf(row))
     );
@@ -463,26 +511,31 @@ export class LeftoverModal extends Modal {
       if (this.#closed) break;
       const choice = choiceOf(row)!;
       row.info.querySelector('.ir-leftover-error')?.remove();
-      let done = false;
+      let outcome: boolean | LeftoverFailure;
       try {
-        done = await this.#resolve(row.leftover, choice);
+        outcome = await this.#resolve(row.leftover, choice);
       } catch (error) {
-        // Failed, as one answering `false` did, or the run would stop here
-        // with every control off
+        // Failed, as one answering why did, or the run would stop here with
+        // every control off
         console.error(
           'Incremental Reading - failed to resolve a leftover note:',
           error
         );
+        outcome = failureOf(error);
       }
-      if (done) {
+      if (outcome === true) {
         if (this.#open?.row === row) this.#closePreview();
         row.el.remove();
         row.preview.remove();
         this.#rows = this.#rows.filter((r) => r !== row);
       } else {
+        // Why, in the tooltip Obsidian draws from aria-label: on this HTML
+        // line, as one on an SVG crashes its tooltip handler
+        const why = outcome ? failureDetail(outcome) : '';
         createDiv({
           cls: 'ir-leftover-error',
           text: FAILED[choice.action === 'adopt' ? choice.as : choice.action],
+          attr: why ? { 'aria-label': why } : {},
           parent: row.info,
         });
       }
@@ -587,17 +640,16 @@ export class LeftoverWatch {
     }
     const { app, repo, managers, onResolved } = this.deps;
     new LeftoverModal(app, this.#current, async (leftover, choice) => {
-      const done = await resolveLeftover(
+      const outcome = await resolveLeftover(
         { app, repo, ...managers() },
         leftover,
         choice.action,
         choice.action === 'adopt' ? choice.as : undefined
       );
-      if (done) {
-        this.#set(this.#current.filter((left) => left !== leftover));
-        await onResolved();
-      }
-      return done;
+      if (!outcome.done) return outcome.failure ?? false;
+      this.#set(this.#current.filter((left) => left !== leftover));
+      await onResolved();
+      return true;
     }).open();
   }
 

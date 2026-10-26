@@ -119,20 +119,23 @@ test('saves only the leftover notes left checked on Confirm', async () => {
     void app.plugins.plugins['incremental-reading'].leftovers?.manage();
   });
 
-  const keep = lineOf('Keep me').locator('input[type="checkbox"]');
-  const leave = lineOf('Leave me').locator('input[type="checkbox"]');
-  // Both recognized by their tag, so both start checked
-  await expect(keep).toBeChecked();
-  await expect(leave).toBeChecked();
-  await leave.uncheck();
+  // Obsidian's slider toggles, on while `is-enabled`
+  const keep = lineOf('Keep me').locator('.checkbox-container');
+  const leave = lineOf('Leave me').locator('.checkbox-container');
+  // Both recognized by their tag, so both start on
+  await expect(keep).toHaveClass(/\bis-enabled\b/);
+  await expect(leave).toHaveClass(/\bis-enabled\b/);
+  // Its label's text flips it too
+  await lineOf('Leave me').locator('.ir-leftover-keep-text').click();
+  await expect(leave).not.toHaveClass(/\bis-enabled\b/);
   await window
     .locator('.ir-leftover-modal .modal-button-container .mod-cta')
     .click();
 
-  // The note saved leaves the list; the one unchecked stays, as it was
+  // The note saved leaves the list; the one turned off stays, as it was
   await expect(lineOf('Keep me')).toHaveCount(0);
   await expect(lineOf('Leave me')).toHaveCount(1);
-  await expect(leave).not.toBeChecked();
+  await expect(leave).not.toHaveClass(/\bis-enabled\b/);
   await window
     .locator('.ir-leftover-modal .modal-button-container .mod-cancel')
     .click();

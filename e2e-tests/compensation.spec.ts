@@ -499,7 +499,7 @@ test.describe('Notes left without review data by a crash', () => {
     await expect(
       window.getByRole('button', { name: 'Move to trash' })
     ).toHaveCount(0);
-    await window.getByRole('button', { name: 'Remove IR properties' }).click();
+    await window.locator('.ir-leftover-modal .ir-leftover-strip').click();
     await window.getByRole('button', { name: 'Confirm' }).click();
 
     await expect
