@@ -51,6 +51,33 @@ export interface Leftover {
   kind: LeftoverKind;
 }
 
+/**
+ * A row holding a note's path as its `reference`, deleted (a tombstone not
+ * purged) or not: see {@link findPathHolder}.
+ */
+export interface PathHolder {
+  kind: NoteType;
+  id: string;
+  deleted: boolean;
+}
+
+/**
+ * Why a leftover's action was not done: another row holds its note's path,
+ * so a row for it can't be added there (`held`); or the action threw.
+ */
+export type LeftoverFailure =
+  | { reason: 'held'; holder: PathHolder }
+  | { reason: 'error'; message: string };
+
+/**
+ * What came of resolving a leftover: done, or not, with why when it failed.
+ * One not done for no failure was left be: no longer a leftover, of no type to
+ * adopt it as, or with writes refused (which says so itself).
+ */
+export type LeftoverOutcome =
+  | { done: true }
+  | { done: false; failure?: LeftoverFailure };
+
 /** What can be done with a leftover: see {@link actionsFor}. */
 export type LeftoverAction = 'adopt' | 'trash' | 'strip';
 
@@ -64,6 +91,12 @@ export interface LeftoverDeps {
 }
 
 const ITEM_TABLES = ['article', 'snippet', 'srs_card'] as const;
+const KIND_OF_TABLE: Readonly<Record<(typeof ITEM_TABLES)[number], NoteType>> =
+  {
+    article: 'article',
+    snippet: 'snippet',
+    srs_card: 'card',
+  };
 const TAG_OF: Readonly<Record<NoteType, string>> = {
   article: ARTICLE_TAG,
   snippet: SNIPPET_TAG,
@@ -113,7 +146,7 @@ function placeOf(
 const DOING: Readonly<Record<LeftoverAction, (name: string) => string>> = {
   adopt: (name) => `keep ${name} as an item`,
   trash: (name) => `move ${name} to the trash`,
-  strip: (name) => `remove the IR properties from ${name}`,
+  strip: (name) => `remove the incremental reading properties from ${name}`,
 };
 
 /** Whether the database holds any item at all. */
@@ -150,6 +183,66 @@ async function heldIds(
     }
   }
   return held;
+}
+
+/**
+ * The row whose `reference` is `path`, of any item table, deleted or not: a
+ * row for another note can't be added at `path` while it is there, as each
+ * table's `reference` is unique, and one in another table would point a
+ * second item at the same note. A purged row's reference is no path (see
+ * `NOT_PURGED`), so never matches.
+ * @throws if the item tables cannot be read
+ */
+export async function findPathHolder(
+  repo: SQLiteRepository,
+  path: string
+): Promise<PathHolder | null> {
+  for (const table of ITEM_TABLES) {
+    const [row] = (await repo.query(
+      `SELECT id, deleted FROM ${table} WHERE reference = $1 LIMIT 1`,
+      [path],
+      { throwOnError: true }
+    )) as unknown as { id: string; deleted: number | boolean }[];
+    if (row) {
+      return { kind: KIND_OF_TABLE[table], id: row.id, deleted: !!row.deleted };
+    }
+  }
+  return null;
+}
+
+/**
+ * The failure of an action that threw `error`, saying what went wrong: an
+ * error's message, or, with none, its name; anything else thrown, as text.
+ */
+export function failureOf(error: unknown): LeftoverFailure {
+  if (!(error instanceof Error))
+    return { reason: 'error', message: String(error) };
+  const { message, name } = error;
+  return { reason: 'error', message: message.trim() ? message : name };
+}
+
+/** The short form of the id `id`, as the user is shown it. */
+const shortId = (id: string) => id.slice(0, 8);
+
+/**
+ * Why `failure` happened, as the user is told: for a held path, which row
+ * holds it and what to do about it; else the first line of what went wrong,
+ * `''` if it says nothing.
+ */
+export function failureDetail(failure: LeftoverFailure): string {
+  if (failure.reason === 'error') {
+    // Its first line with any text: a stack, say, can follow
+    const line = failure.message.split('\n').find((text) => text.trim());
+    return line?.trim() ?? '';
+  }
+  const { kind, id, deleted } = failure.holder;
+  const short = shortId(id);
+  return (
+    `Another item's record already points at this note's path: ` +
+    `${deleted ? 'a deleted' : 'an existing'} ${kind}, id ${short}. ` +
+    `Move this note to save it as a new item, or set its ir-id to ${id} to make it that item. ` +
+    'A later version will offer to resolve this here.'
+  );
 }
 
 /**
@@ -247,24 +340,37 @@ async function adopt(
  * database, say. Says so when it fails, or when writes are refused.
  * @param as for `adopt`, the type to keep it as, the user's choice: by
  *   default the one it was made as; with neither, it isn't adopted
- * @returns whether it was done
+ * Adopting a note whose path another row holds fails before anything is
+ * written, saying which row (see {@link findPathHolder}).
+ * @returns whether it was done, and why not when it failed
  */
 export async function resolveLeftover(
   deps: LeftoverDeps,
   leftover: Leftover,
   action: LeftoverAction,
   as: NoteType | null = leftover.type
-): Promise<boolean> {
+): Promise<LeftoverOutcome> {
   const { app, repo } = deps;
   const { file, id, type } = leftover;
   // A note of no known type is adopted only as a type the user chose
-  if (action === 'adopt' && !as) return false;
+  if (action === 'adopt' && !as) return { done: false };
   const what = DOING[action](`"${file.basename}"`);
-  if (await refusedWrite(repo, what)) return false;
+  if (await refusedWrite(repo, what)) return { done: false };
   try {
     const claim =
       app.vault.getFileByPath(file.path) === file ? claimOf(app, file) : null;
-    if (claim?.id !== id || (await heldIds(repo, [id])).size > 0) return false;
+    if (claim?.id !== id || (await heldIds(repo, [id])).size > 0) {
+      return { done: false };
+    }
+    const holder =
+      action === 'adopt' ? await findPathHolder(repo, file.path) : null;
+    if (holder) {
+      console.warn(
+        `Incremental Reading - can't ${what}: another row holds its path`,
+        holder
+      );
+      return failed(what, { reason: 'held', holder });
+    }
     if (action === 'trash') {
       await app.fileManager.trashFile(file);
     } else if (action === 'strip') {
@@ -286,10 +392,18 @@ export async function resolveLeftover(
     } else if (as) {
       await adopt(deps, file, id, as);
     }
-    return true;
+    return { done: true };
   } catch (error) {
     console.error(error);
-    Obsidian.notify(`Couldn't ${what}`, { kind: 'error' });
-    return false;
+    return failed(what, failureOf(error));
   }
+}
+
+/** Tell the user doing `what` failed, and why, and answer so. */
+function failed(what: string, failure: LeftoverFailure): LeftoverOutcome {
+  const detail = failureDetail(failure);
+  Obsidian.notify(`Couldn't ${what}${detail ? `. ${detail}` : ''}`, {
+    kind: 'error',
+  });
+  return { done: false, failure };
 }

@@ -497,6 +497,61 @@ export class DropdownComponent {
     return this;
   }
 }
+/**
+ * A slider toggle as Obsidian builds it (read from obsidian.asar 1.14.5): a
+ * `label.checkbox-container` (tabindex 0) around a hidden
+ * `input[type=checkbox]` (tabindex -1), appended to its container. A `change`
+ * bubbling up from the input, or Space or Enter on the label, flips the value
+ * unless disabled; `is-enabled` follows the value and `is-disabled` the
+ * disabled state, the input itself never disabled. `setValue` calls the
+ * `onChange` callback whenever the value changes, the user's or not. Leaves
+ * out the vibration on a flip.
+ */
+export class ToggleComponent {
+  readonly toggleEl: HTMLElement;
+  disabled = false;
+  #on = false;
+  #callback: ((value: boolean) => unknown) | null = null;
+
+  constructor(containerEl: HTMLElement) {
+    this.toggleEl = containerEl.appendChild(document.createElement('label'));
+    this.toggleEl.className = 'checkbox-container';
+    this.toggleEl.tabIndex = 0;
+    const input = this.toggleEl.appendChild(document.createElement('input'));
+    input.type = 'checkbox';
+    input.tabIndex = -1;
+    this.toggleEl.addEventListener('change', () => this.onClick());
+    this.toggleEl.addEventListener('keydown', (evt) => {
+      if (evt.key !== ' ' && evt.key !== 'Enter') return;
+      evt.preventDefault();
+      this.onClick();
+    });
+  }
+
+  getValue() {
+    return this.#on;
+  }
+  setValue(on: boolean) {
+    if (this.#on !== on) {
+      this.#on = on;
+      this.toggleEl.classList.toggle('is-enabled', on);
+      this.#callback?.(on);
+    }
+    return this;
+  }
+  setDisabled(disabled: boolean) {
+    this.disabled = disabled;
+    this.toggleEl.classList.toggle('is-disabled', disabled);
+    return this;
+  }
+  onClick() {
+    if (!this.disabled) this.setValue(!this.getValue());
+  }
+  onChange(callback: (value: boolean) => unknown) {
+    this.#callback = callback;
+    return this;
+  }
+}
 /** Only what `RelinkModal` reaches: a modal that lists items to pick from. */
 export class FuzzySuggestModal<T> extends Modal {
   placeholder = '';

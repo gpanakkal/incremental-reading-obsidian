@@ -15,6 +15,8 @@ import {
 import {
   type Leftover,
   actionsFor,
+  failureDetail,
+  failureOf,
   findLeftovers,
   leftoversMessage,
   resolveLeftover,
@@ -397,6 +399,33 @@ describe('leftoversMessage', () => {
   });
 });
 
+describe('failureOf', () => {
+  it('says what was thrown by its first line with any text, whatever was thrown', () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.constantFrom('', ' ', '\t'), { maxLength: 3 }),
+        fc
+          .string({ minLength: 1 })
+          .filter((s) => s.trim() !== '' && !s.includes('\n')),
+        fc.array(fc.string(), { maxLength: 3 }),
+        fc.boolean(),
+        (blanks, line, rest, asError) => {
+          const message = [...blanks, line, ...rest].join('\n');
+          const failure = failureOf(asError ? new Error(message) : message);
+
+          expect(failureDetail(failure)).toBe(line.trim());
+        }
+      )
+    );
+  });
+
+  it('says what was thrown with no message by its kind, never by nothing', () => {
+    for (const thrown of [new Error(''), new TypeError('\n ')]) {
+      expect(failureDetail(failureOf(thrown))).toBe(thrown.name);
+    }
+  });
+});
+
 describe('resolveLeftover', () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -409,7 +438,9 @@ describe('resolveLeftover', () => {
         const path = `${DATA_DIRECTORY}/x/a.md`;
         const { vault, repo, deps, leftover } = await wireLeftover(type, path);
 
-        expect(await resolveLeftover(deps, leftover, 'adopt')).toBe(true);
+        expect(await resolveLeftover(deps, leftover, 'adopt')).toEqual({
+          done: true,
+        });
 
         const rows = repo.rows(TABLE_OF[type]);
         expect(rows).toHaveLength(1);
@@ -478,7 +509,9 @@ describe('resolveLeftover', () => {
       `${DATA_DIRECTORY}/x/a.md`
     );
 
-    expect(await resolveLeftover(deps, leftover, 'trash')).toBe(true);
+    expect(await resolveLeftover(deps, leftover, 'trash')).toEqual({
+      done: true,
+    });
 
     expect(vault.trashed).toEqual([`${DATA_DIRECTORY}/x/a.md`]);
     expect(repo.rows('snippet')).toEqual([]);
@@ -514,7 +547,9 @@ describe('resolveLeftover', () => {
           };
           const [leftover] = await findLeftovers(deps);
 
-          expect(await resolveLeftover(deps, leftover, 'strip')).toBe(true);
+          expect(await resolveLeftover(deps, leftover, 'strip')).toEqual({
+            done: true,
+          });
 
           const kept = asString ? [] : tags.slice(0, -1);
           expect(vault.frontmatterOf(path)).toEqual({
@@ -535,7 +570,9 @@ describe('resolveLeftover', () => {
       const path = `${Obsidian.getDirectory(type)}/a.md`;
       const { vault, repo, deps, leftover } = await wireLeftover(null, path);
 
-      expect(await resolveLeftover(deps, leftover, 'adopt')).toBe(true);
+      expect(await resolveLeftover(deps, leftover, 'adopt')).toEqual({
+        done: true,
+      });
 
       expect(repo.rows(TABLE_OF[type])).toMatchObject([
         { id: 'left-1', reference: path },
@@ -565,7 +602,9 @@ describe('resolveLeftover', () => {
         path
       );
 
-      expect(await resolveLeftover(deps, leftover, 'adopt', as)).toBe(true);
+      expect(await resolveLeftover(deps, leftover, 'adopt', as)).toEqual({
+        done: true,
+      });
 
       for (const type of Object.keys(TABLE_OF) as NoteType[]) {
         expect(repo.rows(TABLE_OF[type])).toMatchObject(
@@ -609,7 +648,9 @@ describe('resolveLeftover', () => {
       );
       const update = vi.spyOn(Obsidian, 'updateFrontMatter');
 
-      expect(await resolveLeftover(deps, leftover, 'adopt', as)).toBe(true);
+      expect(await resolveLeftover(deps, leftover, 'adopt', as)).toEqual({
+        done: true,
+      });
 
       expect(update).toHaveBeenCalledTimes(written === null ? 0 : 1);
       expect(vault.frontmatterOf(path)?.tags).toEqual(written ?? tags);
@@ -622,7 +663,9 @@ describe('resolveLeftover', () => {
       const path = 'notes/a.md';
       const { vault, repo, deps, leftover } = await wireLeftover(null, path);
 
-      expect(await resolveLeftover(deps, leftover, 'adopt', as)).toBe(true);
+      expect(await resolveLeftover(deps, leftover, 'adopt', as)).toEqual({
+        done: true,
+      });
 
       for (const type of Object.keys(TABLE_OF) as NoteType[]) {
         expect(repo.rows(TABLE_OF[type])).toMatchObject(
@@ -644,7 +687,9 @@ describe('resolveLeftover', () => {
       path
     );
 
-    expect(await resolveLeftover(deps, leftover, 'adopt')).toBe(false);
+    expect(await resolveLeftover(deps, leftover, 'adopt')).toEqual({
+      done: false,
+    });
 
     for (const table of Object.values(TABLE_OF)) {
       expect(repo.rows(table)).toEqual([]);
@@ -679,7 +724,9 @@ describe('resolveLeftover', () => {
           } as never;
           const [leftover] = await findLeftovers(deps);
 
-          expect(await resolveLeftover(deps, leftover, 'strip')).toBe(true);
+          expect(await resolveLeftover(deps, leftover, 'strip')).toEqual({
+            done: true,
+          });
 
           expect(vault.frontmatterOf(path)).toEqual(
             tags === undefined ? {} : { tags }
@@ -694,7 +741,9 @@ describe('resolveLeftover', () => {
     const path = `${DATA_DIRECTORY}/a.md`;
     const { vault, deps, leftover } = await wireLeftover(null, path);
 
-    expect(await resolveLeftover(deps, leftover, 'trash')).toBe(true);
+    expect(await resolveLeftover(deps, leftover, 'trash')).toEqual({
+      done: true,
+    });
 
     expect(vault.trashed).toEqual([path]);
   });
@@ -710,7 +759,9 @@ describe('resolveLeftover', () => {
       // A row for it arrived meanwhile, say with the database from Sync
       insertRow(repo, 'snippet', 'left-1', 'elsewhere.md');
 
-      expect(await resolveLeftover(deps, leftover, action)).toBe(false);
+      expect(await resolveLeftover(deps, leftover, action)).toEqual({
+        done: false,
+      });
 
       expect(vault.paths()).toEqual([path]);
       expect(vault.frontmatterOf(path)?.['ir-id']).toBe('left-1');
@@ -738,7 +789,9 @@ describe('resolveLeftover', () => {
         }
         const paths = vault.paths();
 
-        expect(await resolveLeftover(deps, leftover, action)).toBe(false);
+        expect(await resolveLeftover(deps, leftover, action)).toEqual({
+          done: false,
+        });
 
         expect(vault.paths()).toEqual(paths);
         expect(vault.trashed).toEqual([]);
@@ -754,7 +807,9 @@ describe('resolveLeftover', () => {
     );
     repo.refuseWrites(new Error('Saving is paused.'));
 
-    expect(await resolveLeftover(deps, leftover, 'adopt')).toBe(false);
+    expect(await resolveLeftover(deps, leftover, 'adopt')).toEqual({
+      done: false,
+    });
 
     expect(repo.rows('snippet')).toEqual([]);
     expect(vault.paths()).toHaveLength(1);
@@ -776,7 +831,9 @@ describe('resolveLeftover', () => {
       );
       deps.repo.refuseWrites(new Error('Saving is paused.'));
 
-      expect(await resolveLeftover(deps, leftover, action)).toBe(false);
+      expect(await resolveLeftover(deps, leftover, action)).toEqual({
+        done: false,
+      });
 
       expect(vault.trashed).toEqual([]);
       expect(notify).toHaveBeenCalledExactlyOnceWith(expect.any(String), {
@@ -797,11 +854,118 @@ describe('resolveLeftover', () => {
     );
     vault.fail('trash');
 
-    expect(await resolveLeftover(deps, leftover, 'trash')).toBe(false);
+    expect(await resolveLeftover(deps, leftover, 'trash')).toMatchObject({
+      done: false,
+      failure: { reason: 'error' },
+    });
 
     expect(notify).toHaveBeenCalledExactlyOnceWith(
       expect.stringContaining('Quokka'),
       { kind: 'error' }
     );
+  });
+
+  it('adopts nothing, and writes nothing, when another row holds its path, deleted or not, and says which row', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        typeArb,
+        typeArb,
+        fc.boolean(),
+        fc.uuid(),
+        fc.constantFrom<NoteType | null>(null, 'article', 'snippet', 'card'),
+        async (as, kind, deleted, holderId, taggedAs) => {
+          vi.restoreAllMocks();
+          const path = `${DATA_DIRECTORY}/x/a.md`;
+          const { vault, repo, deps, leftover, notify } = await wireLeftover(
+            taggedAs,
+            path
+          );
+          insertRow(repo, kind, holderId, path, deleted);
+          const stored = repo.dump();
+          const frontmatter = structuredClone(vault.frontmatterOf(path));
+          const mutate = vi.spyOn(repo, 'mutate');
+          const warn = vi.spyOn(console, 'warn').mockReturnValue(undefined);
+
+          const outcome = await resolveLeftover(deps, leftover, 'adopt', as);
+
+          const holder = { kind, id: holderId, deleted };
+          expect(outcome).toEqual({
+            done: false,
+            failure: { reason: 'held', holder },
+          });
+          expect(mutate).not.toHaveBeenCalled();
+          expect(repo.dump()).toBe(stored);
+          expect(vault.frontmatterOf(path)).toEqual(frontmatter);
+          expect(warn).toHaveBeenCalledExactlyOnceWith(
+            expect.any(String),
+            holder
+          );
+          expect(notify).toHaveBeenCalledExactlyOnceWith(
+            expect.stringContaining(holderId.slice(0, 8)),
+            { kind: 'error' }
+          );
+          const [message] = notify.mock.calls[0];
+          expect(message).toContain(kind);
+          expect(/deleted/.test(message)).toBe(deleted);
+        }
+      ),
+      { numRuns: 20 }
+    );
+  });
+
+  it('adopts a leftover when other rows hold only other paths, one differing from its own only in case', async () => {
+    for (const type of ['article', 'snippet', 'card'] as const) {
+      vi.restoreAllMocks();
+      const path = `${DATA_DIRECTORY}/x/a.md`;
+      const { repo, deps, leftover } = await wireLeftover(type, path);
+      insertRow(repo, type, 'other-1', path.toUpperCase(), true);
+      insertRow(repo, type, 'other-2', `${path}.md`);
+
+      expect(await resolveLeftover(deps, leftover, 'adopt')).toEqual({
+        done: true,
+      });
+
+      expect(repo.rows(TABLE_OF[type])).toContainEqual(
+        expect.objectContaining({ id: 'left-1', reference: path })
+      );
+    }
+  });
+
+  it('trashes or strips a leftover whose path another row holds, as neither adds a row', async () => {
+    for (const action of ['trash', 'strip'] as const) {
+      vi.restoreAllMocks();
+      const path = `${DATA_DIRECTORY}/x/a.md`;
+      const { repo, deps, leftover } = await wireLeftover('snippet', path);
+      insertRow(repo, 'article', 'held-1', path, true);
+
+      expect(await resolveLeftover(deps, leftover, action)).toEqual({
+        done: true,
+      });
+    }
+  });
+
+  it('fails with what went wrong when adopting throws, and says it', async () => {
+    for (const thrown of [new Error('Disk full\n  at write'), 'Disk full']) {
+      vi.restoreAllMocks();
+      const { deps, leftover, notify } = await wireLeftover(
+        'article',
+        'notes/Quokka.md'
+      );
+      vi.spyOn(deps.articles, 'adoptLeftover').mockRejectedValue(thrown);
+
+      const outcome = await resolveLeftover(deps, leftover, 'adopt');
+
+      expect(outcome).toEqual({
+        done: false,
+        failure: {
+          reason: 'error',
+          message: thrown instanceof Error ? thrown.message : thrown,
+        },
+      });
+      const [message] = notify.mock.calls[0];
+      expect(message).toContain('Quokka');
+      expect(message).toContain('Disk full');
+      expect(message).not.toContain('at write');
+    }
   });
 });
