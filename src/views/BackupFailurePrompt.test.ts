@@ -34,6 +34,24 @@ function noticesInDocument() {
   return container;
 }
 
+/**
+ * A second window, like Obsidian's settings window (1.13+), holding the next
+ * notice raised: Obsidian puts one on `activeWindow`, which is that window
+ * while it is open.
+ */
+function nextNoticeInAnotherWindow() {
+  const frame = document.body.createEl('iframe');
+  const doc = frame.contentDocument!;
+  const container = doc.body.appendChild(doc.createElement('div'));
+  container.className = 'notice-container';
+  vi.mocked(notices.notify).mockImplementationOnce((message) => {
+    const notice = new Notice(message, 0);
+    container.appendChild(notice.containerEl);
+    return notice as never;
+  });
+  return { win: frame.contentWindow!, doc };
+}
+
 /** Open and close modals as Obsidian does (see `ConfirmModal.test.ts`). */
 function wireModalLifecycle() {
   const open = vi.spyOn(Modal.prototype, 'open').mockImplementation(function (
@@ -244,5 +262,54 @@ describe('createBackupFailurePrompt', () => {
     expect(notice.messageEl.textContent).toMatch(/full/);
     retry.click();
     expect(await outcome(answer)).toBe('retry');
+  });
+
+  it('stays a single notice while other notices come and go beside it', async () => {
+    const prompt = createBackupFailurePrompt(APP);
+    void prompt.ask(coded('ENOSPC'));
+    const container = latest().notice.containerEl.parentElement!;
+
+    container.createDiv('notice').remove(); // another notice, shown and hidden
+    await new Promise((resolve) => setTimeout(resolve));
+
+    expect(Notice.instances).toHaveLength(1);
+  });
+
+  it('raises nothing again when the main window it is on hides its page', async () => {
+    const prompt = createBackupFailurePrompt(APP);
+    void prompt.ask(coded('ENOSPC'));
+
+    window.dispatchEvent(new Event('pagehide')); // Obsidian quitting
+    await new Promise((resolve) => setTimeout(resolve));
+
+    expect(Notice.instances).toHaveLength(1);
+  });
+
+  it('raises the notice again on the main window when the window it went to closes', async () => {
+    const away = nextNoticeInAnotherWindow();
+    const prompt = createBackupFailurePrompt(APP);
+    const answer = prompt.ask(coded('ENOSPC'));
+    expect(latest().notice.containerEl.ownerDocument).toBe(away.doc);
+
+    away.win.dispatchEvent(new Event('pagehide'));
+    await vi.waitFor(() => expect(Notice.instances).toHaveLength(2));
+
+    const { notice, retry } = latest();
+    expect(notice.containerEl.ownerDocument).toBe(document);
+    expect(notice.messageEl.textContent).toMatch(/full/);
+    retry.click();
+    expect(await outcome(answer)).toBe('retry');
+  });
+
+  it('raises nothing again once closed, when the window the notice went to closes', async () => {
+    const away = nextNoticeInAnotherWindow();
+    const prompt = createBackupFailurePrompt(APP);
+    void prompt.ask(coded('ENOSPC'));
+
+    prompt.close();
+    away.win.dispatchEvent(new Event('pagehide'));
+    await new Promise((resolve) => setTimeout(resolve));
+
+    expect(Notice.instances).toHaveLength(1);
   });
 });
