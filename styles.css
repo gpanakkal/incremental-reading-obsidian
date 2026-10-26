@@ -171,6 +171,87 @@ body {
   background-color: var(--ir-transclusion-tint);
 }
 
+/* A card of more than one paragraph renders as the block it is.
+
+   Everything above flattens for the one-sentence card that has to sit on its
+   bullet's line. Flattened, a card of several paragraphs runs them together
+   into one: an inline `<p>` has no line break of its own and no margins. No
+   inline arrangement keeps several paragraphs apart and still fits on the
+   host's line, so such a card gives up the inline flow altogether and takes
+   the shape of an ordinary embed: one block, tinted, with the accent rule
+   down its side (the embed's own border, or the host's rule where the
+   transclusion has a host, both as above).
+
+   The gate counts paragraphs, not sections, to leave mixed cards as they are:
+   one paragraph with a code block or list keeps its text in the sentence and
+   its block on the wrapper rule above. `:has()` cannot nest, so "two sections
+   that each hold a `<p>`" cannot be written structurally; `.el-p` is
+   Obsidian's class for a paragraph section and the one way to say it.
+   Undocumented, but generic: the preview renderer stamps every section it
+   renders with `el-` plus its first child's tag (read from 1.14's `app.js`),
+   and Obsidian's own stylesheet selects `.el-p` for heading spacing. Should
+   it ever go, a card of top-level paragraphs falls back to the flattened run
+   it had before, and core.spec.ts › Card embeds says so. A structural
+   "two content sections" gate is no substitute: one paragraph plus a code
+   block is two sections too. `p ~ p` adds the
+   paragraphs that share a parent: a quote, callout or loose list item of
+   several, where the flattening rule's descendant `p` reached too.
+
+   Safe for the iOS gate on the sizer: the sections this counts arrive only in
+   the renderer's first pass, so before that pass the embed is still inline and
+   the `min-height: 1px` floor still does its job; after it, a block sizer
+   measures wide in every engine.
+
+   The wrapper rule's padding and tint go too: they exist to give a block child
+   back what the inline chain could not, and here the embed itself is a block
+   that already has both. */
+.internal-embed[alt*='ir-hide-title']:has(
+    .markdown-preview-section > .el-p ~ .el-p,
+    .markdown-preview-section > div:not(.mod-ui) p ~ p
+  ),
+.internal-embed[alt*='ir-hide-title']:has(
+    .markdown-preview-section > .el-p ~ .el-p,
+    .markdown-preview-section > div:not(.mod-ui) p ~ p
+  )
+  :is(
+    .markdown-embed-content,
+    .markdown-preview-view,
+    .markdown-preview-sizer,
+    .markdown-preview-section > div:not(.mod-ui),
+    p
+  ) {
+  display: block;
+}
+
+.internal-embed[alt*='ir-hide-title']:has(
+    .markdown-preview-section > .el-p ~ .el-p,
+    .markdown-preview-section > div:not(.mod-ui) p ~ p
+  )
+  .markdown-preview-section
+  > div:not(.mod-ui) {
+  padding-inline-start: 0;
+  background-color: transparent;
+}
+
+/* Paragraph spacing between the card's own blocks, whatever the host does to
+   `<p>` margins: a list item zeroes them (Obsidian's list styling), which left
+   the paragraphs of a card in a bullet on consecutive lines with no gap.
+   Elsewhere this collapses into the margins the paragraphs already have, so it
+   adds nothing. Counted from the second content section: the pusher and the
+   chrome sections are excluded on the left, the chrome on the right. */
+.internal-embed[alt*='ir-hide-title']:has(
+    .markdown-preview-section > .el-p ~ .el-p,
+    .markdown-preview-section > div:not(.mod-ui) p ~ p
+  )
+  :is(
+    .markdown-preview-section
+      > div:not(.mod-ui, .markdown-preview-pusher)
+      + div:not(.mod-ui),
+    p + p
+  ) {
+  margin-block-start: var(--p-spacing, 1rem);
+}
+
 /* `.cm-line` is already relative in Live Preview. The reading-view hosts are
    not, so promote them — but only the ones holding a transclusion, since this
    changes what every absolutely positioned descendant resolves against.
@@ -243,6 +324,36 @@ body {
   > .internal-embed[alt*='ir-hide-title']
   > .markdown-embed-link {
   top: var(--ir-embed-link-top, 4px);
+}
+
+/* A card that renders as a block (see the multi-paragraph rule above) is one
+   rect, so the measured "first row" is the whole block and the button would
+   center on it. Put it on the block's top corner instead: the rule's measured
+   top is that block's top, in the same host-line pixels, and 4px is the
+   offset Obsidian's own `.markdown-embed-link` rule gives the button from an
+   embed's top (a literal in its stylesheet, no token to read). */
+.markdown-source-view.mod-cm6
+  .cm-line
+  > .internal-embed[alt*='ir-hide-title']:has(
+    .markdown-preview-section > .el-p ~ .el-p,
+    .markdown-preview-section > div:not(.mod-ui) p ~ p
+  )
+  > .markdown-embed-link {
+  top: calc(var(--ir-embed-rule-top, 0px) + 4px);
+}
+
+/* Reading view has no measured rule to borrow a top from, and the host's
+   corner is the wrong one here: a block card after text in its bullet starts
+   on the row below that text, so the button would sit beside the text rather
+   than on the card. The block embed is its own corner. Reading view only:
+   in Live Preview the rule above is a pseudo-element of the embed, placed in
+   host-line pixels, and must keep resolving against the line. */
+.markdown-rendered
+  .internal-embed[alt*='ir-hide-title']:has(
+    .markdown-preview-section > .el-p ~ .el-p,
+    .markdown-preview-section > div:not(.mod-ui) p ~ p
+  ) {
+  position: relative;
 }
 
 /* No `:has()` on either branch: the child combinator already implies it.
@@ -1542,11 +1653,22 @@ body:not(.is-mobile) .ir-review-interface .ir-card-editor .ir-review-scroller {
   padding-top: 100px;
 }
 
-/* Account for the static tab header on mobile in CardViewer */
+/* Account for the static tab header on mobile in CardViewer.
+
+   Only the tab's own preview, never one nested in an embed: every embed's
+   preview renderer brings a `.markdown-preview-view` of its own, and this
+   clearance (safe area, header and 16px, around 120px on an iPhone) would
+   open a gap that tall above the embed's first line. A card embed of several
+   paragraphs, which renders as a block, showed it twice: once above, and once
+   below, because the renderer measures each section as the distance to the
+   next section's top and a hidden header section reads its top as 0, so the
+   padding went into the `min-height` it writes on the sizer too
+   (`measureSection` in Obsidian 1.14's `app.js`; undocumented). A flattened
+   embed hid both, its inline preview taking no room for padding. */
 .is-phone
   .mod-root
   .workspace-leaf-content[data-type='incremental-reading-review']
-  .markdown-preview-view {
+  .markdown-preview-view:not(.markdown-embed .markdown-preview-view) {
   padding-top: var(--view-top-spacing-markdown);
 }
 

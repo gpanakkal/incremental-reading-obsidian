@@ -1521,6 +1521,41 @@ test.describe('Card embeds', () => {
       }).toPass({ timeout: 15_000 });
     }
   });
+
+  test('show each paragraph of a card of several on rows of its own', async () => {
+    // In a bullet, where the host also zeroes paragraph margins
+    await window.evaluate(async () => {
+      const { app } = window as unknown as { app: App };
+      await app.vault.create(
+        'Two-paragraph card.md',
+        'The first paragraph.\n\nThe second paragraph.'
+      );
+      const host = await app.vault.create(
+        'Two-paragraph host.md',
+        '- Bullet: ![[Two-paragraph card|ir-hide-title]]'
+      );
+      await app.workspace
+        .getLeaf('tab')
+        .openFile(host, { active: true, state: { mode: 'preview' } });
+    });
+    const embed = window.locator(
+      '.workspace-leaf.mod-active .markdown-reading-view .internal-embed[alt*="ir-hide-title"].is-loaded'
+    );
+
+    // The gap between the first paragraph's bottom and the second's top:
+    // flattened inline, the second starts on the first's row. Polled because
+    // `.is-loaded` lands before the transcluded markdown is in the tree.
+    await expect
+      .poll(() =>
+        embed.evaluate((el) => {
+          const [first, second] = Array.from(el.querySelectorAll('p'))
+            .map((p) => p.getBoundingClientRect())
+            .filter((rect) => rect.height > 0);
+          return first && second ? second.top - first.bottom : null;
+        })
+      )
+      .toBeGreaterThan(0);
+  });
 });
 
 test.describe('Highlights past the note’s end', () => {

@@ -116,3 +116,116 @@ test('the floor gives way to the inline flow once the first pass has run', async
   });
   expect(await passesRenderGuard(page)).toBe(true);
 });
+
+for (const where of ['standalone', 'after text on its line'] as const) {
+  test(`a card embed of two paragraphs ${where} renders as a block once the first pass has run`, async ({
+    page,
+  }) => {
+    await mount(page, HOSTS[where]);
+
+    const layout = await page.evaluate(() => {
+      const sizer = document.querySelector<HTMLElement>(
+        '.markdown-preview-sizer'
+      )!;
+      sizer.style.minHeight = '88px';
+      sizer.innerHTML =
+        '<div class="markdown-preview-pusher" style="width: 1px; height: 0.1px"></div>' +
+        '<div class="el-p"><p>The first paragraph.</p></div>' +
+        '<div class="el-p"><p>The second paragraph.</p></div>';
+      const display = (selector: string) =>
+        getComputedStyle(document.querySelector(selector)!).display;
+      const [first, second] = Array.from(document.querySelectorAll('p')).map(
+        (p) => p.getBoundingClientRect()
+      );
+      return {
+        previewView: display('.markdown-preview-view'),
+        sizer: display('.markdown-preview-sizer'),
+        section: display('.el-p'),
+        rowsApart: second.top >= first.bottom,
+      };
+    });
+
+    expect(layout).toEqual({
+      previewView: 'block',
+      sizer: 'block',
+      section: 'block',
+      rowsApart: true,
+    });
+    expect(await passesRenderGuard(page)).toBe(true);
+  });
+}
+
+/**
+ * The review tab on a phone, reading view: a card embed on its own line in an
+ * article. Obsidian puts a transclusion in reading view inside the line's `<p>`.
+ * `--view-top-spacing-markdown` is Obsidian's clearance under the floating
+ * phone header (safe area + header + 16px): around 120px on an iPhone.
+ */
+const PHONE_REVIEW = `
+  <div class="is-phone" style="--view-top-spacing-markdown: 123px">
+    <div class="mod-root">
+      <div class="workspace-leaf-content" data-type="incremental-reading-review">
+        <div class="markdown-reading-view">
+          <div class="markdown-preview-view markdown-rendered">
+            <div class="markdown-preview-sizer markdown-preview-section">
+              <div class="el-p"><p class="ir-transclusion-host"></p></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>`;
+
+test('a card embed of two paragraphs in the phone review tab hugs its text', async ({
+  page,
+}) => {
+  await mount(page, PHONE_REVIEW);
+  // Obsidian's app CSS drops the outer margins of a preview's first and last
+  // paragraphs; the browser's default `p` margins would otherwise count here.
+  await page.addStyleTag({
+    content: `
+      .markdown-rendered > .markdown-preview-section > .mod-ui + div:not(.mod-ui) > :first-child { margin-top: 0; }
+      .markdown-rendered > .markdown-preview-section > div:last-child > :last-child { margin-bottom: 0; }`,
+  });
+
+  const slack = await page.evaluate((embed) => {
+    // Through the fragment parser, so the embed's blocks stay inside the `<p>`
+    // as Obsidian's DOM calls put them, where markup would close it.
+    document.querySelector('.ir-transclusion-host')!.innerHTML = embed;
+    const sizer = document.querySelector<HTMLElement>(
+      '.internal-embed .markdown-preview-sizer'
+    )!;
+
+    // The renderer's first pass, from Obsidian 1.14's `app.js` (`onRender`,
+    // `measureSection`, `updateVirtualDisplay`; undocumented): the sections go
+    // in, each is measured as the distance to the next one's `offsetTop`, and
+    // the sizer gets their sum as its `min-height`. A hidden section reads
+    // `offsetTop` 0, so the header section measures as all the room above the
+    // first paragraph.
+    sizer.innerHTML =
+      '<div class="markdown-preview-pusher" style="width: 1px; height: 0.1px"></div>' +
+      '<div class="mod-header mod-ui"><div class="inline-title">Card</div></div>' +
+      '<div class="el-p"><p>The first paragraph.</p></div>' +
+      '<div class="el-p"><p>The second paragraph.</p></div>';
+    const sections = Array.from(sizer.children).slice(1) as HTMLElement[];
+    const total = sections
+      .map((section) => {
+        const next = section.nextElementSibling as HTMLElement | null;
+        return next ? next.offsetTop - section.offsetTop : section.offsetHeight;
+      })
+      .reduce((sum, height) => sum + height, 0);
+    sizer.style.minHeight = `${total - 1}px`;
+
+    // The tinted box against the rows its text is on: what is left is its
+    // own `padding-block`.
+    const box = document
+      .querySelector('.internal-embed')!
+      .getBoundingClientRect();
+    const [first, second] = Array.from(sizer.querySelectorAll('p')).map((p) =>
+      p.getBoundingClientRect()
+    );
+    return box.height - (second.bottom - first.top);
+  }, EMBED);
+
+  expect(slack).toBeLessThan(10);
+});
