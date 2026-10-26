@@ -6,12 +6,15 @@ export function ButtonWithIcon({
   children,
   handleClick,
   disabled,
+  ariaDisabled,
   tooltip,
   id,
   className,
 }: React.PropsWithChildren<{
   handleClick: (e: MouseEvent) => Promise<void> | void;
   disabled?: boolean;
+  /** Marked off but still clickable, for a button whose click explains why. */
+  ariaDisabled?: boolean;
   tooltip?: string;
   id?: string;
   className?: string;
@@ -22,6 +25,7 @@ export function ButtonWithIcon({
       id={id}
       onClick={(e) => void handleClick(e)}
       aria-label={tooltip}
+      aria-disabled={ariaDisabled || undefined}
       disabled={disabled}
     >
       {children}

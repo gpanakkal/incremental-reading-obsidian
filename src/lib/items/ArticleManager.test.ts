@@ -9422,6 +9422,60 @@ describe('what an import reports it did', () => {
     }
   });
 
+  it('adopts the snippets taken from a note whose ir-id no row holds, once it is imported where it is', async () => {
+    const { repo, vault, reviewManager, manager } = await wireUnimport({
+      [NOTE]: { 'ir-id': 'gone', tags: [ARTICLE_TAG] },
+    });
+    vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
+    vi.spyOn(console, 'warn').mockReturnValue(undefined);
+    const file = vault.files.get(NOTE)!;
+    const snippet = await reviewManager.snippets.create(
+      { getSelection: () => 'selected' } as never,
+      {
+        file,
+        getViewType: () => 'markdown',
+        getSelection: () => '',
+      } as never
+    );
+
+    await manager.import(file, DEFAULT_PRIORITY, null, false);
+
+    const [article] = repo.rows('article');
+    expect(article.reference).toBe(NOTE);
+    expect(article.id).not.toBe('gone');
+    expect(repo.rows('snippet')).toMatchObject([
+      { id: snippet?.data.id, parent: article.id },
+    ]);
+    repo.dispose();
+  });
+
+  it('hands the snippets taken from a note whose ir-id no row holds to the copy an import makes of it', async () => {
+    const { repo, vault, reviewManager, manager } = await wireUnimport({
+      [NOTE]: { 'ir-id': 'gone', tags: [ARTICLE_TAG] },
+    });
+    vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
+    vi.spyOn(console, 'warn').mockReturnValue(undefined);
+    const file = vault.files.get(NOTE)!;
+    const snippet = await reviewManager.snippets.create(
+      { getSelection: () => 'selected' } as never,
+      {
+        file,
+        getViewType: () => 'markdown',
+        getSelection: () => '',
+      } as never
+    );
+
+    await manager.import(file, DEFAULT_PRIORITY, null, true);
+
+    const [article] = repo.rows('article');
+    expect(article.reference).not.toBe(NOTE);
+    expect(article.id).not.toBe('gone');
+    expect(repo.rows('snippet')).toMatchObject([
+      { id: snippet?.data.id, parent: article.id },
+    ]);
+    repo.dispose();
+  });
+
   it('makes a copy afresh of a note whose ir-id no row holds', async () => {
     const { repo, vault, manager } = await wireUnimport({
       [NOTE]: { 'ir-id': 'orphan' },

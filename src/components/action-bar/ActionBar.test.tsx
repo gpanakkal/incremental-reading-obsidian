@@ -22,7 +22,7 @@ import {
 } from '#/lib/types';
 import { SchedulingModal } from '#/views/SchedulingModal';
 import fc from 'fast-check';
-import { Scope } from 'obsidian';
+import { Platform, Scope } from 'obsidian';
 import { type ComponentChild, render } from 'preact';
 import { act } from 'preact/test-utils';
 import { Rating } from 'ts-fsrs';
@@ -469,6 +469,18 @@ function querySchedulingButtons(container: HTMLElement): HTMLButtonElement[] {
 function getButton(container: HTMLElement, label: string): HTMLButtonElement {
   const found = queryButton(container, label);
   if (!found) throw new Error(`"${label}" button not rendered`);
+  return found;
+}
+
+/**
+ * The snippet button, by its class: on a card it is labelled with why it is
+ * off rather than with what it does.
+ */
+function getSnippetButton(container: HTMLElement): HTMLButtonElement {
+  const found = container.querySelector<HTMLButtonElement>(
+    'button.ir-snippet-button'
+  );
+  if (!found) throw new Error('snippet button not rendered');
   return found;
 }
 
@@ -1589,23 +1601,6 @@ describe('ActionBar', () => {
     describe.each(screens)(
       'on a $type (answer shown: $showAnswer)',
       (screen) => {
-        it('extracts a snippet from what this tab shows', () => {
-          const actions = makeActions();
-          const reviewView = makeReviewView();
-          const container = mountItemBar(makeItem(screen.type), {
-            ...screen,
-            actions,
-            reviewView,
-          });
-
-          getButton(container, 'Create snippet').click();
-
-          expect(actions.extract).toHaveBeenCalledExactlyOnceWith(
-            'snippet',
-            reviewView
-          );
-        });
-
         it('makes a card from what this tab shows', () => {
           const actions = makeActions();
           const reviewView = makeReviewView();
@@ -1654,6 +1649,98 @@ describe('ActionBar', () => {
         });
       }
     );
+
+    describe.each(
+      TEXT_TYPES.flatMap((type) =>
+        [false, true].map((showAnswer) => ({ type, showAnswer }))
+      )
+    )('on a $type (answer shown: $showAnswer)', (screen) => {
+      it('extracts a snippet from what this tab shows', () => {
+        const actions = makeActions();
+        const reviewView = makeReviewView();
+        const container = mountItemBar(makeItem(screen.type), {
+          ...screen,
+          actions,
+          reviewView,
+        });
+
+        getButton(container, 'Create snippet').click();
+
+        expect(actions.extract).toHaveBeenCalledExactlyOnceWith(
+          'snippet',
+          reviewView
+        );
+      });
+    });
+
+    it('shows the snippet button on a card switched off and labelled with why, and a click on it does nothing, answer shown or not', () => {
+      for (const showAnswer of [false, true]) {
+        const actions = makeActions();
+        const container = mountItemBar(makeItem('card'), {
+          showAnswer,
+          actions,
+        });
+        const button = getSnippetButton(container);
+
+        button.click();
+
+        expect(button.disabled).toBe(true);
+        expect(button.getAttribute('aria-label')).toBeTruthy();
+        expect(button.getAttribute('aria-label')).not.toBe('Create snippet');
+        expect(actions.extract).not.toHaveBeenCalled();
+        expect(dispatch).not.toHaveBeenCalled();
+        document.body.innerHTML = '';
+      }
+    });
+
+    // Obsidian's tooltip ignores touch (obsidian.asar: its `pointerover`
+    // handler bails on any pointerType but "mouse"), so on mobile the tap
+    // must still arrive and get the extract gate's notice
+    it('on mobile leaves the snippet button on a card tappable but marked off, and a tap goes to the extract gate, answer shown or not', () => {
+      const previous = Platform.isMobile;
+      Platform.isMobile = true;
+      try {
+        for (const showAnswer of [false, true]) {
+          const actions = makeActions();
+          const reviewView = makeReviewView();
+          const container = mountItemBar(makeItem('card'), {
+            showAnswer,
+            actions,
+            reviewView,
+          });
+          const button = getSnippetButton(container);
+
+          button.click();
+
+          expect(button.disabled).toBe(false);
+          expect(button.getAttribute('aria-disabled')).toBe('true');
+          expect(actions.extract).toHaveBeenCalledExactlyOnceWith(
+            'snippet',
+            reviewView
+          );
+          document.body.innerHTML = '';
+        }
+      } finally {
+        Platform.isMobile = previous;
+      }
+    });
+
+    it('marks the snippet button off only on a card, on mobile too', () => {
+      const previous = Platform.isMobile;
+      try {
+        for (const isMobile of [false, true]) {
+          Platform.isMobile = isMobile;
+          const container = mountItemBar(makeItem('article'));
+          const button = getSnippetButton(container);
+
+          expect(button.disabled).toBe(false);
+          expect(button.hasAttribute('aria-disabled')).toBe(false);
+          document.body.innerHTML = '';
+        }
+      } finally {
+        Platform.isMobile = previous;
+      }
+    });
   });
 
   describe.each(ITEM_TYPES)('actions on a missing %s', (type) => {
@@ -1958,7 +2045,7 @@ describe('ActionBar', () => {
             zone(container, 'center').querySelector('.ir-grade-group')
           ).toBeNull();
           expect(zoneChildren(container, 'center')[0]).toBe(
-            getButton(container, 'Create snippet')
+            getSnippetButton(container)
           );
         });
       });
@@ -2474,10 +2561,15 @@ describe('ActionBar double-click guard', () => {
         delayArb,
         fc.constantFrom<NoteType>('article', 'snippet', 'card'),
         fc.constantFrom(
-          { kind: 'snippet' as const, label: 'Create snippet' },
-          { kind: 'card' as const, label: 'Create card' }
+          { kind: 'snippet' as const, find: getSnippetButton },
+          {
+            kind: 'card' as const,
+            find: (c: HTMLElement) => getButton(c, 'Create card'),
+          }
         ),
-        (mountedAt, gap, cooldownMs, delay, type, { kind, label }) => {
+        (mountedAt, gap, cooldownMs, delay, type, { kind, find }) => {
+          // A card's snippet button is off, cooldown or not
+          const live = !(type === 'card' && kind === 'snippet');
           const bar = mountGuardedBar(itemWithId(type, 'first'), {
             seconds: cooldownMs / 1000,
             mountedAt,
@@ -2488,10 +2580,10 @@ describe('ActionBar double-click guard', () => {
             bar.show(itemWithId(type, 'second'));
             setNow(changedAt + delay);
 
-            getButton(bar.container, label).click();
+            find(bar.container).click();
 
             expect(bar.actions.extract.mock.calls).toEqual(
-              delay >= cooldownMs ? [[kind, bar.reviewView]] : []
+              live && delay >= cooldownMs ? [[kind, bar.reviewView]] : []
             );
           } finally {
             bar.unmount();
@@ -2512,10 +2604,15 @@ describe('ActionBar double-click guard', () => {
         delayArb,
         fc.constantFrom<NoteType>('article', 'snippet', 'card'),
         fc.constantFrom(
-          { kind: 'snippet' as const, label: 'Create snippet' },
-          { kind: 'card' as const, label: 'Create card' }
+          { kind: 'snippet' as const, find: getSnippetButton },
+          {
+            kind: 'card' as const,
+            find: (c: HTMLElement) => getButton(c, 'Create card'),
+          }
         ),
-        (mountedAt, gap, cooldownMs, delay, type, { kind, label }) => {
+        (mountedAt, gap, cooldownMs, delay, type, { kind, find }) => {
+          // A card's snippet button is off, cooldown or not
+          const live = !(type === 'card' && kind === 'snippet');
           const bar = mountGuardedBar(itemWithId(type, 'first'), {
             seconds: cooldownMs / 1000,
             mountedAt,
@@ -2525,10 +2622,10 @@ describe('ActionBar double-click guard', () => {
             actionCooldownFor(bar.reviewView).arm(armedAt);
             setNow(armedAt + delay);
 
-            getButton(bar.container, label).click();
+            find(bar.container).click();
 
             expect(bar.actions.extract.mock.calls).toEqual(
-              delay >= cooldownMs ? [[kind, bar.reviewView]] : []
+              live && delay >= cooldownMs ? [[kind, bar.reviewView]] : []
             );
           } finally {
             bar.unmount();

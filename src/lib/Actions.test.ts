@@ -2445,6 +2445,44 @@ describe('Actions.extract', () => {
     );
   });
 
+  it('refuses a snippet from a card at once, before any text is selected for it, and extracts from any other item as before', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        selectionKindArb,
+        fc.option(noteTypeArb),
+        fc.boolean(),
+        async (kind, type, selected) => {
+          Notice.reset();
+          const { plugin, actions, createSnippet, createCard } =
+            wireSelectionActions();
+          wireSelectionMode(null);
+          const { reviewView } = makeSelectingView({
+            doc: 'Some text',
+            anchor: 0,
+            head: selected ? 4 : 0,
+          });
+          Object.assign(reviewView, { fileType: type });
+
+          await actions.extract(kind, reviewView);
+
+          const made = kind === 'snippet' ? createSnippet : createCard;
+          if (kind === 'snippet' && type === 'card') {
+            expect(Notice.messages).toHaveLength(1);
+            expect(dispatched(plugin)).toEqual([]);
+            expect(made).not.toHaveBeenCalled();
+          } else {
+            expect(Notice.messages).toEqual([]);
+            expect(dispatched(plugin)).toEqual(
+              selected ? [] : [setSelectionMode(kind)]
+            );
+            expect(made).toHaveBeenCalledTimes(selected ? 1 : 0);
+          }
+          vi.restoreAllMocks();
+        }
+      )
+    );
+  });
+
   it('extracts as before from any item but a PDF', async () => {
     await fc.assert(
       fc.asyncProperty(

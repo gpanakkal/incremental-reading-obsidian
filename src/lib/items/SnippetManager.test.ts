@@ -1,5 +1,6 @@
 import {
   ARTICLE_TAG,
+  CARD_TAG,
   DAY_ROLLOVER_OFFSET_HOURS,
   DEFAULT_PRIORITY,
   MAX_SQL_QUERY_PARAMS,
@@ -3393,6 +3394,23 @@ describe('getHighlights for a note with no database entry', () => {
     expect(await manager.getHighlights(SOURCE)).toEqual([]);
   });
 
+  it('returns highlights for parentless snippets taken from a note whose tags say item but no row backs, as from a source note', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom('article' as const, 'snippet' as const),
+        async (type) => {
+          const { manager } = makeSourceNoteManager([RENDERABLE], false);
+          vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue(type);
+
+          const highlights = await manager.getHighlights(SOURCE);
+
+          expect(highlights.map((h) => h.id)).toEqual(['snippet-0']);
+          vi.restoreAllMocks();
+        }
+      )
+    );
+  });
+
   it('returns nothing for a note that is neither an item nor a source', async () => {
     const { manager } = makeSourceNoteManager([RENDERABLE], false);
 
@@ -3456,11 +3474,7 @@ describe('create', () => {
             updateFrontMatter
           );
 
-          // An item parent with no row behind it throws after the tag step;
-          // only the tag step is this test's
-          await snipFrom(parent, priority).catch((error: unknown) => {
-            expect(String(error)).toMatch(/Couldn't find entry/);
-          });
+          await snipFrom(parent, priority);
 
           const parentWrites = updateFrontMatter.mock.calls
             .filter(([file]) => file === parent)
@@ -4253,14 +4267,91 @@ describe('create, with its note and its row as one unit', () => {
     }
   );
 
-  it('makes no note when the parent is an item with no row behind it', async () => {
-    const { vault, snip } = await wireSnippets({
-      [PARENT]: { 'ir-id': 'gone', tags: [ARTICLE_TAG] },
-    });
+  it("parents the snippet on the note's row only when it has one, otherwise takes the note as a plain one, and refuses a card's note, row or not", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom(
+          'article' as const,
+          'snippet' as const,
+          'card' as const
+        ),
+        fc.boolean(),
+        fc.integer({ min: MINIMUM_PRIORITY, max: MAXIMUM_PRIORITY }),
+        async (type, hasRow, priority) => {
+          vi.restoreAllMocks();
+          const frontmatter = {
+            'ir-id': 'note-id',
+            tags: [
+              { article: ARTICLE_TAG, snippet: SNIPPET_TAG, card: CARD_TAG }[
+                type
+              ],
+            ],
+          };
+          const { vault, repo, notify, snip } = await wireSnippets({
+            [PARENT]: structuredClone(frontmatter),
+          });
+          if (hasRow) {
+            repo.mutate(
+              type === 'card'
+                ? `INSERT INTO srs_card (id, reference, created_at, due, stability,
+                     difficulty, elapsed_days, scheduled_days, reps, lapses, state)
+                   VALUES ('note-id', $1, 0, 0, 0, 0, 0, 0, 0, 0, 0)`
+                : `INSERT INTO ${type} (id, reference, due, interval, priority) VALUES ('note-id', $1, 0, 1, $2)`,
+              type === 'card' ? [PARENT] : [PARENT, priority]
+            );
+          }
 
-    await expect(snip(PARENT)).rejects.toThrow(/Couldn't find entry/);
+          const result = await snip(PARENT);
 
-    expect(vault.paths()).toEqual([PARENT]);
+          const made = repo
+            .rows('snippet')
+            .filter(({ reference }) => reference !== PARENT);
+          // The note keeps the tags it has: an item's, which a source tag
+          // would only contradict
+          expect(vault.frontmatterOf(PARENT)).toStrictEqual(frontmatter);
+          if (type === 'card') {
+            expect(result).toBeNull();
+            expect(made).toEqual([]);
+            expect(vault.paths()).toEqual([PARENT]);
+            expect(vault.processFrontMatter).not.toHaveBeenCalled();
+            expect(notify).toHaveBeenCalledExactlyOnceWith(expect.any(String));
+            repo.dispose();
+            return;
+          }
+          expect(made).toHaveLength(1);
+          const [row] = made;
+          expect(result?.data.id).toBe(row.id);
+          expect(row.parent).toBe(hasRow ? 'note-id' : null);
+          expect(row.priority).toBe(hasRow ? priority : DEFAULT_PRIORITY);
+          expect(
+            vault.frontmatterOf(row.reference as string)?.[SOURCE_PROPERTY_NAME]
+          ).toContain(`[[${PARENT}`);
+          expect(notify).not.toHaveBeenCalledWith(expect.anything(), {
+            kind: 'error',
+          });
+          repo.dispose();
+        }
+      ),
+      { numRuns: 60 }
+    );
+  });
+
+  it("parents the snippet on no row at the note's path when its tags say it is no item", async () => {
+    const { repo, snip } = await wireSnippets({ [PARENT]: {} });
+    for (const table of ['article', 'snippet']) {
+      repo.mutate(
+        `INSERT INTO ${table} (id, reference, due, interval, priority) VALUES ('note-id', $1, 0, 1, 10)`,
+        [PARENT]
+      );
+    }
+
+    await snip(PARENT);
+
+    const made = repo
+      .rows('snippet')
+      .filter(({ reference }) => reference !== PARENT);
+    expect(made).toMatchObject([{ parent: null }]);
+    repo.dispose();
   });
 });
 

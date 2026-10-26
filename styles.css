@@ -697,6 +697,26 @@ body:not(.is-mobile) .ir-bar-trail {
   opacity: 0.4;
 }
 
+/* The review tab's snippet button on a card (0224), off for good rather than
+   for a moment, drawn the same way. `not-allowed` is set here rather than left
+   to Obsidian's `button` rules, and the tap and press states are covered too,
+   since a disabled button still takes pointer events (its tooltip opens on
+   `pointerover`). On mobile it is `aria-disabled` instead, so a tap gets the
+   notice. */
+.ir-action-bar .ir-snippet-button:disabled,
+.ir-action-bar .ir-snippet-button:disabled:hover,
+.ir-action-bar .ir-snippet-button:disabled:active,
+.ir-action-bar .ir-snippet-button:disabled.mobile-tap,
+.ir-action-bar .ir-snippet-button[aria-disabled='true'],
+.ir-action-bar .ir-snippet-button[aria-disabled='true']:hover,
+.ir-action-bar .ir-snippet-button[aria-disabled='true']:active,
+.ir-action-bar .ir-snippet-button[aria-disabled='true'].mobile-tap {
+  background-color: unset;
+  color: var(--text-muted);
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
 /* How much of a view's bottom edge Obsidian's navbar covers on mobile.
 
    It covers any only while it's `position: fixed`, which Obsidian sets through
