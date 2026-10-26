@@ -82,6 +82,12 @@ export interface ImportedArticle {
   effect: ImportEffect;
   /** The note or file the import made: a copy, or a web page's note. */
   madeFile?: TFile;
+  /**
+   * Takes back the article tag the import put on a note that had lost it, as
+   * an undo of a row brought back must: left on, the note would be typed an
+   * article with no live row behind it.
+   */
+  untag?: () => Promise<void>;
 }
 
 /**

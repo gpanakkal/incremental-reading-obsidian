@@ -753,6 +753,8 @@ const importedArb: fc.Arbitrary<ImportedArticle> = fc.record(
     articleId: fc.uuid(),
     effect: fc.constantFrom<ImportEffect>('created', 'restored', 'linked'),
     madeFile: fc.string().map((name) => makeTFile(name)),
+    // 0228 addition: the undo of a row brought back puts its note back too
+    untag: fc.constant(() => Promise.resolve()),
   },
   { requiredKeys: ['articleId', 'effect'] }
 );
@@ -776,9 +778,9 @@ const bulkOutcomeArb: fc.Arbitrary<BulkOutcome> = fc.oneof(
 
 /** What of `imports` an undo takes back: all but what only linked. */
 const undoable = (imports: readonly Partial<ImportedArticle>[]) =>
-  imports.flatMap(({ articleId, effect, madeFile }) =>
+  imports.flatMap(({ articleId, effect, madeFile, untag }) =>
     articleId !== undefined && effect !== undefined && effect !== 'linked'
-      ? [{ articleId, effect, madeFile }]
+      ? [{ articleId, effect, madeFile, untag }]
       : []
   );
 

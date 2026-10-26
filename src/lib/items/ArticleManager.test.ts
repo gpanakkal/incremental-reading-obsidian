@@ -1,5 +1,5 @@
 import type { Actions } from '#/lib/Actions';
-import type { ImportEffect } from '#/lib/bulk-import/types';
+import type { ImportedArticle, ImportEffect } from '#/lib/bulk-import/types';
 import {
   ARTICLE_DIRECTORY,
   ARTICLE_TAG,
@@ -6002,6 +6002,7 @@ describe('import', () => {
       const manager = new ArticleManager(makeImportPlugin(false), repo);
       vi.spyOn(Obsidian, 'getFrontMatter').mockReturnValue({
         'ir-id': EXISTING_ID,
+        tags: [ARTICLE_TAG],
       } as never);
 
       await manager.import(IMPORT_FILE, DEFAULT_PRIORITY, null, false);
@@ -6131,6 +6132,7 @@ describe('import', () => {
       ]);
       vi.spyOn(Obsidian, 'getFrontMatter').mockReturnValue({
         'ir-id': 'existing',
+        tags: [ARTICLE_TAG],
       } as never);
       const snippets = makeSnippetsStub();
       const manager = new ArticleManager(
@@ -6302,6 +6304,7 @@ describe('import', () => {
         );
         vi.spyOn(Obsidian, 'getFrontMatter').mockReturnValue({
           'ir-id': EXISTING_ID,
+          tags: [ARTICLE_TAG],
         } as never);
 
         const result = await manager.import(
@@ -6316,6 +6319,67 @@ describe('import', () => {
           IMPORT_FILE,
           EXISTING_ID
         );
+      });
+
+      it('repairs a note at its own live row that lost its article tag, adopting what was stranded', async () => {
+        const EXISTING_ID = 'existing-article-id';
+        const snippets = makeSnippetsStub([makeAdoptedRow(0)]);
+        const cards = makeCardsStub([
+          { id: 'card-0', reference: 'cards/c.md' },
+        ]);
+        const repo = makeSimpleRepo();
+        (repo.query as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+          { id: EXISTING_ID, deleted: 0 },
+        ]);
+        const manager = new ArticleManager(
+          makeImportPluginWithSnippets(false, snippets, cards),
+          repo
+        );
+        vi.spyOn(manager, 'fetch').mockResolvedValue(null);
+        vi.spyOn(Obsidian, 'getFrontMatter').mockReturnValue({
+          'ir-id': EXISTING_ID,
+          tags: ['other'],
+        } as never);
+        const update = vi
+          .spyOn(Obsidian, 'updateFrontMatter')
+          .mockResolvedValue(undefined as never);
+
+        const result = await manager.import(
+          IMPORT_FILE,
+          DEFAULT_PRIORITY,
+          null,
+          false
+        );
+
+        expect(result).toMatchObject({
+          articleId: EXISTING_ID,
+          effect: 'linked',
+        });
+        expect(snippets.adoptOrphans).toHaveBeenCalledWith(
+          IMPORT_FILE,
+          EXISTING_ID
+        );
+        expect(cards.adoptOrphans).toHaveBeenCalledWith(
+          IMPORT_FILE,
+          EXISTING_ID
+        );
+        expect(update).toHaveBeenCalledWith(
+          IMPORT_FILE,
+          expect.any(Function),
+          expect.anything()
+        );
+        // Merged into the note's own tags
+        const frontmatter: Record<string, unknown> = { tags: ['other'] };
+        (update.mock.calls[0][1] as (fm: Record<string, unknown>) => void)(
+          frontmatter
+        );
+        expect(frontmatter.tags).toEqual(['other', ARTICLE_TAG]);
+        // The row the note answers to is kept, never a second one made
+        const writes = (repo.mutate as ReturnType<typeof vi.fn>).mock.calls as [
+          string,
+          unknown[],
+        ][];
+        expect(writes.some(([sql]) => sql.includes('INSERT'))).toBe(false);
       });
     });
 
@@ -7846,7 +7910,7 @@ describe('importMany', () => {
       },
       {
         path: 'notes/article.md',
-        frontmatter: { 'ir-id': 'mine' },
+        frontmatter: { 'ir-id': 'mine', tags: [ARTICLE_TAG] },
         makeCopy: false,
         status: 'skipped',
         reason: 'already an article',
@@ -9414,6 +9478,11 @@ describe('what an import reports it did', () => {
         article: expect.objectContaining({
           data: expect.objectContaining({ id: 'known' }) as unknown,
         }) as unknown,
+        // The note lacked the article tag the import put on it, which the
+        // undo of a row brought back takes off again
+        ...(deleted && path !== PAPER
+          ? { untag: expect.any(Function) as unknown }
+          : {}),
       });
       expect(repo.rows('article'), label).toMatchObject([
         { id: 'known', reference: path, deleted: 0 },
@@ -10346,6 +10415,432 @@ describe("importing a note claiming an article's id while the article's own note
       { id: 'x', reference: REFERENCE },
     ]);
     expect(vault.paths()).toEqual([REFERENCE]);
+    repo.dispose();
+  });
+});
+
+describe('importing a note an article row already answers to (0228)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const PATH = 'notes/N.md';
+  const ELSEWHERE = 'notes/gone.md';
+  const ITEM_TAGS: readonly string[] = [ARTICLE_TAG, SNIPPET_TAG, CARD_TAG];
+
+  /**
+   * The article row there is before the import: none, or one at the note's
+   * path or at a path no file holds, live or deleted.
+   */
+  type RowState =
+    | 'absent'
+    | 'here-live'
+    | 'here-deleted'
+    | 'elsewhere-live'
+    | 'elsewhere-deleted';
+
+  /** The note's own tags besides the article tag: never an item's. */
+  const otherTagsArb = fc.uniqueArray(
+    fc.string().filter((tag) => tag.trim() !== '' && !ITEM_TAGS.includes(tag))
+  );
+
+  /**
+   * What an import of `file` did: as a batch reports it, or, imported alone,
+   * `refused` when it did nothing.
+   */
+  async function importOnce(
+    manager: ArticleManager,
+    file: TFile,
+    batch: boolean
+  ): Promise<{ status: string; reason?: string } & Partial<ImportResult>> {
+    if (batch) {
+      const [outcome] = await manager.importMany([{ file }], {
+        priority: DEFAULT_PRIORITY,
+        fixedIntervalDays: null,
+        makeCopy: false,
+      });
+      return outcome;
+    }
+    const result = await manager.import(file, DEFAULT_PRIORITY, null, false);
+    return result ? { status: 'imported', ...result } : { status: 'refused' };
+  }
+
+  it('refuses only a note its live row answers to that carries the article tag, repairs one that lost it or whose row was deleted, and never makes a second row for it', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom<RowState>(
+          'absent',
+          'here-live',
+          'here-deleted',
+          'elsewhere-live',
+          'elsewhere-deleted'
+        ),
+        fc.boolean(),
+        fc.boolean(),
+        otherTagsArb,
+        fc.boolean(),
+        async (rowState, idMatches, tagged, otherTags, batch) => {
+          vi.restoreAllMocks();
+          const tags = tagged ? [...otherTags, ARTICLE_TAG] : otherTags;
+          const { vault, repo, manager, before } = await wireArticles(
+            { [PATH]: { 'ir-id': 'x', tags } },
+            null
+          );
+          const here = rowState.startsWith('here');
+          const deleted = rowState.endsWith('deleted');
+          if (rowState !== 'absent') {
+            repo.mutate(
+              `INSERT INTO article (id, reference, due, interval, priority, deleted)
+               VALUES ($1, $2, 0, 1, 10, $3)`,
+              [idMatches ? 'x' : 'y', here ? PATH : ELSEWHERE, deleted]
+            );
+          }
+          const rowsBefore = repo.rows('article');
+          const [stampBefore] = repo.storedRows('article');
+          const file = vault.files.get(PATH)!;
+
+          const outcome = await importOnce(manager, file, batch);
+
+          const rows = repo.rows('article');
+          const untouched = () => {
+            expect(rows).toEqual(rowsBefore);
+            expect(vault.frontmatterOf(PATH)).toEqual(before[PATH]);
+          };
+          if (here && !idMatches) {
+            // Another article's path: the reference conflict
+            expect(outcome).toMatchObject(
+              batch
+                ? { status: 'failed', reason: 'another article is at its path' }
+                : { status: 'refused' }
+            );
+            untouched();
+          } else if (here && !deleted && tagged) {
+            expect(outcome).toMatchObject(
+              batch
+                ? { status: 'skipped', reason: 'already an article' }
+                : { status: 'refused' }
+            );
+            untouched();
+          } else if (idMatches && rowState !== 'absent') {
+            // Its own row, kept, and made reviewable at the note's path
+            expect(outcome).toMatchObject({
+              status: 'imported',
+              articleId: 'x',
+              effect: deleted ? 'restored' : 'linked',
+            });
+            expect(rows).toHaveLength(1);
+            // Its schedule kept, under a stamp that outranks the tombstone's
+            // copy on any other device, as an un-delete must (0167)
+            const { due, interval, priority } = rowsBefore[0];
+            expect(rows).toMatchObject([
+              { id: 'x', reference: PATH, deleted: 0, due, interval, priority },
+            ]);
+            expect(repo.storedRows('article')[0].updated_at).toBeGreaterThan(
+              stampBefore.updated_at as number
+            );
+            const frontmatter = vault.frontmatterOf(PATH);
+            expect(frontmatter?.['ir-id']).toBe('x');
+            expect(frontmatter?.tags).toEqual(
+              expect.arrayContaining([...otherTags, ARTICLE_TAG])
+            );
+          } else {
+            // No row holds its id: a new article, with an id of its own
+            const made = rows.find(({ id }) => id !== 'y');
+            expect(outcome).toMatchObject({
+              status: 'imported',
+              effect: 'created',
+              articleId: made?.id,
+            });
+            expect(made?.id).not.toBe('x');
+            expect(made).toMatchObject({ reference: PATH, deleted: 0 });
+            expect(rows).toHaveLength(rowsBefore.length + 1);
+            expect(vault.frontmatterOf(PATH)?.['ir-id']).toBe(made?.id);
+          }
+          repo.dispose();
+        }
+      ),
+      { numRuns: 80 }
+    );
+  });
+
+  it('tells the auto-import watcher a note lost its tag just when an import would repair it from its live row', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom<RowState>(
+          'absent',
+          'here-live',
+          'here-deleted',
+          'elsewhere-live',
+          'elsewhere-deleted'
+        ),
+        fc.boolean(),
+        fc.boolean(),
+        otherTagsArb,
+        async (rowState, idMatches, tagged, otherTags) => {
+          vi.restoreAllMocks();
+          const tags = tagged ? [...otherTags, ARTICLE_TAG] : otherTags;
+          const { vault, repo, manager } = await wireArticles(
+            { [PATH]: { 'ir-id': 'x', tags } },
+            null
+          );
+          const here = rowState.startsWith('here');
+          const deleted = rowState.endsWith('deleted');
+          if (rowState !== 'absent') {
+            repo.mutate(
+              `INSERT INTO article (id, reference, due, interval, priority, deleted)
+               VALUES ($1, $2, 0, 1, 10, $3)`,
+              [idMatches ? 'x' : 'y', here ? PATH : ELSEWHERE, deleted]
+            );
+          }
+          const file = vault.files.get(PATH)!;
+
+          const lost = await manager.lostArticleTag(file, 'x');
+
+          expect(lost).toBe(here && idMatches && !deleted && !tagged);
+          if (lost) {
+            const outcome = await importOnce(manager, file, true);
+            expect(outcome).toMatchObject({ articleId: 'x', effect: 'linked' });
+          }
+          repo.dispose();
+        }
+      )
+    );
+  });
+
+  it('never tells the watcher a file with no frontmatter lost its tag, and asks the database to throw rather than answer no when it cannot read', async () => {
+    const { repo, manager } = await wireArticles({}, null);
+    repo.mutate(
+      `INSERT INTO article (id, reference, due, interval, priority)
+       VALUES ('x', $1, 0, 1, 10)`,
+      ['papers/p.pdf']
+    );
+
+    expect(await manager.lostArticleTag(fileAt('papers/p.pdf'), 'x')).toBe(
+      false
+    );
+    const query = vi.spyOn(repo, 'query');
+    await manager.lostArticleTag(fileAt(PATH), 'x');
+    expect(query).toHaveBeenCalledWith(expect.any(String), ['x', PATH], {
+      throwOnError: true,
+    });
+    repo.dispose();
+  });
+
+  it('puts the note back as it was when the row of a repair cannot be saved', async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.boolean(), fc.boolean(), async (deleted, batch) => {
+        vi.restoreAllMocks();
+        const { vault, repo, manager, before } = await wireArticles(
+          { [PATH]: { 'ir-id': 'x', tags: ['other'] } },
+          null
+        );
+        repo.mutate(
+          `INSERT INTO article (id, reference, due, interval, priority, deleted)
+           VALUES ('x', $1, 0, 1, 10, $2)`,
+          [PATH, deleted]
+        );
+        const rowsBefore = repo.rows('article');
+        repo.failWrite((query) => query.startsWith('UPDATE article'));
+
+        const outcome = await importOnce(
+          manager,
+          vault.files.get(PATH)!,
+          batch
+        );
+
+        expect(outcome.status).not.toBe('imported');
+        expect(repo.rows('article')).toEqual(rowsBefore);
+        expect(vault.frontmatterOf(PATH)).toEqual(before[PATH]);
+        repo.dispose();
+      })
+    );
+  });
+
+  it('says a repair went through, offering an undo only for a row brought back', async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.boolean(), async (deleted) => {
+        vi.restoreAllMocks();
+        const { vault, repo, manager, notify } = await wireArticles(
+          { [PATH]: { 'ir-id': 'x', tags: [] } },
+          null
+        );
+        repo.mutate(
+          `INSERT INTO article (id, reference, due, interval, priority, deleted)
+           VALUES ('x', $1, 0, 1, 10, $2)`,
+          [PATH, deleted]
+        );
+
+        await manager.import(
+          vault.files.get(PATH)!,
+          DEFAULT_PRIORITY,
+          null,
+          false
+        );
+
+        const [message, options] = notify.mock.lastCall ?? [];
+        expect(message).toMatch(/"N"/);
+        expect(options).toMatchObject({ kind: 'success' });
+        expect(Boolean(options?.action)).toBe(deleted);
+        repo.dispose();
+      })
+    );
+  });
+
+  // 0228 addition: an undo that left the tag kept the note half an article
+  it('leaves the note as it was before a row was brought back on an undo, the row deleted again, and lets an import bring it back again', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.boolean(),
+        fc.oneof(
+          fc.constant(undefined),
+          otherTagsArb,
+          otherTagsArb.map((tags) => [...tags, ARTICLE_TAG])
+        ),
+        fc.boolean(),
+        async (here, tags, batch) => {
+          vi.restoreAllMocks();
+          const note: Record<string, unknown> = { 'ir-id': 'x' };
+          if (tags !== undefined) note.tags = tags;
+          const { vault, repo, manager } = await wireUnimport({ [PATH]: note });
+          repo.mutate(
+            `INSERT INTO article (id, reference, due, interval, priority, deleted)
+             VALUES ('x', $1, 0, 1, 10, TRUE)`,
+            [here ? PATH : ELSEWHERE]
+          );
+          const before = structuredClone(vault.frontmatterOf(PATH));
+          const file = vault.files.get(PATH)!;
+
+          const done = await importOnce(manager, file, batch);
+          expect(done).toMatchObject({ articleId: 'x', effect: 'restored' });
+          const undone = await manager.undoImports([done as ImportedArticle]);
+
+          expect(undone).toEqual(['x']);
+          expect(vault.frontmatterOf(PATH)).toEqual(before);
+          expect(repo.storedRows('article')).toMatchObject([
+            { id: 'x', reference: PATH, deleted: 1 },
+          ]);
+          const again = await importOnce(manager, file, batch);
+          expect(again).toMatchObject({ articleId: 'x', effect: 'restored' });
+          expect(Obsidian.typeOfTags(vault.frontmatterOf(PATH)?.tags)).toBe(
+            'article'
+          );
+          repo.dispose();
+        }
+      ),
+      { numRuns: 40 }
+    );
+  });
+
+  it('takes only the article tag off on an undo of a row brought back when the note changed since', async () => {
+    const { vault, repo, manager } = await wireUnimport({
+      [PATH]: { 'ir-id': 'x', tags: ['kept'] },
+    });
+    repo.mutate(
+      `INSERT INTO article (id, reference, due, interval, priority, deleted)
+       VALUES ('x', $1, 0, 1, 10, TRUE)`,
+      [PATH]
+    );
+    const file = vault.files.get(PATH)!;
+    const done = await manager.import(file, DEFAULT_PRIORITY, null, false);
+    await vault.app.fileManager.processFrontMatter(
+      file,
+      (frontmatter: Record<string, unknown>) => {
+        frontmatter.tags = [...(frontmatter.tags as string[]), 'added'];
+        frontmatter.extra = 1;
+      }
+    );
+
+    await manager.undoImports([done!]);
+
+    expect(vault.frontmatterOf(PATH)).toEqual({
+      'ir-id': 'x',
+      tags: ['kept', 'added'],
+      extra: 1,
+    });
+    repo.dispose();
+  });
+
+  // 0228 addition review: the tag taken off first left a row that couldn't be
+  // deleted live behind an untagged note, the very state the import repairs
+  it('leaves the note an article when the row brought back cannot be deleted again on an undo, and takes the tag off only once it is', async () => {
+    const { vault, repo, manager, logged } = await wireUnimport({
+      [PATH]: { 'ir-id': 'x', tags: ['kept'] },
+    });
+    repo.mutate(
+      `INSERT INTO article (id, reference, due, interval, priority, deleted)
+       VALUES ('x', $1, 0, 1, 10, TRUE)`,
+      [PATH]
+    );
+    const file = vault.files.get(PATH)!;
+    const done = await manager.import(file, DEFAULT_PRIORITY, null, false);
+    const revived = structuredClone(vault.frontmatterOf(PATH));
+    const failing = repo.failWrite((query) =>
+      query.includes('SET deleted = 1')
+    );
+    // What the row was as each frontmatter write began, as the auto-import
+    // watcher would find it then: a fault that never fails, only looks
+    const deletedWhenUntagged: unknown[] = [];
+    vault.fail('frontmatter', () => {
+      deletedWhenUntagged.push(repo.storedRows('article')[0]?.deleted);
+      return false;
+    });
+
+    expect(await manager.undoImports([done!])).toEqual([]);
+    expect(vault.frontmatterOf(PATH)).toEqual(revived);
+    expect(deletedWhenUntagged).toEqual([]);
+    expect(logged).toHaveBeenCalled();
+
+    failing.mockRestore();
+    expect(await manager.undoImports([done!])).toEqual(['x']);
+    expect(vault.frontmatterOf(PATH)).toEqual({ 'ir-id': 'x', tags: ['kept'] });
+    expect(deletedWhenUntagged).toEqual([1]);
+    repo.dispose();
+  });
+
+  it('deletes the row brought back on an undo all the same when its tag cannot be taken off, and says why', async () => {
+    const { vault, repo, manager, logged } = await wireUnimport({
+      [PATH]: { 'ir-id': 'x', tags: ['kept'] },
+    });
+    repo.mutate(
+      `INSERT INTO article (id, reference, due, interval, priority, deleted)
+       VALUES ('x', $1, 0, 1, 10, TRUE)`,
+      [PATH]
+    );
+    const file = vault.files.get(PATH)!;
+    const done = await manager.import(file, DEFAULT_PRIORITY, null, false);
+    const revived = structuredClone(vault.frontmatterOf(PATH));
+    vault.fail('frontmatter');
+    logged.mockClear();
+
+    expect(await manager.undoImports([done!])).toEqual(['x']);
+    expect(repo.storedRows('article')).toMatchObject([{ id: 'x', deleted: 1 }]);
+    expect(vault.frontmatterOf(PATH)).toEqual(revived);
+    expect(logged).toHaveBeenCalledOnce();
+    repo.dispose();
+  });
+
+  it('makes a note at its own live row reviewable on an import as a copy, making no copy', async () => {
+    const { vault, repo, manager } = await wireArticles(
+      { [PATH]: { 'ir-id': 'x', tags: ['other'] } },
+      null
+    );
+    repo.mutate(
+      `INSERT INTO article (id, reference, due, interval, priority)
+       VALUES ('x', $1, 0, 1, 10)`,
+      [PATH]
+    );
+
+    const [outcome] = await manager.importMany(
+      [{ file: vault.files.get(PATH)! }],
+      { priority: DEFAULT_PRIORITY, fixedIntervalDays: null, makeCopy: true }
+    );
+
+    expect(outcome).toMatchObject({ articleId: 'x', effect: 'linked' });
+    expect(vault.paths()).toEqual([PATH]);
+    expect(repo.rows('article')).toMatchObject([
+      { id: 'x', reference: PATH, deleted: 0 },
+    ]);
+    expect(vault.frontmatterOf(PATH)?.tags).toEqual(['other', ARTICLE_TAG]);
     repo.dispose();
   });
 });
