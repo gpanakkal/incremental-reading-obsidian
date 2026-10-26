@@ -5110,14 +5110,16 @@ describe('startupFailureMessage', () => {
     );
   });
 
-  it('property: names the file and the copy of it kept when nothing could replace it', () => {
+  it('property: names the file, in a message of its own, when nothing could replace it', () => {
     fc.assert(
       fc.property(fc.string(), fc.string({ minLength: 1 }), (path, copy) => {
         const message = startupFailureMessage(
           new DatabaseLoadError(path, copy)
         );
         expect(message).toContain(path);
-        expect(message).toContain(copy);
+        expect(message).not.toBe(
+          startupFailureMessage(new DatabaseLoadError(path))
+        );
       })
     );
   });
