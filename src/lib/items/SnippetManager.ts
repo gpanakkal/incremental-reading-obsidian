@@ -54,6 +54,9 @@ import { NOT_PURGED } from './row-delete';
 /** A snippet's offsets as its row holds them: none, for one without. */
 type StoredOffsets = Pick<SnippetRow, 'id' | 'start_offset' | 'end_offset'>;
 
+/** Said when a snippet is asked of a card's note, which gives none. */
+export const NO_SNIPPET_FROM_CARD = "Snippets can't be made from cards";
+
 export class SnippetManager extends ItemManager {
   offsetTracker: SnippetOffsetTracker;
 
@@ -394,11 +397,22 @@ export class SnippetManager extends ItemManager {
       console.warn(`[createSnippet] Could not access the CodeMirror view`);
     }
 
+    // A card is an answer, not reading material: no snippet is taken from its
+    // note, whether or not a row backs it. Every path to a snippet from a note
+    // (command, menu, review tab, selection mode) comes through here.
+    const parentType = await this.getItemType(currentFile);
+    if (parentType === 'card') {
+      Obsidian.notify(NO_SNIPPET_FROM_CARD);
+      return null;
+    }
+
     if (await refusedWrite(this.repo, 'create the snippet')) return null;
 
-    // Its parent's row is found before anything is made: a parent that is an
-    // item with no row behind it would otherwise leave a note made for nothing
-    const parentType = await this.getItemType(currentFile);
+    // Its parent is the row behind the note, if any. A note whose tags say
+    // item but that no row backs (a copy of an item's note, one whose row was
+    // purged, one synced ahead of its row) is taken as a plain note is: the
+    // snippet is parentless, found by its source link, and adopted once the
+    // note is imported (see `adoptOrphans`)
     let currentFileEntry: IArticleBase | ISnippetBase | null = null;
     if (parentType === 'article') {
       const articleRow = await this.findArticle(currentFile);
@@ -410,12 +424,6 @@ export class SnippetManager extends ItemManager {
       if (snippetRow) {
         currentFileEntry = SnippetManager.rowToBase(snippetRow);
       }
-    }
-
-    if (parentType && !currentFileEntry) {
-      throw new Error(
-        `Couldn't find entry for ${parentType} ${currentFile.path}`
-      );
     }
 
     // inherit priority from the source file if it has one, or assign default priority
@@ -811,9 +819,13 @@ export class SnippetManager extends ItemManager {
       return this.#loadHighlights(parentFile.path, highlights);
     }
 
-    // For source notes (or any note without a DB entry), find snippets by the
-    // source property that names this note
-    if (Obsidian.isSourceNote(parentFile, this.app)) {
+    // For source notes, and notes whose tags say item but that no row backs,
+    // find snippets by the source property that names this note
+    if (
+      Obsidian.isSourceNote(parentFile, this.app) ||
+      parentType === 'article' ||
+      parentType === 'snippet'
+    ) {
       const highlights = await this.getOrphanSnippetHighlights(parentFile);
       return this.#loadHighlights(parentFile.path, highlights);
     }

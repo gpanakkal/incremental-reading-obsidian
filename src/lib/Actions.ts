@@ -35,6 +35,7 @@ import {
   revealPdfContext,
 } from './item-context';
 import type { CardSelection } from './items/CardManager';
+import { NO_SNIPPET_FROM_CARD } from './items/SnippetManager';
 import { getMimeType } from './mime';
 import type { NoticeAction } from './notices';
 import { ObsidianHelpers as Obsidian } from './ObsidianHelpers';
@@ -832,6 +833,12 @@ export class Actions {
     // still being asked for: its selection is already taken, and with none
     // left it would enter the mode
     if (isPdf && this._makingFromPdf) return;
+    // A card's note gives no snippet (see `SnippetManager.create`): said
+    // now, rather than once its text has been selected for nothing
+    if (kind === 'snippet' && reviewView.fileType === 'card') {
+      Obsidian.notify(NO_SNIPPET_FROM_CARD);
+      return;
+    }
     const mode = store.getState().selectionMode;
     if (mode === kind) {
       await this.confirmSelection(reviewView);

@@ -49,6 +49,7 @@ import {
   Undo2,
   X,
 } from 'lucide-react';
+import { Platform } from 'obsidian';
 import { useLayoutEffect, useRef, useSyncExternalStore } from 'react';
 import { useDispatch, useStore } from 'react-redux';
 import { useReviewContext } from '../ReviewContext';
@@ -530,6 +531,9 @@ function SnippetActions({ snippet }: { snippet: ReviewSnippet }) {
 /**
  * Once the answer is shown the grades lead, where they are inline; otherwise
  * the bar has put them in their own row.
+ *
+ * The snippet button stays, switched off: a card is an answer, not reading
+ * material, and `SnippetManager.create` refuses its note.
  */
 function CardActions({
   card,
@@ -550,7 +554,7 @@ function CardActions({
           <SkipAction item={card} />
         </>
       )}
-      <ExtractSnippetAction />
+      <ExtractSnippetAction onCard />
       <CreateCardAction />
       <Separator />
       <DismissAction item={card} />
@@ -601,12 +605,27 @@ function ShowAnswerAction() {
   );
 }
 
-function ExtractSnippetAction() {
+/**
+ * On a card the button is shown switched off, labelled with why, rather than
+ * left out (0224). Natively `disabled`, as the bar's other off buttons are:
+ * the click never fires, while Obsidian's tooltip still shows, since it opens
+ * on `pointerover` (obsidian.asar, undocumented), which Chromium dispatches to
+ * a disabled button.
+ *
+ * On mobile that tooltip never shows: the handler bails on any `pointerType`
+ * but "mouse" (obsidian.asar, undocumented) and there is no long-press path.
+ * There the button is only `aria-disabled`, so a tap still reaches
+ * `actions.extract`, whose card gate says why in a notice.
+ */
+function ExtractSnippetAction({ onCard = false }: { onCard?: boolean }) {
   const { actions, reviewView } = useReviewContext();
 
   return (
     <ButtonWithIcon
-      tooltip="Create snippet"
+      tooltip={onCard ? "Can't make snippets from cards." : 'Create snippet'}
+      className="ir-snippet-button"
+      disabled={onCard && !Platform.isMobile}
+      ariaDisabled={onCard && Platform.isMobile}
       handleClick={async () => {
         await actions.extract('snippet', reviewView);
       }}
