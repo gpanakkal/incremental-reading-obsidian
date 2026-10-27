@@ -1,4 +1,5 @@
 import { ObsidianHelpers } from '#/lib/ObsidianHelpers';
+import { rerenderInPlace } from '#/lib/preview-rerender';
 import {
   paintSectionHighlights,
   readingSection,
@@ -95,7 +96,7 @@ export function registerHighlightRefreshListener(
         if (!(leaf.view instanceof MarkdownView)) return;
         if (leaf.view.getMode() !== 'preview') return;
         if (leaf.view.file?.path !== filePath) return;
-        leaf.view.previewMode.rerender(true);
+        rerenderInPlace(leaf.view);
         rerenderred = true;
       });
       if (!rerenderred) pendingRefresh.add(filePath);
@@ -110,7 +111,7 @@ export function registerHighlightRefreshListener(
         if (leaf.view.getMode() !== 'preview') return;
         const filePath = leaf.view.file?.path;
         if (!filePath || !pendingRefresh.has(filePath)) return;
-        leaf.view.previewMode.rerender(true);
+        rerenderInPlace(leaf.view);
         pendingRefresh.delete(filePath);
       });
     })

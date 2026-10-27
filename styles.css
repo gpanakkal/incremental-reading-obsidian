@@ -392,6 +392,12 @@ body {
 }
 /* #endregion */
 
+/* A reading view refilling after a highlight refresh (preview-rerender.ts):
+   scroll anchoring stays off until the refill goes quiet. */
+.markdown-preview-view.ir-rerendering {
+  overflow-anchor: none;
+}
+
 .workspace-leaf-content[data-type='incremental-reading-review'] .view-content {
   /* to match vanilla styling */
   padding: 0;

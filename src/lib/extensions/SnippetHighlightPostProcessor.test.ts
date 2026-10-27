@@ -12,6 +12,7 @@ import {
   registerHighlightRefreshListener,
   registerSnippetHighlightPostProcessor,
 } from '#/lib/extensions/SnippetHighlightPostProcessor';
+import { RERENDERING_CLASS } from '#/lib/preview-rerender';
 import type { NoteType } from '#/lib/types';
 import fc from 'fast-check';
 import { Component, MarkdownRenderer, MarkdownView } from 'obsidian';
@@ -429,7 +430,10 @@ describe('registerHighlightRefreshListener', () => {
           constructor: unknown;
           getMode?: () => string;
           file?: { path: string } | null;
-          previewMode?: { rerender: ReturnType<typeof vi.fn> };
+          previewMode?: {
+            rerender: ReturnType<typeof vi.fn>;
+            containerEl: HTMLElement;
+          };
         };
       }>;
     } = {}
@@ -490,7 +494,7 @@ describe('registerHighlightRefreshListener', () => {
       view: Object.assign(Object.create(MarkdownView.prototype), {
         getMode: () => 'preview',
         file: { path: 'notes/article.md' },
-        previewMode: { rerender },
+        previewMode: { rerender, containerEl: document.createElement('div') },
       }),
     };
 
@@ -504,6 +508,60 @@ describe('registerHighlightRefreshListener', () => {
     expect(rerender).toHaveBeenCalledWith(true);
   });
 
+  it('re-renders with scroll anchoring off, on either path', () => {
+    vi.useFakeTimers();
+    try {
+      const makeLeaf = () => {
+        const containerEl = document.createElement('div');
+        const scroller = containerEl.createDiv('markdown-preview-view');
+        const anchoring: string[] = [];
+        const rerender = vi.fn(() => anchoring.push(scroller.className));
+        let mode: 'source' | 'preview' = 'source';
+        const leaf = {
+          view: Object.assign(
+            Object.create(MarkdownView.prototype) as MarkdownView,
+            {
+              getMode: () => mode,
+              file: { path: 'notes/article.md' },
+              previewMode: { rerender, containerEl },
+              register: vi.fn(),
+            }
+          ),
+        };
+        const setMode = (to: typeof mode) => {
+          mode = to;
+        };
+        return { leaf, anchoring, setMode };
+      };
+      const queued = makeLeaf();
+      const open = makeLeaf();
+      open.setMode('preview');
+      const handlers: Map<string, ((...args: unknown[]) => void)[]> = new Map();
+      const plugin = makePlugin({
+        eventHandlers: handlers,
+        leaves: [queued.leaf, open.leaf],
+      });
+      registerHighlightRefreshListener(plugin as never);
+
+      handlers.get('ir-highlights-changed')![0]('notes/article.md');
+      expect(open.anchoring).toEqual([
+        'markdown-preview-view ' + RERENDERING_CLASS,
+      ]);
+      expect(queued.anchoring).toEqual([]);
+
+      // Queued only when no tab shows it in reading view
+      open.setMode('source');
+      handlers.get('ir-highlights-changed')![0]('notes/article.md');
+      queued.setMode('preview');
+      handlers.get('layout-change')![0]();
+      expect(queued.anchoring).toEqual([
+        'markdown-preview-view ' + RERENDERING_CLASS,
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not rerender when leaf is not in preview mode', async () => {
     const rerender = vi.fn();
     const { MarkdownView } = await import('obsidian');
@@ -511,7 +569,7 @@ describe('registerHighlightRefreshListener', () => {
       view: Object.assign(Object.create(MarkdownView.prototype), {
         getMode: () => 'source',
         file: { path: 'notes/article.md' },
-        previewMode: { rerender },
+        previewMode: { rerender, containerEl: document.createElement('div') },
       }),
     };
 
@@ -531,7 +589,7 @@ describe('registerHighlightRefreshListener', () => {
       view: Object.assign(Object.create(MarkdownView.prototype), {
         getMode: () => 'preview',
         file: { path: 'notes/other.md' },
-        previewMode: { rerender },
+        previewMode: { rerender, containerEl: document.createElement('div') },
       }),
     };
 
@@ -551,7 +609,7 @@ describe('registerHighlightRefreshListener', () => {
       view: Object.assign(Object.create(MarkdownView.prototype), {
         getMode: () => 'preview',
         file: { path: 'notes/article.md' },
-        previewMode: { rerender },
+        previewMode: { rerender, containerEl: document.createElement('div') },
       }),
     };
 
@@ -589,7 +647,7 @@ describe('registerHighlightRefreshListener', () => {
       view: Object.assign(Object.create(MarkdownView.prototype), {
         getMode: () => 'preview',
         file: { path: 'notes/article.md' },
-        previewMode: { rerender },
+        previewMode: { rerender, containerEl: document.createElement('div') },
       }),
     };
 
@@ -625,7 +683,7 @@ describe('registerHighlightRefreshListener', () => {
         // Plain object, NOT instanceof MarkdownView
         getMode: () => 'preview',
         file: { path: 'notes/article.md' },
-        previewMode: { rerender },
+        previewMode: { rerender, containerEl: document.createElement('div') },
       },
     };
 
@@ -647,7 +705,7 @@ describe('registerHighlightRefreshListener', () => {
       view: Object.assign(Object.create(MarkdownView.prototype), {
         getMode: () => 'preview',
         file: null,
-        previewMode: { rerender },
+        previewMode: { rerender, containerEl: document.createElement('div') },
       }),
     };
 
@@ -700,7 +758,7 @@ describe('registerHighlightRefreshListener — mutant coverage', () => {
       view: Object.assign(Object.create(MarkdownView.prototype), {
         getMode: () => 'preview',
         file: { path: 'notes/article.md' },
-        previewMode: { rerender },
+        previewMode: { rerender, containerEl: document.createElement('div') },
       }),
     };
     const { plugin, handlers } = makePlugin2([leaf]);
@@ -720,7 +778,7 @@ describe('registerHighlightRefreshListener — mutant coverage', () => {
       view: Object.assign(Object.create(MarkdownView.prototype), {
         getMode: () => 'source',
         file: { path: 'notes/article.md' },
-        previewMode: { rerender },
+        previewMode: { rerender, containerEl: document.createElement('div') },
       }),
     };
     const { plugin, handlers } = makePlugin2([leaf]);
@@ -741,14 +799,20 @@ describe('registerHighlightRefreshListener — mutant coverage', () => {
       view: Object.assign(Object.create(MarkdownView.prototype), {
         getMode: () => 'preview',
         file: { path: 'notes/a.md' },
-        previewMode: { rerender: rerenderA },
+        previewMode: {
+          rerender: rerenderA,
+          containerEl: document.createElement('div'),
+        },
       }),
     };
     const leafB = {
       view: Object.assign(Object.create(MarkdownView.prototype), {
         getMode: () => 'preview',
         file: { path: 'notes/b.md' },
-        previewMode: { rerender: rerenderB },
+        previewMode: {
+          rerender: rerenderB,
+          containerEl: document.createElement('div'),
+        },
       }),
     };
 
@@ -770,7 +834,7 @@ describe('registerHighlightRefreshListener — mutant coverage', () => {
       view: {
         getMode: () => 'preview',
         file: { path: 'notes/article.md' },
-        previewMode: { rerender },
+        previewMode: { rerender, containerEl: document.createElement('div') },
       },
     };
     // Queue by firing ir-highlights-changed with no matching leaves,
@@ -794,7 +858,7 @@ describe('registerHighlightRefreshListener — mutant coverage', () => {
       view: Object.assign(Object.create(MarkdownView.prototype), {
         getMode: () => 'preview',
         file: undefined,
-        previewMode: { rerender },
+        previewMode: { rerender, containerEl: document.createElement('div') },
       }),
     };
 
