@@ -69,7 +69,7 @@ function strategyGroup(container: HTMLElement) {
   return container.querySelector<HTMLElement>('.ir-segments[role="group"]');
 }
 
-/** An article's strategy segments: fixed intervals, then priority. */
+/** An article's strategy segments: priority, then fixed intervals. */
 function strategySegments(container: HTMLElement) {
   return [
     ...container.querySelectorAll<HTMLButtonElement>(
@@ -571,12 +571,12 @@ describe('SchedulingModalContent', () => {
 
     it('starts on fixed intervals iff the article has one', () => {
       const fixed = mount({ type: 'article', intervalDays: 5 });
-      expect(strategySegments(fixed).map(isPressed)).toEqual([true, false]);
+      expect(strategySegments(fixed).map(isPressed)).toEqual([false, true]);
       expect(intervalInput(fixed)).not.toBeNull();
       expect(priorityInput(fixed)).toBeNull();
 
       const prio = mount({ type: 'article', intervalDays: null });
-      expect(strategySegments(prio).map(isPressed)).toEqual([false, true]);
+      expect(strategySegments(prio).map(isPressed)).toEqual([true, false]);
       expect(priorityInput(prio)).not.toBeNull();
       expect(intervalInput(prio)).toBeNull();
     });
@@ -621,7 +621,7 @@ describe('SchedulingModalContent', () => {
     });
 
     it("shows the pressed segment's field, and Enter confirms its strategy", () => {
-      const strategies = ['fixed-interval', 'priority'] as const;
+      const strategies = ['priority', 'fixed-interval'] as const;
       fc.assert(
         fc.property(
           anyPriority,
@@ -647,8 +647,8 @@ describe('SchedulingModalContent', () => {
               expect(
                 segments.map((s) => s.classList.contains('is-active'))
               ).toEqual([index === 0, index === 1]);
-              expect(intervalInput(container) !== null).toBe(index === 0);
-              expect(priorityInput(container) !== null).toBe(index === 1);
+              expect(priorityInput(container) !== null).toBe(index === 0);
+              expect(intervalInput(container) !== null).toBe(index === 1);
             }
 
             press(modalRoot(container), 'Enter');
