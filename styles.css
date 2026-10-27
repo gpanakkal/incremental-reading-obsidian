@@ -2591,6 +2591,16 @@ body:not(.is-mobile) .ir-review-interface .ir-card-editor .ir-review-scroller {
   width: var(--touch-size-m);
 }
 
+.is-mobile .ir-queue-pagination .ir-review-button,
+.ir-queue-pagination-indicator,
+.ir-queue-page-input[type='text'] {
+  height: var(--touch-size-xs);
+}
+
+.is-mobile .ir-queue-pagination .ir-review-button {
+  border-radius: 8px;
+}
+
 /* Qualified by the element, and not for emphasis: Obsidian styles text boxes
    through `input[type='text'], input[type='search'], …`, which outweighs a
    bare class. Everything below that the app also sets — the 30px height, the
