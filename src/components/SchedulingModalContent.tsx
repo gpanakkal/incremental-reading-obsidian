@@ -11,6 +11,11 @@ import { FixedIntervalField } from './action-bar/FixedIntervalField';
 import { PriorityField } from './action-bar/PriorityField';
 import type { SchedulingModalProps } from './types';
 
+const STRATEGY_SEGMENTS: { strategy: SchedulingStrategy; label: string }[] = [
+  { strategy: 'priority', label: 'Priority scheduling' },
+  { strategy: 'fixed-interval', label: 'Fixed intervals' },
+];
+
 export function SchedulingModalContent({
   plugin,
   type,
@@ -37,14 +42,6 @@ export function SchedulingModalContent({
   const updateValues = (updates: Partial<typeof scheduleValues>) => {
     committedRef.current = { ...committedRef.current, ...updates };
     setScheduleValues(committedRef.current);
-  };
-
-  const handleToggle = (value: boolean) => {
-    if (value === true) {
-      setStrategy('priority');
-    } else {
-      setStrategy('fixed-interval');
-    }
   };
 
   /**
@@ -93,23 +90,20 @@ export function SchedulingModalContent({
       }}
     >
       {type === 'article' && (
-        <div className="ir-toggle">
-          <label className="ir-toggle-label">
-            Fixed intervals
-            <div
+        <div className="ir-segments" role="group">
+          {STRATEGY_SEGMENTS.map((segment) => (
+            <button
+              key={segment.strategy}
               className={
-                'checkbox-container' +
-                (strategy === 'priority' ? ' is-enabled' : '')
+                'ir-segment' +
+                (segment.strategy === strategy ? ' is-active' : '')
               }
+              aria-pressed={segment.strategy === strategy}
+              onClick={() => setStrategy(segment.strategy)}
             >
-              <input
-                type="checkbox"
-                checked={strategy === 'priority'}
-                onChange={(e) => handleToggle(e.currentTarget.checked)}
-              />
-            </div>
-            Priority scheduling
-          </label>
+              {segment.label}
+            </button>
+          ))}
         </div>
       )}
       {strategy === 'priority' ? (

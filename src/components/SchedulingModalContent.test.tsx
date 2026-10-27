@@ -5,6 +5,7 @@ import {
   MINIMUM_FIXED_REVIEW_INTERVAL,
   MINIMUM_PRIORITY,
 } from '#/lib/constants';
+import IRScheduler from '#/lib/IRScheduler';
 import { DEFAULT_SETTINGS } from '#/lib/settings';
 import fc from 'fast-check';
 import { render } from 'preact';
@@ -64,10 +65,25 @@ function modalRoot(container: HTMLElement) {
   return container.querySelector<HTMLElement>('.ir-scheduling-modal')!;
 }
 
-function strategyToggle(container: HTMLElement) {
-  return container.querySelector<HTMLInputElement>(
-    '.ir-toggle input[type="checkbox"]'
-  );
+function strategyGroup(container: HTMLElement) {
+  return container.querySelector<HTMLElement>('.ir-segments[role="group"]');
+}
+
+/** An article's strategy segments: fixed intervals, then priority. */
+function strategySegments(container: HTMLElement) {
+  return [
+    ...container.querySelectorAll<HTMLButtonElement>(
+      '.ir-segments[role="group"] > button.ir-segment'
+    ),
+  ];
+}
+
+const isPressed = (segment: HTMLElement) =>
+  segment.getAttribute('aria-pressed') === 'true';
+
+/** Press the strategy segment not pressed now, switching strategy. */
+function pressOtherSegment(container: HTMLElement) {
+  click(strategySegments(container).find((segment) => !isPressed(segment))!);
 }
 
 /** Focus `input` and type `text` over its value, as a user would. */
@@ -107,9 +123,8 @@ function confirmButton(container: HTMLElement) {
 /** Elements of an article's modal, other than a button, that Enter can come from. */
 const nonButtonEnterSources = fc.constantFrom(
   (c: HTMLElement) => modalRoot(c),
-  (c: HTMLElement) => strategyToggle(c)!,
-  (c: HTMLElement) => c.querySelector<HTMLElement>('.ir-scheduling-tooltip')!,
-  (c: HTMLElement) => c.querySelector<HTMLElement>('.ir-toggle-label')!
+  (c: HTMLElement) => strategyGroup(c)!,
+  (c: HTMLElement) => c.querySelector<HTMLElement>('.ir-scheduling-tooltip')!
 );
 
 function click(target: HTMLElement) {
@@ -332,8 +347,8 @@ describe('SchedulingModalContent', () => {
       void act(() => {
         intervalInput(container)!.blur();
       });
-      click(strategyToggle(container)!);
-      click(strategyToggle(container)!);
+      pressOtherSegment(container);
+      pressOtherSegment(container);
 
       expect(intervalInput(container)!.value).toBe('9');
       press(modalRoot(container), 'Enter');
@@ -415,7 +430,7 @@ describe('SchedulingModalContent', () => {
       const onClose = vi.fn<OnClose>();
       const container = mount({ type: 'article', intervalDays: null, onClose });
 
-      click(strategyToggle(container)!);
+      pressOtherSegment(container);
       press(modalRoot(container), 'Enter');
 
       expect(onClose).toHaveBeenCalledWith({
@@ -433,7 +448,7 @@ describe('SchedulingModalContent', () => {
         onClose,
       });
 
-      click(strategyToggle(container)!);
+      pressOtherSegment(container);
       press(modalRoot(container), 'Enter');
 
       expect(onClose).toHaveBeenCalledWith({ strategy: 'priority', value: 45 });
@@ -547,27 +562,158 @@ describe('SchedulingModalContent', () => {
     });
   });
 
-  describe('strategy toggle', () => {
+  describe('strategy segments', () => {
     it('shows only for articles', () => {
-      expect(strategyToggle(mount({ type: 'snippet' }))).toBeNull();
-      expect(strategyToggle(mount({ type: 'article' }))).not.toBeNull();
+      expect(strategyGroup(mount({ type: 'snippet' }))).toBeNull();
+      expect(strategySegments(mount({ type: 'snippet' }))).toEqual([]);
+      expect(strategySegments(mount({ type: 'article' }))).toHaveLength(2);
     });
 
     it('starts on fixed intervals iff the article has one', () => {
       const fixed = mount({ type: 'article', intervalDays: 5 });
-      expect(strategyToggle(fixed)!.checked).toBe(false);
+      expect(strategySegments(fixed).map(isPressed)).toEqual([true, false]);
       expect(intervalInput(fixed)).not.toBeNull();
       expect(priorityInput(fixed)).toBeNull();
-      expect(
-        fixed.querySelector('.checkbox-container')!.classList
-      ).not.toContain('is-enabled');
 
       const prio = mount({ type: 'article', intervalDays: null });
-      expect(strategyToggle(prio)!.checked).toBe(true);
+      expect(strategySegments(prio).map(isPressed)).toEqual([false, true]);
       expect(priorityInput(prio)).not.toBeNull();
       expect(intervalInput(prio)).toBeNull();
-      expect(prio.querySelector('.checkbox-container')!.classList).toContain(
-        'is-enabled'
+    });
+
+    it("presses only the segment of the article's strategy on open", () => {
+      fc.assert(
+        fc.property(
+          anyPriority,
+          fc.option(anyInterval, { nil: null }),
+          (priority, intervalDays) => {
+            const onClose = vi.fn<OnClose>();
+            const container = mount({
+              type: 'article',
+              priority,
+              intervalDays,
+              onClose,
+            });
+            const segments = strategySegments(container);
+            const pressed = segments.filter(isPressed);
+
+            expect(pressed).toHaveLength(1);
+            for (const segment of segments) {
+              expect(segment.classList.contains('is-active')).toBe(
+                isPressed(segment)
+              );
+            }
+
+            // Pressing it again keeps the strategy the article opened on
+            click(pressed[0]);
+            press(modalRoot(container), 'Enter');
+            expect(onClose.mock.calls).toEqual([
+              [
+                intervalDays === null
+                  ? { strategy: 'priority', value: priority }
+                  : { strategy: 'fixed-interval', value: intervalDays },
+              ],
+            ]);
+          }
+        ),
+        { numRuns: 30 }
+      );
+    });
+
+    it("shows the pressed segment's field, and Enter confirms its strategy", () => {
+      const strategies = ['fixed-interval', 'priority'] as const;
+      fc.assert(
+        fc.property(
+          anyPriority,
+          fc.option(anyInterval, { nil: null }),
+          fc.array(fc.constantFrom(0, 1), { minLength: 1, maxLength: 6 }),
+          (priority, intervalDays, presses) => {
+            const onClose = vi.fn<OnClose>();
+            const container = mount({
+              type: 'article',
+              priority,
+              intervalDays,
+              onClose,
+            });
+
+            for (const index of presses) {
+              click(strategySegments(container)[index]);
+
+              const segments = strategySegments(container);
+              expect(segments.map(isPressed)).toEqual([
+                index === 0,
+                index === 1,
+              ]);
+              expect(
+                segments.map((s) => s.classList.contains('is-active'))
+              ).toEqual([index === 0, index === 1]);
+              expect(intervalInput(container) !== null).toBe(index === 0);
+              expect(priorityInput(container) !== null).toBe(index === 1);
+            }
+
+            press(modalRoot(container), 'Enter');
+            const strategy = strategies[presses[presses.length - 1]];
+            expect(onClose.mock.calls).toEqual([
+              [
+                {
+                  strategy,
+                  value:
+                    strategy === 'priority'
+                      ? priority
+                      : (intervalDays ?? MINIMUM_FIXED_REVIEW_INTERVAL),
+                },
+              ],
+            ]);
+          }
+        ),
+        { numRuns: 40 }
+      );
+    });
+
+    it('leaves Enter on a segment to the segment, never confirming', () => {
+      fc.assert(
+        fc.property(
+          fc.option(anyInterval, { nil: null }),
+          fc.constantFrom(0, 1),
+          (intervalDays, index) => {
+            const onClose = vi.fn<OnClose>();
+            const container = mount({ type: 'article', intervalDays, onClose });
+
+            const event = press(strategySegments(container)[index], 'Enter');
+
+            expect(event.defaultPrevented).toBe(false);
+            expect(onClose).not.toHaveBeenCalled();
+          }
+        ),
+        { numRuns: 10 }
+      );
+    });
+  });
+
+  describe('field hint', () => {
+    /** `low`, then `high` later on, each standing apart from other digits. */
+    function rangeFrom(low: string | number, high: string | number) {
+      const escape = (bound: string | number) =>
+        String(bound).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return new RegExp(
+        `(^|\\D)${escape(low)}\\D.*\\D${escape(high)}(\\D|$)`,
+        's'
+      );
+    }
+
+    const hint = (container: HTMLElement) =>
+      container.querySelector<HTMLElement>('.ir-scheduling-tooltip')!
+        .textContent;
+
+    it("states the shown field's range", () => {
+      expect(hint(mount({ intervalDays: 4 }))).toMatch(
+        rangeFrom(MINIMUM_FIXED_REVIEW_INTERVAL, MAXIMUM_FIXED_REVIEW_INTERVAL)
+      );
+      expect(hint(mount({ intervalDays: null }))).toMatch(
+        rangeFrom(
+          IRScheduler.toDisplayPriority(MINIMUM_PRIORITY),
+          IRScheduler.toDisplayPriority(MAXIMUM_PRIORITY)
+        )
       );
     });
   });

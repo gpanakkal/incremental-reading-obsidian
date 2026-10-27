@@ -1940,9 +1940,7 @@ describe('BulkImportModal: filter bar', () => {
 
   function segments(modal: BulkImportModal) {
     return [
-      ...modal.contentEl.querySelectorAll<HTMLButtonElement>(
-        '.ir-bulk-import-filter-segment'
-      ),
+      ...modal.contentEl.querySelectorAll<HTMLButtonElement>('.ir-segment'),
     ];
   }
 
@@ -2184,9 +2182,7 @@ describe('BulkImportModal: filter bar', () => {
   /** Press the filter bar's segment for tags. */
   async function pressTag(modal: BulkImportModal) {
     const segment = [
-      ...modal.contentEl.querySelectorAll<HTMLButtonElement>(
-        '.ir-bulk-import-filter-segment'
-      ),
+      ...modal.contentEl.querySelectorAll<HTMLButtonElement>('.ir-segment'),
     ][1];
     await click(segment);
     await settle();

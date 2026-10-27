@@ -114,11 +114,7 @@ function mount(segments: readonly FilterSegment[]) {
 }
 
 function segmentButtons(container: HTMLElement) {
-  return [
-    ...container.querySelectorAll<HTMLButtonElement>(
-      '.ir-bulk-import-filter-segment'
-    ),
-  ];
+  return [...container.querySelectorAll<HTMLButtonElement>('.ir-segment')];
 }
 
 /** Press the tag segment, the second. */

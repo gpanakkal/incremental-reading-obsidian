@@ -67,13 +67,12 @@ export function BulkImportFilterBar({
 
   return (
     <div className="ir-bulk-import-filter">
-      <div className="ir-bulk-import-filter-segments" role="group">
+      <div className="ir-segments" role="group">
         {segments.map((segment) => (
           <button
             key={segment.id}
             className={
-              'ir-bulk-import-filter-segment' +
-              (segment.id === active.id ? ' is-active' : '')
+              'ir-segment' + (segment.id === active.id ? ' is-active' : '')
             }
             aria-pressed={segment.id === active.id}
             onClick={() => press(segment)}

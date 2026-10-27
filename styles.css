@@ -1906,7 +1906,9 @@ body:not(.is-mobile) .ir-review-interface .ir-card-editor .ir-review-scroller {
   gap: var(--size-4-2);
 }
 
-.ir-bulk-import-filter-segments {
+/* A segmented button group: a track of `.ir-segment` buttons, the pressed one
+   `.is-active` (the bulk-import filter bar, the scheduling modal's strategy). */
+.ir-segments {
   display: flex;
   align-self: flex-start;
   gap: var(--size-2-1);
@@ -1918,7 +1920,7 @@ body:not(.is-mobile) .ir-review-interface .ir-card-editor .ir-review-scroller {
 
 /* Two classes, to outrank Obsidian's `button:not(.clickable-icon)` face, as
    the item-type filter's toggles do. */
-.ir-bulk-import-filter-segments .ir-bulk-import-filter-segment {
+.ir-segments .ir-segment {
   height: auto;
   padding: var(--size-2-1) var(--size-4-2);
   border-radius: var(--radius-s);
@@ -1929,28 +1931,25 @@ body:not(.is-mobile) .ir-review-interface .ir-card-editor .ir-review-scroller {
   cursor: pointer;
 }
 
-/* The pressed filter wears the accent, as Obsidian's `button.mod-cta` does
+/* The pressed segment wears the accent, as Obsidian's `button.mod-cta` does
    (app.css): the `--interactive-normal` face hardly stood off the track. */
-.ir-bulk-import-filter-segments .ir-bulk-import-filter-segment.is-active {
+.ir-segments .ir-segment.is-active {
   background-color: var(--interactive-accent);
   color: var(--text-on-accent);
 }
 
 /* Obsidian marks a tapped button `.mobile-tap` (app.css, undocumented). */
-.ir-bulk-import-filter-segments
-  .ir-bulk-import-filter-segment.is-active.mobile-tap {
+.ir-segments .ir-segment.is-active.mobile-tap {
   background-color: var(--interactive-accent-hover);
 }
 
 @media (hover: hover) {
-  .ir-bulk-import-filter-segments
-    .ir-bulk-import-filter-segment:not(.is-active):hover {
+  .ir-segments .ir-segment:not(.is-active):hover {
     background-color: var(--background-modifier-hover);
     color: var(--text-normal);
   }
 
-  .ir-bulk-import-filter-segments
-    .ir-bulk-import-filter-segment.is-active:hover {
+  .ir-segments .ir-segment.is-active:hover {
     background-color: var(--interactive-accent-hover);
   }
 }
@@ -1958,7 +1957,7 @@ body:not(.is-mobile) .ir-review-interface .ir-card-editor .ir-review-scroller {
 /* The `box-shadow: none` above outranks Obsidian's `button:focus-visible`
    ring, so it is restored here; drawn outside the face, in the border-focus
    gray, so it shows on the accent fill as on the bare track. */
-.ir-bulk-import-filter-segments .ir-bulk-import-filter-segment:focus-visible {
+.ir-segments .ir-segment:focus-visible {
   box-shadow: 0 0 0 2px var(--background-modifier-border-focus);
 }
 
