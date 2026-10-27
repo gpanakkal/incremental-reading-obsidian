@@ -4,15 +4,9 @@ import type { QueueRow } from '#/components/types';
 import { useAppSelector } from '#/hooks/useAppSelector';
 import { useQueue } from '#/hooks/useReactQuery';
 import { QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE } from '#/lib/constants';
-import { deleteMissingItem } from '#/lib/delete-missing-item';
-import { tableOf } from '#/lib/relink';
 import { goToReviewPlace } from '#/lib/review-history';
 import type { IRPluginState } from '#/lib/store';
-import { unimportArticle } from '#/lib/unimport-article';
 import { currentReviewDay, reviewDayOf } from '#/lib/utils';
-import type IncrementalReadingPlugin from '#/main';
-import { openRelinkPicker } from '#/views/RelinkModal';
-import { Menu } from 'obsidian';
 import { useEffect, useRef, useState } from 'react';
 import { useStore } from 'react-redux';
 import {
@@ -23,6 +17,7 @@ import {
   renderQueueCells,
 } from './columns';
 import { DateJumpField } from './DateJumpField';
+import { queueRowMenu } from './queue-row-menu';
 import { QueuePagination } from './QueuePagination';
 import { QueueTable } from './QueueTable';
 import { VisibleRangeLabel } from './VisibleRangeLabel';
@@ -30,56 +25,6 @@ import { VisibleRangeLabel } from './VisibleRangeLabel';
 const QUEUE_TABLE_TITLE = 'Upcoming';
 const QUEUE_ERROR_MESSAGE =
   "Couldn't load the queue. See the developer console for details.";
-
-/**
- * The menu for one queue row. "Relink file…" is offered on every row so the
- * menu reads the same throughout, but only a row missing its file can take it.
- * "Permanently delete" is offered only there: a row with its note is deleted
- * by deleting the note. "Un-import article…" is offered on an article row
- * with its file, and does what the file menu's entry does.
- */
-export function queueRowMenu(
-  plugin: IncrementalReadingPlugin,
-  row: QueueRow
-): Menu {
-  const menu = new Menu().addItem((item) =>
-    item
-      .setTitle('Relink file…')
-      .setIcon('link')
-      .setDisabled(row.file !== null)
-      .onClick(() => {
-        void openRelinkPicker(plugin, {
-          table: tableOf(row.type),
-          id: row.id,
-          reference: row.reference,
-        });
-      })
-  );
-  if (row.file === null) {
-    menu.addItem((item) =>
-      item
-        .setTitle('Permanently delete')
-        .setIcon('trash-2')
-        .setWarning(true)
-        .onClick(() => {
-          void deleteMissingItem(plugin, row);
-        })
-    );
-  }
-  const { file } = row;
-  if (row.type === 'article' && file !== null) {
-    menu.addItem((item) =>
-      item
-        .setTitle('Un-import article…')
-        .setIcon('file-x')
-        .setWarning(true)
-        .onClick(() => {
-          void unimportArticle(plugin, file);
-        })
-    );
-  }
-  return menu;
-}
 
 export function ReviewQueue() {
   const { plugin, reviewManager } = useReviewContext();

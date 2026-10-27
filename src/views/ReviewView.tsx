@@ -6,6 +6,7 @@ import { isEditableText } from '#/lib/mime';
 import type { ExtractedMarkdownEditor } from '#/lib/obsidian-editor';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import type { PdfViewer } from '#/lib/pdf/obsidian-pdf';
+import { addRevealInNavigationItem } from '#/lib/reveal-in-navigation';
 import {
   actionsToReach,
   goToReviewPlace,
@@ -1106,17 +1107,7 @@ export default class ReviewView extends FileView {
     // so only desktop gets it. Adding ours unconditionally would list the
     // action twice there.
     if (Platform.isMobile) {
-      menu.addItem((item) =>
-        item
-          .setTitle('Reveal file in navigation')
-          .setIcon('lucide-folder-open')
-          .setSection('pane')
-          .onClick(() => {
-            this.app.internalPlugins
-              .getEnabledPluginById('file-explorer')
-              ?.revealInFolder(file);
-          })
-      );
+      addRevealInNavigationItem(menu, this.app, file, 'pane');
     }
   }
 

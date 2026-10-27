@@ -3,7 +3,6 @@ import * as ReviewContext from '#/components/ReviewContext';
 import type { QueuePage, QueueRow } from '#/components/types';
 import * as ReactQuery from '#/hooks/useReactQuery';
 import { QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE } from '#/lib/constants';
-import * as DeleteMissingItemModule from '#/lib/delete-missing-item';
 import type ReviewManager from '#/lib/items/ReviewManager';
 import { QueuePageMemory } from '#/lib/queue-page-memory';
 import {
@@ -14,16 +13,14 @@ import {
   store,
 } from '#/lib/store';
 import { NOTE_TYPES, type NoteType } from '#/lib/types';
-import * as UnimportArticleModule from '#/lib/unimport-article';
 import { Menu } from '#/test/__mocks__/obsidian';
-import * as RelinkModalModule from '#/views/RelinkModal';
 import fc from 'fast-check';
 import type { TFile } from 'obsidian';
 import type { ComponentChild } from 'preact';
 import { render } from 'preact';
 import { act } from 'preact/test-utils';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ReviewQueue, queueRowMenu } from './ReviewQueue';
+import { ReviewQueue } from './ReviewQueue';
 
 // #region HELPERS
 
@@ -1135,95 +1132,10 @@ describe('ReviewQueue under the review type filter', () => {
   });
 });
 
-describe('queue row menu', () => {
+describe('queue rows', () => {
   afterEach(() => {
     document.body.innerHTML = '';
     vi.restoreAllMocks();
-  });
-
-  it.each([
-    ['article', 'article'],
-    ['snippet', 'snippet'],
-    ['card', 'srs_card'],
-  ] as const)('relinks a missing %s from its own table', (type, table) => {
-    const openRelinkPicker = vi
-      .spyOn(RelinkModalModule, 'openRelinkPicker')
-      .mockResolvedValue(null);
-    const plugin = { name: 'plugin' };
-    const row = makeQueueRow({
-      id: 'x',
-      type,
-      reference: 'gone.md',
-      file: null,
-    });
-
-    const menu = queueRowMenu(plugin as never, row) as unknown as Menu;
-
-    expect(menu.items.map((item) => item.icon)).toEqual(['link', 'trash-2']);
-    const [relink] = menu.items;
-    expect(relink.disabled).toBe(false);
-    expect(openRelinkPicker).not.toHaveBeenCalled();
-    relink.callback?.(undefined);
-    expect(openRelinkPicker).toHaveBeenCalledExactlyOnceWith(plugin, {
-      table,
-      id: 'x',
-      reference: 'gone.md',
-    });
-  });
-
-  it('offers relinking only to a row that is missing its file', () => {
-    const menu = queueRowMenu(
-      {} as never,
-      makeQueueRow({ type: 'snippet' })
-    ) as unknown as Menu;
-
-    expect(menu.items.map((item) => [item.icon, item.disabled])).toEqual([
-      ['link', true],
-    ]);
-  });
-
-  it('offers to un-import only an article row with its file, as a warning', () => {
-    const unimportArticle = vi
-      .spyOn(UnimportArticleModule, 'unimportArticle')
-      .mockResolvedValue(true);
-    fc.assert(
-      fc.property(
-        fc.constantFrom('article', 'snippet', 'card'),
-        fc.boolean(),
-        (type, hasFile) => {
-          const row = makeQueueRow({
-            type,
-            file: hasFile ? ({ path: 'notes/x.md' } as TFile) : null,
-          });
-
-          const menu = queueRowMenu({} as never, row) as unknown as Menu;
-
-          const offered = type === 'article' && hasFile;
-          expect(menu.items.map((item) => [item.icon, item.warning])).toEqual([
-            ['link', false],
-            ...(hasFile ? [] : [['trash-2', true]]),
-            ...(offered ? [['file-x', true]] : []),
-          ]);
-          expect(unimportArticle).not.toHaveBeenCalled();
-        }
-      )
-    );
-  });
-
-  it('un-imports the row’s file once its entry is picked', () => {
-    const unimportArticle = vi
-      .spyOn(UnimportArticleModule, 'unimportArticle')
-      .mockResolvedValue(true);
-    const plugin = { name: 'plugin' };
-    const file = { path: 'notes/x.md' } as TFile;
-
-    const menu = queueRowMenu(
-      plugin as never,
-      makeQueueRow({ file })
-    ) as unknown as Menu;
-    menu.items.find(({ icon }) => icon === 'file-x')?.callback?.(undefined);
-
-    expect(unimportArticle).toHaveBeenCalledExactlyOnceWith(plugin, file);
   });
 
   it('opens a clicked row in review, with the item left open reset', () => {
@@ -1257,31 +1169,11 @@ describe('queue row menu', () => {
 
     expect(shown).toHaveBeenCalledTimes(1);
     expect(shown.mock.calls[0][0]).toEqual({ x: 3, y: 4 });
+    // The menu built for this row: its relink entry is enabled, as only a
+    // row missing its file has it (queue-row-menu.test.ts covers the rest)
     const menu = shown.mock.contexts[0] as Menu;
-    expect(menu.items.map((item) => [item.icon, item.disabled])).toEqual([
-      ['link', false],
-      ['trash-2', false],
-    ]);
+    expect(menu.items.find(({ icon }) => icon === 'link')?.disabled).toBe(
+      false
+    );
   });
-
-  it.each(['article', 'snippet', 'card'] as const)(
-    'offers to permanently delete a missing %s, as a warning, once picked',
-    (type) => {
-      const deleteMissingItem = vi
-        .spyOn(DeleteMissingItemModule, 'deleteMissingItem')
-        .mockResolvedValue(true);
-      const plugin = { name: 'plugin' };
-      const row = makeQueueRow({ id: 'x', type, file: null });
-
-      const menu = queueRowMenu(plugin as never, row) as unknown as Menu;
-
-      const item = menu.items.find(
-        ({ title }) => title === 'Permanently delete'
-      );
-      expect(item?.warning).toBe(true);
-      expect(deleteMissingItem).not.toHaveBeenCalled();
-      item?.callback?.(undefined);
-      expect(deleteMissingItem).toHaveBeenCalledExactlyOnceWith(plugin, row);
-    }
-  );
 });
