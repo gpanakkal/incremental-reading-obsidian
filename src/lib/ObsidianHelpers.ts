@@ -35,6 +35,7 @@ import {
 } from './constants';
 import { Markdown } from './Markdown';
 import { isEditableText, supportsFrontmatter } from './mime';
+import { isNestedEditor } from './nested-editor';
 import { notify, type NotifyOptions } from './notices';
 import { parseSourceLink } from './source-link';
 import { stripFrontmatterTags } from './tags';
@@ -798,15 +799,21 @@ export class ObsidianHelpers {
 
   /**
    * Get the file associated with the current editor state.
-   * Returns null if no file is associated (e.g., in a new unsaved buffer).
+   * Returns null if no file is associated (e.g., in a new unsaved buffer), and
+   * in an editor nested inside a note's editor, such as a table cell's in Live
+   * Preview: it holds only a fragment of the note, so nothing file-level
+   * applies there (see {@link isNestedEditor}).
    */
   static getFileInfoFromState(state: EditorState): {
     info: MarkdownFileInfo | null;
     editorView: EditorView | null;
   } {
-    const info = state.field(editorInfoField, false);
-    const editorView = state.field(editorEditorField, false);
-    return { info: info ?? null, editorView: editorView ?? null };
+    const info = state.field(editorInfoField, false) ?? null;
+    const editorView = state.field(editorEditorField, false) ?? null;
+    if (editorView && isNestedEditor(editorView, info)) {
+      return { info: null, editorView };
+    }
+    return { info, editorView };
   }
 
   static inEditMode(document: Document): boolean {

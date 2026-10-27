@@ -2844,6 +2844,36 @@ describe('getFileInfoFromState', () => {
     expect(result.info).toBeNull();
     expect(result.editorView).toBeNull();
   });
+
+  it("holds no file for an editor nested in a note's, such as a table cell's", () => {
+    // Obsidian's cell editor names the note's view as its owner, whose
+    // editor is the note's own EditorView
+    const cellView = { dom: { parentElement: null } };
+    const noteInfo = {
+      file: makeTFile(),
+      editor: { cm: { dom: { parentElement: null } } },
+    };
+    const state = {
+      field: vi
+        .fn()
+        .mockReturnValueOnce(noteInfo)
+        .mockReturnValueOnce(cellView),
+    } as unknown as EditorState;
+
+    const result = ObsidianHelpers.getFileInfoFromState(state);
+    expect(result.info).toBeNull();
+    expect(result.editorView).toBe(cellView);
+  });
+
+  it("holds the file for a note's own editor", () => {
+    const view = { dom: { parentElement: null } };
+    const info = { file: makeTFile(), editor: { cm: view } };
+    const state = {
+      field: vi.fn().mockReturnValueOnce(info).mockReturnValueOnce(view),
+    } as unknown as EditorState;
+
+    expect(ObsidianHelpers.getFileInfoFromState(state).info).toBe(info);
+  });
 });
 
 // ---------------------------------------------------------------------------

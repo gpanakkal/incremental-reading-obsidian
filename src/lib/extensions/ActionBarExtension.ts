@@ -728,13 +728,9 @@ const actionBarPanelFacet = showPanel.compute(
     const actionBarState = state.field(actionBarStateField);
     if (actionBarState.isReviewMode) return null;
 
-    const { info, editorView } = Obsidian.getFileInfoFromState(state);
+    // No file in a table cell's editor, so no bar inside the table either
+    const { info } = Obsidian.getFileInfoFromState(state);
     if (!info?.file) return null;
-
-    const inSubEditor = !editorView?.dom.parentElement?.hasClass(
-      'markdown-source-view'
-    );
-    if (inSubEditor) return null;
 
     const { noteType } = actionBarState;
     if (!noteType) return null;

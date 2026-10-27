@@ -251,8 +251,6 @@ function mountPanel(
     },
   };
   const parent = document.createElement('div');
-  // Satisfies the extension's "not a sub-editor" check.
-  parent.className = 'markdown-source-view';
   document.body.appendChild(parent);
 
   let view: EditorView | null = null;

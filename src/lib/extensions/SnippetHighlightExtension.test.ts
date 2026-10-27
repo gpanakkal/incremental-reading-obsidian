@@ -20,7 +20,12 @@ import {
 import { EditorState, Transaction, type Extension } from '@codemirror/state';
 import { EditorView } from '@codemirror/view';
 import fc from 'fast-check';
-import type { App, TFile } from 'obsidian';
+import {
+  editorEditorField,
+  editorInfoField,
+  type App,
+  type TFile,
+} from 'obsidian';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   isExternalSync,
@@ -3307,4 +3312,100 @@ describe('highlights in a note typed by the item layer', () => {
     expect(query).not.toHaveBeenCalled();
     view.destroy();
   });
+});
+
+describe("in an editor nested in a note's, as a table cell's is", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    document.body.innerHTML = '';
+  });
+
+  /**
+   * A view whose state holds what Obsidian gives its editors: the note's view
+   * as owner, and the editor itself. A table cell's editor has the note's view
+   * as owner too, whose editor is the note's own, so the two differ. Read
+   * through the real `getFileInfoFromState`, so the guard there decides.
+   */
+  function makeOwnedView(nested: boolean) {
+    const rm = makeReviewManager();
+    rm.snippets.offsetTracker.loadHighlights(FILE_PATH, [makeHighlight()]);
+    const irPlugin = makePlugin(rm);
+    vi.spyOn(Obsidian, 'isSourceNote').mockReturnValue(false);
+    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('article');
+    // Stands in for the view's own EditorView, which the extension reads
+    // while the view is still being constructed
+    const own = { dom: document.createElement('div') };
+    const notesEditor = nested ? { dom: document.createElement('div') } : own;
+    const info = {
+      file: { path: FILE_PATH },
+      app: {},
+      editor: { cm: notesEditor },
+    };
+    // Taken off the prototype before it is spied on, to read every other field
+    const field = Object.getOwnPropertyDescriptor(
+      EditorState.prototype,
+      'field'
+    )?.value as (
+      this: EditorState,
+      wanted: unknown,
+      require?: boolean
+    ) => unknown;
+    vi.spyOn(EditorState.prototype, 'field').mockImplementation(function (
+      this: EditorState,
+      wanted: unknown,
+      require?: boolean
+    ) {
+      if (wanted === editorInfoField) return info;
+      if (wanted === editorEditorField) return own;
+      return field.call(this, wanted, require) as unknown;
+    } as never);
+    const view = makeView('hello world, and more after it', irPlugin);
+    return { view, irPlugin, rm };
+  }
+
+  it.each([
+    { nested: true, painted: 0 },
+    { nested: false, painted: 1 },
+  ])(
+    'loads and paints highlights only in a note’s own editor (nested: $nested)',
+    async ({ nested, painted }) => {
+      const { view, irPlugin, rm } = makeOwnedView(nested);
+      await vi.runAllTimersAsync();
+
+      expect(rm.getSnippetHighlights).toHaveBeenCalledTimes(nested ? 0 : 1);
+      expect(view.plugin(snippetHighlightExtension)!.decorations.size).toBe(
+        painted
+      );
+
+      // Nor does the note's highlights changing reach a nested editor
+      irPlugin.app.workspace.trigger('ir-highlights-changed', FILE_PATH);
+      expect(view.plugin(snippetHighlightExtension)!.decorations.size).toBe(
+        painted
+      );
+      view.destroy();
+    }
+  );
+
+  it.each([
+    { nested: true, start: 0, writes: 0 },
+    { nested: false, start: 3, writes: 1 },
+  ])(
+    'moves and saves the note’s highlights only for edits in its own editor (nested: $nested)',
+    async ({ nested, start, writes }) => {
+      const { view, rm } = makeOwnedView(nested);
+      await vi.runAllTimersAsync();
+
+      // The cell's text reaches the note through the note's own editor, which
+      // moves the highlights there; moving them here too would move them twice
+      view.dispatch({ changes: { from: 0, insert: 'abc' } });
+      await vi.runAllTimersAsync();
+
+      const [highlight] = rm.snippets.offsetTracker.getHighlights(FILE_PATH);
+      expect(highlight.start_offset).toBe(start);
+      expect(rm.updateSnippetOffsets).toHaveBeenCalledTimes(writes);
+      view.destroy();
+    }
+  );
 });
