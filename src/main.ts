@@ -33,6 +33,7 @@ import { trackNavbarFootprint } from '#/lib/navbar-footprint';
 import { isPdfView, stopPdfTabSelections } from '#/lib/pdf/obsidian-pdf';
 import { registerPluginIcon } from '#/lib/plugin-icon';
 import type { PositionStore } from '#/lib/position-store';
+import { QueuePageMemory } from '#/lib/queue-page-memory';
 import {
   createPositionStore,
   registerPositionFlushes,
@@ -268,6 +269,11 @@ export default class IncrementalReadingPlugin extends Plugin {
    */
   positions!: PositionStore<ItemPositionRow>;
   store!: typeof store;
+  /**
+   * The upcoming table's last chosen page, kept for this plugin session only
+   * (see `#/lib/queue-page-memory`).
+   */
+  readonly queuePage = new QueuePageMemory();
   actions!: Actions;
   /**
    * Re-checks which open tabs carry a standalone action bar. Unset until the
@@ -575,6 +581,7 @@ export default class IncrementalReadingPlugin extends Plugin {
    */
   onunload() {
     this.reviewManager?.repo.dispose();
+    this.queuePage.clear();
     configureSuccessNotices(null);
     this.stopDebugTiming?.();
   }

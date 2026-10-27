@@ -670,6 +670,70 @@ test.describe('Review history navigation', () => {
     await expectReviewHome(window);
   });
 
+  test('the upcoming table keeps its page across back and home, and goes back to the first page when the type filter changes', async () => {
+    // More articles than one page of the table holds
+    await window.evaluate(async () => {
+      const { app } = window as unknown as {
+        app: {
+          vault: {
+            createFolder(path: string): Promise<unknown>;
+            create(path: string, data: string): Promise<unknown>;
+          };
+          plugins: {
+            plugins: Record<
+              string,
+              { importArticle(file: unknown, opts: object): Promise<void> }
+            >;
+          };
+        };
+      };
+      await app.vault.createFolder('paging');
+      for (let i = 0; i < 25; i++) {
+        const name = `Paging ${String(i).padStart(2, '0')}`;
+        const file = await app.vault.create(`paging/${name}.md`, `# ${name}\n`);
+        await app.plugins.plugins['incremental-reading'].importArticle(file, {
+          copyOnImport: false,
+          showImportDialog: false,
+        });
+      }
+    });
+    await executeCommandById(window, 'incremental-reading:learn');
+    await expectReviewHome(window);
+    const pageInput = window.locator('.ir-queue-page-input');
+    const homeButton = window.getByRole('button', {
+      name: 'Go to home screen',
+    });
+    await expect(pageInput).toHaveValue('1');
+    await window.getByRole('button', { name: 'Next page' }).click();
+    await expect(pageInput).toHaveValue('2');
+
+    /** Open the first item on the page in view, leaving the home screen. */
+    async function openFromTable() {
+      await window.locator('.ir-queue-row').first().click();
+      await waitForReviewItem(window);
+    }
+
+    await openFromTable();
+    await executeCommandById(window, 'app:go-back');
+    await expectReviewHome(window);
+    await expect(pageInput).toHaveValue('2');
+
+    await openFromTable();
+    await homeButton.click();
+    await expectReviewHome(window);
+    await expect(pageInput).toHaveValue('2');
+
+    await openFromTable();
+    const cardToggle = window.locator(
+      '.ir-type-filter-toggle[data-type="card"]'
+    );
+    await cardToggle.click();
+    await expect(cardToggle).toHaveAttribute('aria-pressed', 'false');
+    await homeButton.click();
+    await expectReviewHome(window);
+    await expect(pageInput).toHaveValue('1');
+  });
+
   test('the learn command from the home screen opens the first item due, not the one left last', async () => {
     await importTwoArticles();
     const first = await beginReview();

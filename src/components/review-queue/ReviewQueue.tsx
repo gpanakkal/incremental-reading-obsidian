@@ -13,7 +13,7 @@ import { currentReviewDay, reviewDayOf } from '#/lib/utils';
 import type IncrementalReadingPlugin from '#/main';
 import { openRelinkPicker } from '#/views/RelinkModal';
 import { Menu } from 'obsidian';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useStore } from 'react-redux';
 import {
   buildQueueColumns,
@@ -84,19 +84,27 @@ export function queueRowMenu(
 export function ReviewQueue() {
   const { plugin, reviewManager } = useReviewContext();
   const store = useStore<IRPluginState>();
-  // The review type filter, which the queue shares with review itself: one
-  // setting, flipped from either screen
+  // The review type filter, which the queue shares with review itself
   const typesToReview = useAppSelector((state) => state.typesToReview);
-  // The page is held together with the filter it was chosen under, and reads
-  // as the first page under any other. A filter change makes a different
-  // queue, where page 3 of the old one names nothing in particular. Tying the
-  // two together also discards a date lookup that resolves after the filter
-  // changed: its page was counted in the old queue.
-  const [paging, setPaging] = useState({ types: typesToReview, page: 0 });
+  // The page is held with the filter it was chosen under and reads as the
+  // first page under any other: a filter change makes a different queue. It
+  // opens on the page last chosen this session, so leaving the home screen and
+  // coming back lands where the user was.
+  const [paging, setPaging] = useState(() => ({
+    types: typesToReview,
+    page: plugin.queuePage.get(typesToReview),
+  }));
   const pageNumber = paging.types === typesToReview ? paging.page : 0;
   const setPageNumber = (page: number) => {
+    // A date lookup can resolve after the filter changed. Its page was
+    // counted in the old queue, and the page chosen since is the one to keep.
+    if (typesToReview !== store.getState().typesToReview) return;
     setPaging({ types: typesToReview, page });
   };
+  const { queuePage } = plugin;
+  useEffect(() => {
+    queuePage.set(typesToReview, pageNumber);
+  }, [queuePage, typesToReview, pageNumber]);
   /** Ticket for the most recent date lookup; older results are discarded. */
   const latestJump = useRef(0);
   /**
@@ -113,6 +121,19 @@ export function ReviewQueue() {
     },
     typesToInclude: typesToReview,
   });
+
+  // The queue can shrink under a page, remembered or not, as items are
+  // reviewed or deleted. getQueue already serves its last page instead, so
+  // this only moves the page itself back to match, before a regrown queue
+  // can carry the table off to the stale page again. Adjusted during render
+  // rather than in an effect, so the stale page never commits.
+  const lastPage =
+    data && !isLoading && !isError && data.totalRows > 0
+      ? Math.ceil(data.totalRows / QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE) - 1
+      : null;
+  if (lastPage !== null && pageNumber > lastPage) {
+    setPaging({ types: typesToReview, page: lastPage });
+  }
 
   function handleRowClick(row: QueueRow) {
     goToReviewPlace(store, row.id);

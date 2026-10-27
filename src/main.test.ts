@@ -32,6 +32,7 @@ import {
   parsePluginData,
 } from '#/lib/plugin-data';
 import { queryClient } from '#/lib/query-client';
+import { QueuePageMemory } from '#/lib/queue-page-memory';
 import { MERGE_WAIT_MS } from '#/lib/readiness';
 import {
   DatabaseLoadError,
@@ -5174,7 +5175,10 @@ describe('IncrementalReadingPlugin unload', () => {
 
   it('disposes the database repository', () => {
     const dispose = vi.fn();
-    const receiver = { reviewManager: { repo: { dispose } } };
+    const receiver = {
+      reviewManager: { repo: { dispose } },
+      queuePage: new QueuePageMemory(),
+    };
 
     IncrementalReadingPlugin.prototype.onunload.call(
       receiver as unknown as IncrementalReadingPlugin
@@ -5186,6 +5190,7 @@ describe('IncrementalReadingPlugin unload', () => {
   it('shows every success again once unloaded, whatever its levels said', () => {
     const receiver = {
       reviewManager: undefined,
+      queuePage: new QueuePageMemory(),
       settings: {
         successNoticesInReview: 'none' as const,
         successNoticesOutsideReview: 'none' as const,
@@ -5203,8 +5208,24 @@ describe('IncrementalReadingPlugin unload', () => {
     expect(Notice.messages).toEqual(['done']);
   });
 
+  it('forgets the upcoming table page, so the next launch opens on the first', () => {
+    const filter = { article: true } as const;
+    const queuePage = new QueuePageMemory();
+    queuePage.set(filter, 3);
+    const receiver = { reviewManager: undefined, queuePage };
+
+    IncrementalReadingPlugin.prototype.onunload.call(
+      receiver as unknown as IncrementalReadingPlugin
+    );
+
+    expect(queuePage.get(filter)).toBe(0);
+  });
+
   it('unloads when the database never started', () => {
-    const receiver = { reviewManager: undefined };
+    const receiver = {
+      reviewManager: undefined,
+      queuePage: new QueuePageMemory(),
+    };
 
     expect(() => {
       IncrementalReadingPlugin.prototype.onunload.call(

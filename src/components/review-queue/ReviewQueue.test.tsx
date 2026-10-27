@@ -5,6 +5,7 @@ import * as ReactQuery from '#/hooks/useReactQuery';
 import { QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE } from '#/lib/constants';
 import * as DeleteMissingItemModule from '#/lib/delete-missing-item';
 import type ReviewManager from '#/lib/items/ReviewManager';
+import { QueuePageMemory } from '#/lib/queue-page-memory';
 import {
   resetSession,
   setCurrentItemId,
@@ -20,6 +21,7 @@ import fc from 'fast-check';
 import type { TFile } from 'obsidian';
 import type { ComponentChild } from 'preact';
 import { render } from 'preact';
+import { act } from 'preact/test-utils';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ReviewQueue, queueRowMenu } from './ReviewQueue';
 
@@ -77,6 +79,8 @@ function wireQueue({
   isError = false,
   /** Whether the query still holds a page; false models a failed first load. */
   hasData = true,
+  /** The plugin's remembered page, shared by every mount given it. */
+  queuePage = new QueuePageMemory(),
 }: {
   rows?: QueueRow[];
   totalRows?: number;
@@ -87,11 +91,16 @@ function wireQueue({
   findPageForDate?: ReturnType<typeof vi.fn>;
   isError?: boolean;
   hasData?: boolean;
+  queuePage?: QueuePageMemory;
 } = {}) {
   const page: QueuePage = { rows, totalRows, firstDue, lastDue };
   const reviewManager = { findPageForDate } as unknown as ReviewManager;
   vi.spyOn(ReviewContext, 'useReviewContext').mockReturnValue({
-    plugin: { app: { isMobile: false }, settings: { dayRolloverOffset: 4 } },
+    plugin: {
+      app: { isMobile: false },
+      settings: { dayRolloverOffset: 4 },
+      queuePage,
+    },
     reviewManager,
   } as never);
   vi.spyOn(ReactQuery, 'useQueue').mockReturnValue({
@@ -103,7 +112,37 @@ function wireQueue({
     isLoading,
     isError,
   } as never);
-  return { findPageForDate };
+  return { findPageForDate, queuePage };
+}
+
+/** Mount and run the effects the first render scheduled. */
+function mountSettled(node: ComponentChild): HTMLElement {
+  let container: HTMLElement | undefined;
+  void act(() => {
+    container = mount(node);
+  });
+  if (!container) throw new Error('nothing mounted');
+  return container;
+}
+
+/** Unmount whatever is rendered into `container`, running its cleanups. */
+function unmount(container: HTMLElement) {
+  void act(() => {
+    render(null, container);
+  });
+}
+
+function nextButton(container: HTMLElement): HTMLButtonElement {
+  const button = container.querySelector<HTMLButtonElement>(
+    'button[aria-label="Next page"]'
+  );
+  if (!button) throw new Error('no next-page button rendered');
+  return button;
+}
+
+/** The page the queue query was last asked for. */
+function requestedPage(): number | undefined {
+  return vi.mocked(ReactQuery.useQueue).mock.lastCall?.[0].slice?.pageNumber;
 }
 
 function dateInput(container: HTMLElement): HTMLInputElement | null {
@@ -716,6 +755,221 @@ describe('ReviewQueue', () => {
       expect(isMarked(container)).toBe(true);
       // A different DOM node, which is what restarts the animation.
       expect(second).not.toBe(first);
+    });
+  });
+
+  describe('remembered page', () => {
+    const PER_PAGE = QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE;
+
+    afterEach(() => {
+      // Back to the default filter
+      store.dispatch(resetSession());
+    });
+
+    it('property: opens on the page last chosen this session', () => {
+      fc.assert(
+        fc.property(
+          fc
+            .integer({ min: 1, max: 8 })
+            .chain((pages) =>
+              fc.tuple(fc.constant(pages), fc.nat({ max: pages - 1 }))
+            ),
+          ([pageCount, page]) => {
+            const queuePage = new QueuePageMemory();
+            queuePage.set(store.getState().typesToReview, page);
+            wireQueue({ totalRows: pageCount * PER_PAGE, queuePage });
+
+            try {
+              const container = mountSettled(<ReviewQueue />);
+
+              expect(pageIndicator(container)).toBe(`${page + 1}/${pageCount}`);
+              expect(requestedPage()).toBe(page);
+              expect(queuePage.get(store.getState().typesToReview)).toBe(page);
+            } finally {
+              document.body.innerHTML = '';
+              vi.restoreAllMocks();
+            }
+          }
+        )
+      );
+    });
+
+    it('comes back to a page turned with the arrows after the table unmounts', () => {
+      const { queuePage } = wireQueue({ totalRows: 4 * PER_PAGE });
+      const first = mountSettled(<ReviewQueue />);
+      void act(() => {
+        nextButton(first).click();
+      });
+      void act(() => {
+        nextButton(first).click();
+      });
+      unmount(first);
+
+      wireQueue({ totalRows: 4 * PER_PAGE, queuePage });
+      const second = mountSettled(<ReviewQueue />);
+
+      expect(pageIndicator(second)).toBe('3/4');
+    });
+
+    it('returns to the first page when the review type filter changes, and stays there after a remount', () => {
+      const { queuePage } = wireQueue({ totalRows: 4 * PER_PAGE });
+      queuePage.set(store.getState().typesToReview, 2);
+      const container = mountSettled(<ReviewQueue />);
+      expect(pageIndicator(container)).toBe('3/4');
+
+      void act(() => {
+        store.dispatch(setTypesToReview(['article']));
+        render(<ReviewQueue />, container);
+      });
+      expect(pageIndicator(container)).toBe('1/4');
+      unmount(container);
+
+      expect(pageIndicator(mountSettled(<ReviewQueue />))).toBe('1/4');
+    });
+
+    it('opens on the first page after a filter change made while it was closed, even back to the same types', () => {
+      const { queuePage } = wireQueue({ totalRows: 4 * PER_PAGE });
+      queuePage.set(store.getState().typesToReview, 2);
+
+      store.dispatch(setTypesToReview(['article']));
+      store.dispatch(setTypesToReview(['article', 'snippet', 'card']));
+
+      expect(pageIndicator(mountSettled(<ReviewQueue />))).toBe('1/4');
+    });
+
+    it('lets a date jump override the remembered page, then remembers the jump', async () => {
+      const findPageForDate = vi.fn().mockResolvedValue(3);
+      const { queuePage } = wireQueue({
+        totalRows: 5 * PER_PAGE,
+        findPageForDate,
+      });
+      queuePage.set(store.getState().typesToReview, 1);
+      const container = mountSettled(<ReviewQueue />);
+      expect(pageIndicator(container)).toBe('2/5');
+
+      enterDate(container, '2026-08-01');
+      await act(flush);
+      expect(pageIndicator(container)).toBe('4/5');
+      unmount(container);
+
+      wireQueue({ totalRows: 5 * PER_PAGE, queuePage });
+      expect(pageIndicator(mountSettled(<ReviewQueue />))).toBe('4/5');
+    });
+
+    it('drops a date lookup that resolves after the filter changed, keeping the page chosen since', async () => {
+      let resolveLookup: (page: number) => void = () => {};
+      const findPageForDate = vi.fn(
+        () =>
+          new Promise<number>((resolve) => {
+            resolveLookup = resolve;
+          })
+      );
+      const { queuePage } = wireQueue({
+        totalRows: 5 * PER_PAGE,
+        findPageForDate,
+      });
+      const container = mountSettled(<ReviewQueue />);
+      enterDate(container, '2026-08-01');
+
+      void act(() => {
+        store.dispatch(setTypesToReview(['article']));
+        render(<ReviewQueue />, container);
+      });
+      void act(() => {
+        nextButton(container).click();
+      });
+      resolveLookup(3);
+      await act(flush);
+
+      expect(pageIndicator(container)).toBe('2/5');
+      expect(queuePage.get(store.getState().typesToReview)).toBe(1);
+    });
+
+    it('property: moves a page past the end of a shrunken queue back to its last page', () => {
+      fc.assert(
+        fc.property(
+          fc
+            .integer({ min: 1, max: 6 })
+            .chain((pages) =>
+              fc.tuple(
+                fc.constant(pages),
+                fc.integer({ min: pages, max: pages + 20 })
+              )
+            ),
+          ([pageCount, remembered]) => {
+            const queuePage = new QueuePageMemory();
+            const filter = store.getState().typesToReview;
+            queuePage.set(filter, remembered);
+            wireQueue({ totalRows: pageCount * PER_PAGE, queuePage });
+
+            try {
+              const container = mountSettled(<ReviewQueue />);
+
+              expect(pageIndicator(container)).toBe(
+                `${pageCount}/${pageCount}`
+              );
+              expect(requestedPage()).toBe(pageCount - 1);
+              expect(queuePage.get(filter)).toBe(pageCount - 1);
+            } finally {
+              document.body.innerHTML = '';
+              vi.restoreAllMocks();
+            }
+          }
+        )
+      );
+    });
+
+    it('follows the queue back to its new last page when it shrinks while open, and stays there as it regrows', () => {
+      const { queuePage } = wireQueue({ totalRows: 4 * PER_PAGE });
+      const filter = store.getState().typesToReview;
+      queuePage.set(filter, 3);
+      const container = mountSettled(<ReviewQueue />);
+      expect(pageIndicator(container)).toBe('4/4');
+
+      wireQueue({ totalRows: 2 * PER_PAGE, queuePage });
+      void act(() => {
+        render(<ReviewQueue />, container);
+      });
+      expect(pageIndicator(container)).toBe('2/2');
+      expect(queuePage.get(filter)).toBe(1);
+
+      wireQueue({ totalRows: 4 * PER_PAGE, queuePage });
+      void act(() => {
+        render(<ReviewQueue />, container);
+      });
+      expect(pageIndicator(container)).toBe('2/4');
+      expect(requestedPage()).toBe(1);
+    });
+
+    it('property: leaves the remembered page alone while the queue is loading, unreadable or empty', () => {
+      fc.assert(
+        fc.property(
+          fc.constantFrom<NonNullable<Parameters<typeof wireQueue>[0]>>(
+            {
+              isLoading: true,
+              dataWhileLoading: { totalRows: PER_PAGE },
+            },
+            { isError: true, totalRows: PER_PAGE },
+            { rows: [], totalRows: 0 }
+          ),
+          fc.integer({ min: 1, max: 50 }),
+          (state, remembered) => {
+            const queuePage = new QueuePageMemory();
+            const filter = store.getState().typesToReview;
+            queuePage.set(filter, remembered);
+            wireQueue({ ...state, queuePage });
+
+            try {
+              mountSettled(<ReviewQueue />);
+
+              expect(queuePage.get(filter)).toBe(remembered);
+            } finally {
+              document.body.innerHTML = '';
+              vi.restoreAllMocks();
+            }
+          }
+        )
+      );
     });
   });
 
