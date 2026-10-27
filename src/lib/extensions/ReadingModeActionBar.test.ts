@@ -1,7 +1,10 @@
 // @vitest-environment jsdom
 import { ObsidianHelpers } from '#/lib/ObsidianHelpers';
+import { ARTICLE_TAG } from '#/lib/constants';
 import * as ActionBarExtension from '#/lib/extensions/ActionBarExtension';
+import { ItemManager } from '#/lib/items/ItemManager';
 import * as ObsidianPdf from '#/lib/pdf/obsidian-pdf';
+import { insertItemAt, makeItemVault, TestRepository } from '#/test/item-vault';
 import ReviewView from '#/views/ReviewView';
 import fc from 'fast-check';
 import {
@@ -142,6 +145,18 @@ function makePlugin(leaves: Array<FakeLeaf | FakePdfLeaf> = []) {
   };
 }
 
+/** The paths of the files the item layer was asked to type, sorted. */
+function lookedUp(plugin: ReturnType<typeof makePlugin>): string[] {
+  return plugin.reviewManager.articles.getItemType.mock.calls
+    .map(([file]) => file.path)
+    .sort();
+}
+
+/** The paths of the files `leaves` show, sorted. */
+function pathsOf(...leaves: (FakeLeaf | FakePdfLeaf)[]): string[] {
+  return leaves.map((leaf) => leaf.view.file!.path).sort();
+}
+
 /** Lets every pending lookup and the syncs chained on it settle. */
 async function flush(): Promise<void> {
   // A macrotask runs only once every queued microtask has, however deep
@@ -161,6 +176,47 @@ function pdfBars(container: HTMLElement): Element[] {
   return Array.from(container.querySelectorAll('.ir-pdf-leaf-bar'));
 }
 
+/** Where the row {@link wireItemNote} makes, id `x`, says its note is. */
+const ROW_REFERENCE = 'items/note.md';
+
+/**
+ * A reading-mode leaf showing a note with `frontmatter`, at the reference of
+ * row `x` of `table` or, as a copy, elsewhere, and a plugin whose item layer
+ * is a real one over a database holding that row as `row` says (or none).
+ */
+async function wireItemNote(spec: {
+  table: 'article' | 'snippet' | 'srs_card';
+  row: 'live' | 'deleted' | 'absent';
+  atReference: boolean;
+  frontmatter: Record<string, unknown>;
+}) {
+  const path = spec.atReference ? ROW_REFERENCE : `copies/${ROW_REFERENCE}`;
+  const vault = makeItemVault({ [path]: spec.frontmatter });
+  const repo = await TestRepository.create();
+  if (spec.row !== 'absent') {
+    insertItemAt(repo, spec.table, {
+      id: 'x',
+      reference: ROW_REFERENCE,
+      deleted: spec.row === 'deleted',
+    });
+  }
+  const file = vault.files.get(path)!;
+  const containerEl = makeContainerEl();
+  const plugin = makePlugin([makeMarkdownLeaf({ containerEl, file })]);
+  // The note reads as that vault has it, through the plugin's app too
+  Object.assign(plugin.app, { vault: vault.app.vault });
+  Object.assign(plugin.reviewManager, {
+    articles: new ItemManager({ app: vault.app } as never, repo),
+  });
+  /** Edit the note's frontmatter, as the cache then reports. */
+  const editNote = async (edit: (fm: Record<string, unknown>) => void) => {
+    await vault.app.fileManager.processFrontMatter(file, edit);
+    plugin.emitMetadataChanged(file);
+    await flush();
+  };
+  return { plugin, containerEl, editNote };
+}
+
 // #endregion
 
 describe('registerReadingModeActionBar', () => {
@@ -169,7 +225,6 @@ describe('registerReadingModeActionBar', () => {
       ActionBarExtension,
       'renderStandaloneActionBarDOM'
     ).mockImplementation(() => () => {});
-    vi.spyOn(ObsidianHelpers, 'getNoteType').mockResolvedValue('article');
   });
 
   afterEach(() => {
@@ -260,7 +315,6 @@ describe('registerReadingModeActionBar', () => {
           ActionBarExtension,
           'renderStandaloneActionBarDOM'
         ).mockImplementation(() => () => {});
-        vi.spyOn(ObsidianHelpers, 'getNoteType').mockResolvedValue('article');
         const leaf = makeMarkdownLeaf({ mode });
         const plugin = makePlugin([leaf]);
         registerReadingModeActionBar(plugin as never);
@@ -283,10 +337,10 @@ describe('registerReadingModeActionBar', () => {
   });
 
   describe('sync() — MarkdownView in preview, file present, noteType is null', () => {
-    it('does not mount when getNoteType returns null', async () => {
-      vi.spyOn(ObsidianHelpers, 'getNoteType').mockResolvedValue(null);
+    it('does not mount when the item layer gives the note no type', async () => {
       const leaf = makeMarkdownLeaf({});
       const plugin = makePlugin([leaf]);
+      plugin.reviewManager.articles.getItemType.mockResolvedValue(null);
       registerReadingModeActionBar(plugin as never);
       await flush();
       expect(
@@ -338,10 +392,10 @@ describe('registerReadingModeActionBar', () => {
           ActionBarExtension,
           'renderStandaloneActionBarDOM'
         ).mockImplementation(() => () => {});
-        vi.spyOn(ObsidianHelpers, 'getNoteType').mockResolvedValue(noteType);
         const containerEl = makeContainerEl();
         const leaf = makeMarkdownLeaf({ containerEl });
         const plugin = makePlugin([leaf]);
+        plugin.reviewManager.articles.getItemType.mockResolvedValue(noteType);
         registerReadingModeActionBar(plugin as never);
         await flush();
         expect(
@@ -419,14 +473,14 @@ describe('registerReadingModeActionBar', () => {
       expect(containerEl.children.length).toBe(0);
     });
 
-    it('removes the bar when getNoteType changes to null', async () => {
+    it('removes the bar when the type changes to none', async () => {
       const containerEl = makeContainerEl();
       const leaf = makeMarkdownLeaf({ containerEl });
       const plugin = makePlugin([leaf]);
       registerReadingModeActionBar(plugin as never);
       await flush();
 
-      vi.spyOn(ObsidianHelpers, 'getNoteType').mockResolvedValue(null);
+      plugin.reviewManager.articles.getItemType.mockResolvedValue(null);
       plugin.app.workspace.triggerLayoutChange();
       await flush();
 
@@ -544,15 +598,11 @@ describe('registerReadingModeActionBar', () => {
           ),
           fc.boolean(),
           fc.constantFrom(...itemTypes),
-          fc.constantFrom(...itemTypes),
-          async (kind, hasFile, noteType, itemType) => {
+          async (kind, hasFile, itemType) => {
             const render = vi
               .spyOn(ActionBarExtension, 'renderStandaloneActionBarDOM')
               .mockImplementation(() => () => {});
             render.mockClear();
-            vi.spyOn(ObsidianHelpers, 'getNoteType').mockResolvedValue(
-              noteType
-            );
             const container = makeContainerEl();
             const file = hasFile ? ({ path: 'x' } as TFile) : null;
             const leaf = kind.startsWith('markdown')
@@ -574,10 +624,10 @@ describe('registerReadingModeActionBar', () => {
             registerReadingModeActionBar(plugin as never);
             await flush();
 
-            // A PDF has no frontmatter, so it's only ever typed by its row
+            // Only articles are ever PDFs
             const expected =
               hasFile &&
-              ((kind === 'markdown-preview' && noteType !== null) ||
+              ((kind === 'markdown-preview' && itemType !== null) ||
                 (kind === 'pdf' && itemType === 'article'));
             expect(container.children.length).toBe(expected ? 1 : 0);
             expect(render).toHaveBeenCalledTimes(expected ? 1 : 0);
@@ -837,14 +887,11 @@ describe('registerReadingModeActionBar', () => {
   });
   describe('how often leaves are re-checked', () => {
     it('re-checks each leaf once for events that fire back to back', async () => {
-      const getNoteType = vi
-        .spyOn(ObsidianHelpers, 'getNoteType')
-        .mockResolvedValue('article');
+      const note = makeMarkdownLeaf({});
       const pdf = makePdfLeaf();
-      const plugin = makePlugin([makeMarkdownLeaf({}), pdf]);
+      const plugin = makePlugin([note, pdf]);
       registerReadingModeActionBar(plugin as never);
       await flush();
-      getNoteType.mockClear();
       plugin.reviewManager.articles.getItemType.mockClear();
 
       for (const event of [
@@ -856,8 +903,7 @@ describe('registerReadingModeActionBar', () => {
       }
       await flush();
 
-      expect(getNoteType).toHaveBeenCalledOnce();
-      expect(plugin.reviewManager.articles.getItemType).toHaveBeenCalledOnce();
+      expect(lookedUp(plugin)).toEqual(pathsOf(note, pdf));
     });
 
     it('re-checks again for events that come after a sweep has run', async () => {
@@ -877,20 +923,16 @@ describe('registerReadingModeActionBar', () => {
     });
 
     it('re-checks only PDF leaves when the database changes', async () => {
-      const getNoteType = vi
-        .spyOn(ObsidianHelpers, 'getNoteType')
-        .mockResolvedValue('article');
-      const plugin = makePlugin([makeMarkdownLeaf({}), makePdfLeaf()]);
+      const pdf = makePdfLeaf();
+      const plugin = makePlugin([makeMarkdownLeaf({}), pdf]);
       registerReadingModeActionBar(plugin as never);
       await flush();
-      getNoteType.mockClear();
       plugin.reviewManager.articles.getItemType.mockClear();
 
       plugin.emitDataChange();
       await flush();
 
-      expect(getNoteType).not.toHaveBeenCalled();
-      expect(plugin.reviewManager.articles.getItemType).toHaveBeenCalledOnce();
+      expect(lookedUp(plugin)).toEqual(pathsOf(pdf));
     });
 
     it('drops the controller of a leaf that closed, even on a PDF-only re-check', async () => {
@@ -912,19 +954,16 @@ describe('registerReadingModeActionBar', () => {
     });
 
     it('re-checks every leaf through the function it returns', async () => {
-      const getNoteType = vi
-        .spyOn(ObsidianHelpers, 'getNoteType')
-        .mockResolvedValue('article');
-      const plugin = makePlugin([makeMarkdownLeaf({}), makePdfLeaf()]);
+      const note = makeMarkdownLeaf({});
+      const pdf = makePdfLeaf();
+      const plugin = makePlugin([note, pdf]);
       const resync = registerReadingModeActionBar(plugin as never);
       await flush();
-      getNoteType.mockClear();
       plugin.reviewManager.articles.getItemType.mockClear();
 
       resync();
 
-      expect(getNoteType).toHaveBeenCalledOnce();
-      expect(plugin.reviewManager.articles.getItemType).toHaveBeenCalledOnce();
+      expect(lookedUp(plugin)).toEqual(pathsOf(note, pdf));
     });
   });
 
@@ -946,21 +985,20 @@ describe('registerReadingModeActionBar', () => {
               .spyOn(ActionBarExtension, 'renderStandaloneActionBarDOM')
               .mockImplementation(() => () => {});
             render.mockClear();
-            const getNoteType = vi
-              .spyOn(ObsidianHelpers, 'getNoteType')
-              .mockResolvedValue(initial);
             const containerEl = makeContainerEl();
             const file = { path: 'note.md' } as TFile;
             const plugin = makePlugin([
               makeMarkdownLeaf({ containerEl, file }),
             ]);
+            const { getItemType } = plugin.reviewManager.articles;
+            getItemType.mockResolvedValue(initial);
             registerReadingModeActionBar(plugin as never);
             await flush();
 
             let renders = initial === null ? 0 : 1;
             let previous: (typeof noteTypes)[number] = initial;
             for (const type of changes) {
-              getNoteType.mockResolvedValue(type);
+              getItemType.mockResolvedValue(type);
               plugin.emitMetadataChanged(file);
               await flush();
 
@@ -999,9 +1037,6 @@ describe('registerReadingModeActionBar', () => {
           ),
           fc.constantFrom(...files),
           async (specs, changed) => {
-            const getNoteType = vi
-              .spyOn(ObsidianHelpers, 'getNoteType')
-              .mockResolvedValue('article');
             const leaves = specs.map(({ kind, shown }) => {
               if (kind === 'pdf') return makePdfLeaf({ file: shown });
               if (kind === 'non-file') {
@@ -1018,7 +1053,6 @@ describe('registerReadingModeActionBar', () => {
             const plugin = makePlugin(leaves);
             registerReadingModeActionBar(plugin as never);
             await flush();
-            getNoteType.mockClear();
             plugin.reviewManager.articles.getItemType.mockClear();
 
             plugin.emitMetadataChanged(changed);
@@ -1027,12 +1061,11 @@ describe('registerReadingModeActionBar', () => {
             const showing = (kind: Kind) =>
               specs.filter((s) => s.kind === kind && s.shown === changed)
                 .length;
-            expect(getNoteType).toHaveBeenCalledTimes(
-              showing('markdown-preview')
+            expect(lookedUp(plugin)).toEqual(
+              Array<string>(showing('markdown-preview') + showing('pdf')).fill(
+                changed.path
+              )
             );
-            expect(
-              plugin.reviewManager.articles.getItemType
-            ).toHaveBeenCalledTimes(showing('pdf'));
             plugin.runCleanup();
           }
         )
@@ -1040,19 +1073,81 @@ describe('registerReadingModeActionBar', () => {
     });
 
     it('mounts nothing when the cache re-indexes a note after the cleanup ran', async () => {
-      const getNoteType = vi
-        .spyOn(ObsidianHelpers, 'getNoteType')
-        .mockResolvedValue(null);
       const containerEl = makeContainerEl();
       const file = { path: 'note.md' } as TFile;
       const plugin = makePlugin([makeMarkdownLeaf({ containerEl, file })]);
+      plugin.reviewManager.articles.getItemType.mockResolvedValue(null);
       registerReadingModeActionBar(plugin as never);
       await flush();
       plugin.runCleanup();
 
-      getNoteType.mockResolvedValue('article');
+      plugin.reviewManager.articles.getItemType.mockResolvedValue('article');
       plugin.emitMetadataChanged(file);
       await flush();
+
+      expect(containerEl.children).toHaveLength(0);
+    });
+  });
+
+  describe('notes that lost their type tag', () => {
+    const tableArb = fc.constantFrom('article', 'snippet', 'srs_card' as const);
+
+    it("shows the bar on a note carrying a live row's ir-id at its reference, and on no tombstone's or copy's", async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          tableArb,
+          fc.constantFrom('live', 'deleted', 'absent' as const),
+          fc.boolean(),
+          async (table, row, atReference) => {
+            const { plugin, containerEl } = await wireItemNote({
+              table,
+              row,
+              atReference,
+              frontmatter: { 'ir-id': 'x' },
+            });
+
+            registerReadingModeActionBar(plugin as never);
+            await flush();
+
+            expect(containerEl.children).toHaveLength(
+              row === 'live' && atReference ? 1 : 0
+            );
+            plugin.runCleanup();
+          }
+        ),
+        { numRuns: 30 }
+      );
+    });
+
+    it('keeps the bar when only the tag comes off a note its row still holds', async () => {
+      const { plugin, containerEl, editNote } = await wireItemNote({
+        table: 'article',
+        row: 'live',
+        atReference: true,
+        frontmatter: { 'ir-id': 'x', tags: [ARTICLE_TAG] },
+      });
+      registerReadingModeActionBar(plugin as never);
+      await flush();
+      const bar = containerEl.firstElementChild;
+      expect(bar).not.toBeNull();
+
+      await editNote((fm) => delete fm.tags);
+
+      expect(containerEl.firstElementChild).toBe(bar);
+    });
+
+    it('takes the bar down once the ir-id comes off an untagged note', async () => {
+      const { plugin, containerEl, editNote } = await wireItemNote({
+        table: 'snippet',
+        row: 'live',
+        atReference: true,
+        frontmatter: { 'ir-id': 'x' },
+      });
+      registerReadingModeActionBar(plugin as never);
+      await flush();
+      expect(containerEl.children).toHaveLength(1);
+
+      await editNote((fm) => delete fm['ir-id']);
 
       expect(containerEl.children).toHaveLength(0);
     });
@@ -1068,7 +1163,7 @@ describe('registerReadingModeActionBar', () => {
       await flush();
       expect(containerEl.children).toHaveLength(1);
 
-      vi.spyOn(ObsidianHelpers, 'getNoteType').mockRejectedValue(error);
+      plugin.reviewManager.articles.getItemType.mockRejectedValue(error);
       plugin.app.workspace.trigger('file-open');
       await flush();
 

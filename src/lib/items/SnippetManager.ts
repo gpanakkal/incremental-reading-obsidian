@@ -782,8 +782,13 @@ export class SnippetManager extends ItemManager {
    * @returns Array of snippet highlights
    */
   async getHighlights(parentFile: TFile) {
-    // First find the parent's ID
-    const parentType = await Obsidian.getNoteType(parentFile, this.app);
+    // First find the parent's ID. A note is typed as the item layer types it:
+    // by its tags, or, having lost them, by the live row its `ir-id` names at
+    // its path, which a snippet taken from it is parented on. A file with no
+    // frontmatter is looked up by its path below as it always was
+    const parentType = supportsFrontmatter(parentFile)
+      ? await this.getItemType(parentFile)
+      : null;
     let parentEntry;
 
     if (parentType === 'article' || !supportsFrontmatter(parentFile)) {

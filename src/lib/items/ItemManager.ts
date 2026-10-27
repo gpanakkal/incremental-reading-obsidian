@@ -9,9 +9,9 @@ import IRScheduler from '#/lib/IRScheduler';
 import { supportsFrontmatter } from '#/lib/mime';
 import type { ItemTable } from '#/lib/moved-note-scan';
 import {
-  type IrIdRelation,
   noteFingerprint,
   reconcileAction,
+  type IrIdRelation,
 } from '#/lib/note-fingerprint';
 import { STAMP_COLUMNS } from '#/lib/repository/row-stamps';
 import {
@@ -42,6 +42,7 @@ import type IncrementalReadingPlugin from '#/main';
 import {
   normalizePath,
   type App,
+  type CachedMetadata,
   type TAbstractFile,
   type TFile,
 } from 'obsidian';
@@ -56,8 +57,8 @@ import {
 } from './review-undo';
 import {
   NOT_PURGED,
-  REVIEW_LOG_OF,
   purgedReference,
+  REVIEW_LOG_OF,
   tombstoneRowStatements,
 } from './row-delete';
 
@@ -140,16 +141,74 @@ export class ItemManager {
 
   /**
    * The type of item `file` is, if any. A note is typed by its tags, as
-   * `getNoteType` reads them. A file with no frontmatter, a PDF say, has none.
-   * It is known by its path alone, so it is whatever the row at its path is:
-   * none, when that row is deleted.
+   * `getNoteType` reads them, and, carrying no type tag, by the live row its
+   * `ir-id` names while that row's `reference` is the note's own path: the
+   * note at a row's reference is that row's note iff it carries its id, tag or
+   * no tag. A copy of the note elsewhere, or a tombstone's, has none. The id
+   * comes from the metadata cache, which has long parsed a note that lost its
+   * tag; a note just made carries its tag.
+   *
+   * A file with no frontmatter, a PDF say, has neither. It is known by its
+   * path alone, so it is whatever the row at its path is: none, when that row
+   * is deleted.
    */
   async getItemType(file: TFile): Promise<NoteType | null> {
-    if (supportsFrontmatter(file)) return Obsidian.getNoteType(file, this.app);
+    if (supportsFrontmatter(file)) {
+      return (
+        (await Obsidian.getNoteType(file, this.app)) ??
+        this.#heldType(file, this.app.metadataCache.getFileCache(file))
+      );
+    }
 
     const match = await this.findItem(file);
     if (!match || match.row.deleted) return null;
     return match.table === 'srs_card' ? 'card' : match.table;
+  }
+
+  /**
+   * {@link getItemType} for note `file`, answered from `cache`, the metadata
+   * cache's parse of it, as its `changed` event hands it over (see
+   * `ObsidianHelpers.noteTypeFromCache`, which answers for the tags).
+   *
+   * Answers at once, not with a promise, when the tags settle it, when the
+   * note claims no id, and when the repository answers at once, as sql.js
+   * does: a tag added or an id taken off then shows with no wait. Only a
+   * repository that answers later is waited on.
+   */
+  itemTypeFromCache(
+    file: TFile,
+    cache: CachedMetadata | null
+  ): NoteType | null | Promise<NoteType | null> {
+    return (
+      Obsidian.noteTypeFromCache(file, cache, this.app) ??
+      this.#heldType(file, cache)
+    );
+  }
+
+  /**
+   * The type of the live row whose id is the `ir-id` in `cache` and whose
+   * `reference` is `file`'s path, or `null` for none: a note claiming no id,
+   * one the vault no longer holds, a copy, a tombstone's note. At once when
+   * the repository answers at once (see {@link itemTypeFromCache}).
+   */
+  #heldType(
+    file: TFile,
+    cache: CachedMetadata | null
+  ): NoteType | null | Promise<NoteType | null> {
+    const id: unknown = cache?.frontmatter?.['ir-id'];
+    if (typeof id !== 'string') return null;
+    if (this.app.vault.getFileByPath(file.path) !== file) return null;
+    // One lookup by primary key per table; `reference` is unique, so at most
+    // one row answers
+    const rows = this.repo.query(
+      `SELECT 'article' AS type FROM article WHERE id = $1 AND reference = $2 AND deleted = FALSE
+       UNION ALL SELECT 'snippet' FROM snippet WHERE id = $1 AND reference = $2 AND deleted = FALSE
+       UNION ALL SELECT 'card' FROM srs_card WHERE id = $1 AND reference = $2 AND deleted = FALSE`,
+      [id, file.path]
+    );
+    const typeOf = (held: RowTypes[]) =>
+      (held as unknown as { type: NoteType }[])[0]?.type ?? null;
+    return Array.isArray(rows) ? typeOf(rows) : rows.then(typeOf);
   }
 
   async findById(id: string): Promise<{

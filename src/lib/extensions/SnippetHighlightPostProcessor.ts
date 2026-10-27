@@ -33,11 +33,6 @@ export function registerSnippetHighlightPostProcessor(
       const file = plugin.app.vault.getFileByPath(ctx.sourcePath);
       if (!file) return;
 
-      const isSource = ObsidianHelpers.isSourceNote(file, plugin.app);
-      const noteType = await ObsidianHelpers.getNoteType(file, plugin.app);
-      if (!(isSource || noteType === 'article' || noteType === 'snippet'))
-        return;
-
       const reviewManager = plugin.reviewManager;
       if (!reviewManager) return;
 
@@ -47,16 +42,20 @@ export function registerSnippetHighlightPostProcessor(
       const section = readingSection(text, lineStart, lineEnd, bodyStart);
       if (!section) return;
 
-      await reviewManager.getSnippetHighlights(file);
+      // Which notes have highlights is the item layer's to say: sources,
+      // articles and snippets, a note that lost its type tag by the row its
+      // `ir-id` names. Any other note gets none, with no query for a plain one
+      // (see `SnippetManager.getHighlights`). What it hands back is what the
+      // tracker now holds for an item, and leaves out whatever the tracker
+      // still holds for a note that is one no longer.
+      const loaded = await reviewManager.getSnippetHighlights(file);
       const tracker = reviewManager.snippets.offsetTracker;
       // Those live preview shows, so the console hears of one past the
       // note's end here too. Painting cuts each to the section anyway, but
       // would paint one starting before the note from the section's start.
-      const highlights = tracker
-        .getHighlights(file.path)
-        .filter((h) =>
-          tracker.shownRange(file.path, h, bodyStart, text.length)
-        );
+      const highlights = loaded.filter((h) =>
+        tracker.shownRange(file.path, h, bodyStart, text.length)
+      );
 
       const component = new Component();
       component.load();

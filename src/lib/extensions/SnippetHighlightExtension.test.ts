@@ -5,8 +5,10 @@ import {
   SnippetOffsetTracker,
   type SnippetHighlight,
 } from '#/lib/SnippetOffsetTracker';
+import { SnippetManager } from '#/lib/items/SnippetManager';
 import type { NoteType } from '#/lib/types';
 import { Notice } from '#/test/__mocks__/obsidian';
+import { insertItemAt, makeItemVault, TestRepository } from '#/test/item-vault';
 import {
   history,
   invertedEffects,
@@ -18,6 +20,7 @@ import {
 import { EditorState, Transaction, type Extension } from '@codemirror/state';
 import { EditorView } from '@codemirror/view';
 import fc from 'fast-check';
+import type { App, TFile } from 'obsidian';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   isExternalSync,
@@ -57,7 +60,10 @@ function makeHighlight(
 type FakeReviewManager = {
   getSnippetHighlights: ReturnType<typeof vi.fn>;
   updateSnippetOffsets: ReturnType<typeof vi.fn>;
-  snippets: { offsetTracker: SnippetOffsetTracker };
+  snippets: {
+    offsetTracker: SnippetOffsetTracker;
+    getItemType: (file: TFile) => Promise<NoteType | null>;
+  };
 };
 
 function makeReviewManager(filePath = FILE_PATH): FakeReviewManager {
@@ -66,7 +72,11 @@ function makeReviewManager(filePath = FILE_PATH): FakeReviewManager {
   return {
     getSnippetHighlights: vi.fn().mockResolvedValue(undefined),
     updateSnippetOffsets: vi.fn().mockResolvedValue(undefined),
-    snippets: { offsetTracker: tracker },
+    snippets: {
+      offsetTracker: tracker,
+      // An item layer with no rows, typing a note by its tags alone
+      getItemType: (file) => Obsidian.getNoteType(file, {} as App),
+    },
   };
 }
 
@@ -656,6 +666,24 @@ describe('loadHighlights (constructor async path)', () => {
     await flushAsync();
     expect(rm.getSnippetHighlights).not.toHaveBeenCalled();
     view.destroy();
+  });
+
+  it('loads nothing for an editor closed while its note was being typed', async () => {
+    const rm = makeReviewManager();
+    stubFileInfo(FILE_PATH, 'article');
+    let answer: (type: NoteType | null) => void = () => {};
+    vi.spyOn(Obsidian, 'getNoteType').mockReturnValue(
+      new Promise((resolve) => {
+        answer = resolve;
+      })
+    );
+    const view = makeView('hello world', makePlugin(rm));
+
+    view.destroy();
+    answer('article');
+    await flushAsync();
+
+    expect(rm.getSnippetHighlights).not.toHaveBeenCalled();
   });
 
   it('does not call getSnippetHighlights when reviewManager is null', async () => {
@@ -3191,6 +3219,92 @@ describe('highlights whose offsets lie past the note’s end', () => {
       expect.stringContaining('"snippets/over.md"'),
       expect.stringContaining('"snippets/stale.md"'),
     ]);
+    view.destroy();
+  });
+});
+
+describe('highlights in a note typed by the item layer', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  /** A body whose first word the snippet at `0`-`5` covers. */
+  const BODY = 'alpha beta gamma';
+
+  /**
+   * An editor over a note at {@link FILE_PATH} with `frontmatter`, and a real
+   * item layer over a database holding, as `row` says, the note's own row
+   * `note-id` of `table` (or none), with one snippet taken from it.
+   */
+  async function wireRowNote(spec: {
+    table: 'article' | 'snippet';
+    row: 'live' | 'deleted' | 'absent';
+    frontmatter: Record<string, unknown>;
+  }) {
+    const vault = makeItemVault({ [FILE_PATH]: spec.frontmatter });
+    const repo = await TestRepository.create();
+    if (spec.row !== 'absent') {
+      insertItemAt(repo, spec.table, {
+        id: 'note-id',
+        reference: FILE_PATH,
+        deleted: spec.row === 'deleted',
+      });
+    }
+    repo.mutate(
+      `INSERT INTO snippet (id, reference, due, interval, priority, parent, start_offset, end_offset) VALUES ('snip-1', 's/1.md', 0, 1, 30, $1, 0, 5)`,
+      [spec.row === 'absent' ? null : 'note-id']
+    );
+    const query = vi.spyOn(repo, 'query');
+    const snippets = new SnippetManager(
+      { app: vault.app, settings: {} } as never,
+      repo
+    );
+    const rm = {
+      getSnippetHighlights: vi.fn((file: TFile) =>
+        snippets.getHighlights(file)
+      ),
+      updateSnippetOffsets: vi.fn().mockResolvedValue(undefined),
+      snippets,
+    };
+    vi.spyOn(Obsidian, 'getFileInfoFromState').mockReturnValue({
+      info: { file: vault.files.get(FILE_PATH), app: vault.app } as never,
+      editorView: null,
+    });
+    const view = makeView(BODY, makePlugin(rm as never));
+    await flushAsync();
+    return { view, query };
+  }
+
+  it("paints the snippets of a note carrying its live row's ir-id, and none of a tombstone's", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom('article', 'snippet' as const),
+        fc.boolean(),
+        async (table, deleted) => {
+          vi.restoreAllMocks();
+          const { view } = await wireRowNote({
+            table,
+            row: deleted ? 'deleted' : 'live',
+            frontmatter: { 'ir-id': 'note-id' },
+          });
+
+          expect(paintedRanges(view)).toEqual(
+            deleted ? [] : [[0, 5, 'snip-1']]
+          );
+          view.destroy();
+        }
+      ),
+      { numRuns: 4 }
+    );
+  });
+
+  it('paints nothing on a plain note, and asks the database nothing', async () => {
+    const { view, query } = await wireRowNote({
+      table: 'article',
+      row: 'absent',
+      frontmatter: { other: 1 },
+    });
+
+    expect(paintedRanges(view)).toEqual([]);
+    expect(query).not.toHaveBeenCalled();
     view.destroy();
   });
 });

@@ -2766,6 +2766,48 @@ describe('ReviewManager.getReviewItemFromFile', () => {
   });
 });
 
+describe('ReviewManager.getReviewItemFromFile for a note without its type tag', () => {
+  beforeAll(async () => {
+    const wasmBinary = readFileSync(
+      require.resolve('sql.js/dist/sql-wasm.wasm')
+    );
+    SQL = await initSqlJs({ wasmBinary: wasmBinary as unknown as ArrayBuffer });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("finds the item of a note carrying its ir-id at its reference, and none for a tombstone's or a copy's", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom('article', 'snippet', 'srs_card' as const),
+        fc.array(segmentArb, { minLength: 1, maxLength: 3 }),
+        fc.boolean(),
+        fc.boolean(),
+        async (table, segments, deleted, atReference) => {
+          const reference = `${segments.join('/')}.md`;
+          const path = atReference ? reference : `copies/${reference}`;
+          const { files, manager } = wireItem(
+            table,
+            reference,
+            { [path]: { 'ir-id': 'x' } },
+            deleted
+          );
+
+          const item = await manager.getReviewItemFromFile(files.get(path)!);
+
+          expect(item?.data.id ?? null).toBe(
+            !deleted && atReference ? 'x' : null
+          );
+          if (item) expect(item.data.type).toBe(TYPE_BY_TABLE[table]);
+        }
+      ),
+      { numRuns: 40 }
+    );
+  });
+});
+
 // ---------------------------------------------------------------------------
 // getReviewItemFromId — tries each sub-manager in order
 // ---------------------------------------------------------------------------
@@ -5478,7 +5520,7 @@ describe('ReviewManager reads the frontmatter of a renamed or created note witho
 
   // 0228 addition: a tombstone kept its note in review and on the note bar
   // while the queue hid it
-  it('finds no item to review in a note whose row at its path is deleted, tagged or not, and the live one in a note of its type', async () => {
+  it('finds no item to review in a note whose row at its path is deleted, and the live one in a note carrying its id, tagged or not', async () => {
     await fc.assert(
       fc.asyncProperty(
         tableArb,
@@ -5500,7 +5542,7 @@ describe('ReviewManager reads the frontmatter of a renamed or created note witho
 
           const item = await wired.manager.getReviewItemFromFile(file);
 
-          expect(item?.data.id ?? null).toBe(tagged && !deleted ? 'row' : null);
+          expect(item?.data.id ?? null).toBe(deleted ? null : 'row');
         }
       )
     );

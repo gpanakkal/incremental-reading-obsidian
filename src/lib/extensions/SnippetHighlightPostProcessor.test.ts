@@ -3,7 +3,6 @@
 // The Obsidian DOM globals this module needs (`createDiv`, `createSpan`)
 // are installed by src/test/obsidian-globals.setup.ts via setupFiles.
 
-import { ObsidianHelpers } from '#/lib/ObsidianHelpers';
 import {
   SnippetOffsetTracker,
   type SnippetHighlight,
@@ -12,10 +11,16 @@ import {
   registerHighlightRefreshListener,
   registerSnippetHighlightPostProcessor,
 } from '#/lib/extensions/SnippetHighlightPostProcessor';
+import { SnippetManager } from '#/lib/items/SnippetManager';
 import { RERENDERING_CLASS } from '#/lib/preview-rerender';
-import type { NoteType } from '#/lib/types';
+import { insertItemAt, makeItemVault, TestRepository } from '#/test/item-vault';
 import fc from 'fast-check';
-import { Component, MarkdownRenderer, MarkdownView } from 'obsidian';
+import {
+  Component,
+  MarkdownRenderer,
+  MarkdownView,
+  type TFile,
+} from 'obsidian';
 import {
   afterEach,
   beforeEach,
@@ -60,27 +65,18 @@ type PostProcessor = (
 ) => Promise<void>;
 
 /**
- * Register the post-processor on a plugin holding `highlights` for a note at
- * `notes/a.md` of type `noteType`, and return it with the plugin's spies.
+ * Register the post-processor on a plugin whose item layer loads `highlights`
+ * for the note at `notes/a.md` (none for a note that has none), and return it
+ * with the plugin's spies.
  */
 function setUp({
   highlights = [makeHighlight()],
-  noteType = 'article' as NoteType | null,
-  isSource = false,
   file = { path: 'notes/a.md' } as { path: string } | null,
   withReviewManager = true,
 } = {}) {
-  vi.spyOn(ObsidianHelpers, 'isSourceNote').mockReturnValue(isSource);
-  const getNoteType = vi
-    .spyOn(ObsidianHelpers, 'getNoteType')
-    .mockResolvedValue(noteType);
-  const offsetTracker = new SnippetOffsetTracker();
-  const getHighlights = vi
-    .spyOn(offsetTracker, 'getHighlights')
-    .mockReturnValue(highlights);
   const reviewManager = {
-    getSnippetHighlights: vi.fn().mockResolvedValue(undefined),
-    snippets: { offsetTracker },
+    getSnippetHighlights: vi.fn().mockResolvedValue(highlights),
+    snippets: { offsetTracker: new SnippetOffsetTracker() },
   };
   const plugin = {
     registerMarkdownPostProcessor: vi.fn(),
@@ -90,7 +86,53 @@ function setUp({
   registerSnippetHighlightPostProcessor(plugin as never);
   const processor = plugin.registerMarkdownPostProcessor.mock
     .calls[0][0] as PostProcessor;
-  return { plugin, reviewManager, processor, getNoteType, getHighlights };
+  return { plugin, reviewManager, processor };
+}
+
+/** Where {@link wireRowNote}'s note is. */
+const ROW_NOTE = 'notes/a.md';
+
+/**
+ * The post-processor on a plugin whose item layer is a real one, over a vault
+ * holding a note at {@link ROW_NOTE} with `frontmatter` and a database
+ * holding, as `row` says, the note's own row `note-id` of `table` (or none),
+ * with one snippet taken from it over the body's first word.
+ */
+async function wireRowNote(spec: {
+  table: 'article' | 'snippet';
+  row: 'live' | 'deleted' | 'absent';
+  frontmatter: Record<string, unknown>;
+}) {
+  const vault = makeItemVault({ [ROW_NOTE]: spec.frontmatter });
+  const repo = await TestRepository.create();
+  if (spec.row !== 'absent') {
+    insertItemAt(repo, spec.table, {
+      id: 'note-id',
+      reference: ROW_NOTE,
+      deleted: spec.row === 'deleted',
+    });
+  }
+  repo.mutate(
+    `INSERT INTO snippet (id, reference, due, interval, priority, parent, start_offset, end_offset) VALUES ('snip-1', 's/1.md', 0, 1, 30, $1, 0, 4)`,
+    [spec.row === 'absent' ? null : 'note-id']
+  );
+  const query = vi.spyOn(repo, 'query');
+  const snippets = new SnippetManager(
+    { app: vault.app, settings: {} } as never,
+    repo
+  );
+  const plugin = {
+    registerMarkdownPostProcessor: vi.fn(),
+    app: vault.app,
+    reviewManager: {
+      getSnippetHighlights: (file: TFile) => snippets.getHighlights(file),
+      snippets,
+    },
+  };
+  registerSnippetHighlightPostProcessor(plugin as never);
+  const processor = plugin.registerMarkdownPostProcessor.mock
+    .calls[0][0] as PostProcessor;
+  return { processor, query, vault };
 }
 
 /** Paragraph sections' elements, as reading mode renders `text`'s lines. */
@@ -307,19 +349,29 @@ describe('registerSnippetHighlightPostProcessor', () => {
   });
 
   it('reads nothing for markdown that is not a section of a note', async () => {
-    const { plugin, processor, getNoteType } = setUp();
+    const { plugin, reviewManager, processor } = setUp();
     await processor(paragraphEl('loose markdown'), {
       sourcePath: 'notes/a.md',
       getSectionInfo: () => null,
     });
     expect(plugin.app.vault.getFileByPath).not.toHaveBeenCalled();
-    expect(getNoteType).not.toHaveBeenCalled();
+    expect(reviewManager.getSnippetHighlights).not.toHaveBeenCalled();
+  });
+
+  it('paints nothing, and renders nothing, for a note the item layer has no highlights for', async () => {
+    const text = 'Some words here';
+    const { processor } = setUp({ highlights: [] });
+    const el = paragraphEl(text);
+    await processor(el, {
+      sourcePath: 'notes/a.md',
+      getSectionInfo: () => ({ text, lineStart: 0, lineEnd: 0 }),
+    });
+    expect(painted(el)).toEqual({});
+    expect(render).not.toHaveBeenCalled();
   });
 
   it.each([
     ['there is no such note', { file: null }],
-    ['the note is a card', { noteType: 'card' as NoteType }],
-    ['the note has no item type', { noteType: null }],
     ['the review manager is not ready', { withReviewManager: false }],
   ])('paints nothing when %s', async (_, options) => {
     const text = 'Some words here';
@@ -337,15 +389,10 @@ describe('registerSnippetHighlightPostProcessor', () => {
     expect(render).not.toHaveBeenCalled();
   });
 
-  it.each([
-    ['an article', { noteType: 'article' as NoteType }],
-    ['a snippet', { noteType: 'snippet' as NoteType }],
-    ['a source note', { noteType: null, isSource: true }],
-  ])('paints the highlights of %s', async (_, options) => {
+  it('paints the highlights the item layer loads for the note', async () => {
     const text = 'Some words here';
-    const { reviewManager, processor, getHighlights } = setUp({
+    const { reviewManager, processor } = setUp({
       highlights: [makeHighlight({ start_offset: 0, end_offset: 4 })],
-      ...options,
     });
     const el = paragraphEl(text);
     await processor(el, {
@@ -355,8 +402,72 @@ describe('registerSnippetHighlightPostProcessor', () => {
     expect(reviewManager.getSnippetHighlights).toHaveBeenCalledWith({
       path: 'notes/a.md',
     });
-    expect(getHighlights).toHaveBeenCalledWith('notes/a.md');
     expect(painted(el)).toEqual({ 'snippet-1': 'Some' });
+  });
+
+  it("paints the snippets of a note carrying its live row's ir-id, and none of a tombstone's", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom('article', 'snippet' as const),
+        fc.boolean(),
+        async (table, deleted) => {
+          const { processor } = await wireRowNote({
+            table,
+            row: deleted ? 'deleted' : 'live',
+            frontmatter: { 'ir-id': 'note-id' },
+          });
+          const text = 'Some words here';
+          const el = paragraphEl(text);
+          await processor(el, {
+            sourcePath: ROW_NOTE,
+            getSectionInfo: () => ({ text, lineStart: 0, lineEnd: 0 }),
+          });
+          expect(painted(el)).toEqual(deleted ? {} : { 'snip-1': 'Some' });
+        }
+      ),
+      { numRuns: 4 }
+    );
+  });
+
+  it('paints nothing on a note once its ir-id comes off, though it painted while the note was an item', async () => {
+    const { processor, vault } = await wireRowNote({
+      table: 'article',
+      row: 'live',
+      frontmatter: { 'ir-id': 'note-id' },
+    });
+    const text = 'Some words here';
+    const render = async () => {
+      const el = paragraphEl(text);
+      await processor(el, {
+        sourcePath: ROW_NOTE,
+        getSectionInfo: () => ({ text, lineStart: 0, lineEnd: 0 }),
+      });
+      return painted(el);
+    };
+    expect(await render()).toEqual({ 'snip-1': 'Some' });
+
+    await vault.app.fileManager.processFrontMatter(
+      vault.files.get(ROW_NOTE)!,
+      (fm: Record<string, unknown>) => delete fm['ir-id']
+    );
+
+    expect(await render()).toEqual({});
+  });
+
+  it('paints nothing on a plain note, and asks the database nothing', async () => {
+    const { processor, query } = await wireRowNote({
+      table: 'article',
+      row: 'absent',
+      frontmatter: { other: 1 },
+    });
+    const text = 'Some words here';
+    const el = paragraphEl(text);
+    await processor(el, {
+      sourcePath: ROW_NOTE,
+      getSectionInfo: () => ({ text, lineStart: 0, lineEnd: 0 }),
+    });
+    expect(painted(el)).toEqual({});
+    expect(query).not.toHaveBeenCalled();
   });
 
   it('paints a highlight running past the note’s end up to it, none wholly past it, and warns once of each', async () => {

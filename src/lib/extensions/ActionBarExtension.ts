@@ -622,11 +622,18 @@ function createPriorityInput(
  * actionBarStateField via setNoteTypeEffect. Keeping this out of compute()
  * ensures compute stays a pure state→value function with no side effects.
  *
- * The type of a file just opened is read from the note, since the metadata
- * cache may not have parsed it yet; every change after that is typed from the
- * parse the cache's `changed` event carries. The newest answer wins: a read
- * still under way when a newer answer lands is dropped, so a note opened just
- * before it is un-imported can't get its bar back from the tagged text.
+ * The type comes from the item layer (`ItemManager.getItemType`), so a note
+ * that lost its type tag keeps its bar while its row still holds it. The type
+ * of a file just opened is read from the note, since the metadata cache may
+ * not have parsed it yet; every change after that is typed from the parse the
+ * cache's `changed` event carries, at once where the item layer can answer at
+ * once, and otherwise keeping the type the bar has until it answers, so a tag
+ * coming off doesn't flash the bar away. The newest answer wins: a read still
+ * under way when a newer answer lands is dropped, so a note opened just before
+ * it is un-imported can't get its bar back from the tagged text. A database
+ * write alone isn't heard: a note typed by its row, lacking a type tag, keeps
+ * the type last resolved through a write that moves or tombstones that row,
+ * until the note next changes or reopens.
  */
 const noteTypePlugin = ViewPlugin.define((view) => {
   let destroyed = false;
@@ -642,15 +649,30 @@ const noteTypePlugin = ViewPlugin.define((view) => {
     }
   };
 
-  const lookup = (filePath: string) => {
-    const { info } = Obsidian.getFileInfoFromState(view.state);
-    if (!info?.file || !info.app) return;
+  /**
+   * The item layer notes are typed through, or none in an editor no plugin
+   * provides itself to. The plugin registers this extension only once its
+   * review manager exists.
+   */
+  const items = () => view.state.facet(irPluginFacet)?.reviewManager.articles;
+
+  /** Apply `answer`, now or once it lands, unless a newer one came first. */
+  const settle = (answer: NoteType | null | Promise<NoteType | null>) => {
     const thisLookup = ++latest;
-    void Obsidian.getNoteType(info.file, info.app).then((resolved) => {
+    if (!(answer instanceof Promise)) {
+      apply(answer);
+      return;
+    }
+    void answer.then((resolved) => {
       if (destroyed || thisLookup !== latest) return;
       apply(resolved);
     });
-    lastFilePath = filePath;
+  };
+
+  const lookup = (file: TFile) => {
+    lastFilePath = file.path;
+    const itemLayer = items();
+    if (itemLayer) settle(itemLayer.getItemType(file));
   };
 
   const subscribeToMetadataChanges = (app: App, filePath: string) => {
@@ -661,8 +683,8 @@ const noteTypePlugin = ViewPlugin.define((view) => {
       'changed',
       (changedFile, _data, cache) => {
         if (destroyed || changedFile.path !== filePath) return;
-        latest += 1;
-        apply(Obsidian.noteTypeFromCache(changedFile, cache, app));
+        const itemLayer = items();
+        if (itemLayer) settle(itemLayer.itemTypeFromCache(changedFile, cache));
       }
     );
   };
@@ -670,7 +692,7 @@ const noteTypePlugin = ViewPlugin.define((view) => {
   // Initial lookup on mount
   const { info } = Obsidian.getFileInfoFromState(view.state);
   if (info?.file && info.app) {
-    lookup(info.file.path);
+    lookup(info.file);
     subscribeToMetadataChanges(info.app, info.file.path);
   }
 
@@ -680,7 +702,7 @@ const noteTypePlugin = ViewPlugin.define((view) => {
       if (!newInfo?.file || !newInfo.app) return;
       // Re-resolve only when the open file actually changes
       if (newInfo.file.path !== lastFilePath) {
-        lookup(newInfo.file.path);
+        lookup(newInfo.file);
         subscribeToMetadataChanges(newInfo.app, newInfo.file.path);
       }
     },

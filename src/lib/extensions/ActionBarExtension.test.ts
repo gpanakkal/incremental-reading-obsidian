@@ -6,6 +6,7 @@ import {
   PLUGIN_ICON,
   SNIPPET_TAG,
 } from '#/lib/constants';
+import { ItemManager } from '#/lib/items/ItemManager';
 import { configureSuccessNotices } from '#/lib/notices';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import { registerPluginIcon } from '#/lib/plugin-icon';
@@ -19,6 +20,7 @@ import type {
 } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';
 import { Notice, removeIcon } from '#/test/__mocks__/obsidian';
+import { insertItemAt, makeItemVault, TestRepository } from '#/test/item-vault';
 import {
   showSuccessNotices,
   SUCCESS_NOTICE_LEVELS,
@@ -42,6 +44,8 @@ import {
 import { irPluginFacet } from './irPluginFacet';
 
 // #region HELPERS
+
+type ItemVault = ReturnType<typeof makeItemVault>;
 
 /**
  * Obsidian adds these to `HTMLElement` at runtime and jsdom has neither. The
@@ -214,19 +218,31 @@ function mountPanel(
     providePlugin?: boolean;
     /** What reading the note's type answers; `'article'` by default. */
     noteType?: () => Promise<NoteType | null>;
+    /**
+     * A real item layer to type the note through instead, over `vault`, which
+     * holds the note at `path`.
+     */
+    items?: { manager: ItemManager; vault: ItemVault; path: string };
   } = {}
 ) {
-  const file = makeFile();
+  const file = options.items
+    ? options.items.vault.files.get(options.items.path)!
+    : makeFile();
   /** The `changed` listener the bar holds on the metadata cache, if any. */
   let onChanged: MetadataChangedListener | null = null;
   /** The file at each path, as the vault has it. */
-  const vaultFiles = new Map<string, TFile>([[file.path, file]]);
+  const vaultFiles =
+    options.items?.vault.files ?? new Map<string, TFile>([[file.path, file]]);
+  // Over a real item layer, the note reads as that vault has it
+  const itemApp = options.items?.vault.app;
   const app = {
+    ...itemApp,
     isMobile: false,
-    vault: {
+    vault: itemApp?.vault ?? {
       getFileByPath: (path: string) => vaultFiles.get(path) ?? null,
     },
     metadataCache: {
+      ...itemApp?.metadataCache,
       on: vi.fn((_name: string, listener: MetadataChangedListener) => {
         onChanged = listener;
         return {};
@@ -248,9 +264,14 @@ function mountPanel(
     info,
     editorView: view,
   }));
-  const getNoteType = options.noteType
-    ? vi.spyOn(Obsidian, 'getNoteType').mockImplementation(options.noteType)
-    : vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('article');
+  // Short of a real item layer, one with no rows: a note is typed by what
+  // reading it answers, and a change by the tags the cache parsed
+  const articles = options.items?.manager ?? {
+    getItemType: vi.fn(options.noteType ?? (async () => 'article' as const)),
+    itemTypeFromCache: (changed: TFile, cache: CachedMetadata | null) =>
+      Obsidian.noteTypeFromCache(changed, cache, app as never),
+  };
+  Object.assign(harness.reviewManager, { articles });
 
   view = new EditorView({
     state: EditorState.create({
@@ -270,7 +291,7 @@ function mountPanel(
     view,
     file,
     app,
-    getNoteType,
+    getItemType: articles.getItemType as ReturnType<typeof vi.fn>,
     /**
      * Report a change to `changed` (the open file by default) whose parse has
      * `frontmatter`, as the metadata cache does once it has read the new text.
@@ -304,6 +325,44 @@ function mountPanel(
     host: () => parent.querySelector('.ir-action-bar-host'),
     topSlotBar: () => parent.querySelector('.cm-panels-top .ir-action-bar'),
   };
+}
+
+/** Where the row {@link wireItemNote} makes, id `x`, says its note is. */
+const ROW_REFERENCE = 'items/note.md';
+
+/**
+ * An editor showing a note with `frontmatter`, at the reference of row `x` of
+ * `table` or, as a copy, elsewhere, typed through a real item layer over a
+ * database holding that row as `row` says (or none).
+ */
+async function wireItemNote(spec: {
+  table: 'article' | 'snippet' | 'srs_card';
+  row: 'live' | 'deleted' | 'absent';
+  atReference: boolean;
+  frontmatter: Record<string, unknown>;
+}) {
+  const path = spec.atReference ? ROW_REFERENCE : `copies/${ROW_REFERENCE}`;
+  const vault = makeItemVault({ [path]: spec.frontmatter });
+  const repo = await TestRepository.create();
+  if (spec.row !== 'absent') {
+    insertItemAt(repo, spec.table, {
+      id: 'x',
+      reference: ROW_REFERENCE,
+      deleted: spec.row === 'deleted',
+    });
+  }
+  const manager = new ItemManager({ app: vault.app } as never, repo);
+  const panel = mountPanel(makeHarness(), {
+    items: { manager, vault, path },
+  });
+  /** Edit the note's frontmatter, then report the change as the cache does. */
+  const editNote = async (edit: (fm: Record<string, unknown>) => void) => {
+    await vault.app.fileManager.processFrontMatter(panel.file, edit);
+    panel.reportChange(
+      vault.app.metadataCache.getFileCache(panel.file)?.frontmatter
+    );
+  };
+  return { panel, repo, editNote };
 }
 
 /**
@@ -1096,6 +1155,122 @@ describe('the edit-mode action bar panel', () => {
   });
 });
 
+describe('the edit-mode bar on a note that lost its type tag', () => {
+  const tableArb = fc.constantFrom('article', 'snippet', 'srs_card' as const);
+  /** The tag a note of each table's rows carries. */
+  const TABLE_TAG = {
+    article: ARTICLE_TAG,
+    snippet: SNIPPET_TAG,
+    srs_card: CARD_TAG,
+  } as const;
+
+  it("shows on a note carrying a live row's ir-id at its reference, and on no tombstone's or copy's", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        tableArb,
+        fc.constantFrom('live', 'deleted', 'absent' as const),
+        fc.boolean(),
+        async (table, row, atReference) => {
+          const { panel } = await wireItemNote({
+            table,
+            row,
+            atReference,
+            frontmatter: { 'ir-id': 'x' },
+          });
+          await tick();
+
+          expect(panel.hasBar()).toBe(row === 'live' && atReference);
+          panel.view.destroy();
+        }
+      ),
+      { numRuns: 30 }
+    );
+  });
+
+  it('keeps the bar, at once, when only the tag comes off a note its row still holds', async () => {
+    await fc.assert(
+      fc.asyncProperty(tableArb, async (table) => {
+        const { panel, editNote } = await wireItemNote({
+          table,
+          row: 'live',
+          atReference: true,
+          frontmatter: { 'ir-id': 'x', tags: [TABLE_TAG[table]] },
+        });
+        await tick();
+        const bar = panel.bar();
+        expect(bar).not.toBeNull();
+
+        await editNote((fm) => delete fm.tags);
+
+        expect(panel.bar()).toBe(bar);
+        panel.view.destroy();
+      }),
+      { numRuns: 6 }
+    );
+  });
+
+  it('takes the bar off once the ir-id comes off an untagged note', async () => {
+    const { panel, editNote } = await wireItemNote({
+      table: 'srs_card',
+      row: 'live',
+      atReference: true,
+      frontmatter: { 'ir-id': 'x' },
+    });
+    await tick();
+    expect(panel.hasBar()).toBe(true);
+
+    await editNote((fm) => delete fm['ir-id']);
+
+    expect(panel.hasBar()).toBe(false);
+  });
+
+  it('keeps the bar it has while a slower database is asked about a tag gone, then shows its answer', async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.boolean(), async (deleted) => {
+        const { panel, repo, editNote } = await wireItemNote({
+          table: 'article',
+          row: deleted ? 'deleted' : 'live',
+          atReference: true,
+          frontmatter: { 'ir-id': 'x', tags: [ARTICLE_TAG] },
+        });
+        await tick();
+        const answer = repo.deferReads();
+
+        await editNote((fm) => delete fm.tags);
+        expect(panel.hasBar()).toBe(true);
+
+        answer();
+        await tick();
+        expect(panel.hasBar()).toBe(!deleted);
+        panel.view.destroy();
+      }),
+      { numRuns: 4 }
+    );
+  });
+
+  it("drops a slower database's answer that lands after a newer change", async () => {
+    const { panel, repo, editNote } = await wireItemNote({
+      table: 'article',
+      row: 'deleted',
+      atReference: true,
+      frontmatter: { 'ir-id': 'x', tags: [ARTICLE_TAG] },
+    });
+    await tick();
+    const answer = repo.deferReads();
+
+    // Asks the database, which would say the tombstone holds no note
+    await editNote((fm) => delete fm.tags);
+    // Answered at once by the tag put back
+    await editNote((fm) => {
+      fm.tags = [ARTICLE_TAG];
+    });
+    answer();
+    await tick();
+
+    expect(panel.hasBar()).toBe(true);
+  });
+});
+
 describe("the edit-mode bar following its note's type", () => {
   /** Any `tags` value, type tags well represented, as a list or a lone string. */
   const tagsArb = fc.oneof(
@@ -1122,7 +1297,7 @@ describe("the edit-mode bar following its note's type", () => {
 
     expect(panel.hasBar()).toBe(false);
     // Read once, when the editor opened, and never again
-    expect(panel.getNoteType).toHaveBeenCalledOnce();
+    expect(panel.getItemType).toHaveBeenCalledOnce();
   });
 
   it('shows and hides the bar as each reported change names a type or none', async () => {
@@ -1212,7 +1387,7 @@ describe("the edit-mode bar following its note's type", () => {
     panel.switchTo(other);
     await tick();
     // Its type is read afresh, and the old note's watch handed over
-    expect(panel.getNoteType).toHaveBeenLastCalledWith(other, panel.app);
+    expect(panel.getItemType).toHaveBeenLastCalledWith(other);
     expect(panel.app.metadataCache.offref).toHaveBeenCalledOnce();
 
     panel.reportChange({ tags: [ARTICLE_TAG] });

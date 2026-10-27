@@ -1,4 +1,3 @@
-import { ObsidianHelpers } from '#/lib/ObsidianHelpers';
 import { isPdfView } from '#/lib/pdf/obsidian-pdf';
 import type { NoteType } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';
@@ -27,8 +26,6 @@ interface BarTarget {
   container: HTMLElement;
   /** The bar's own class, telling the two kinds of host apart. */
   className: string;
-  /** The file's item type, looked up wherever this kind of file keeps it. */
-  lookUpType: () => Promise<NoteType | null>;
   /** Whether a file of the type looked up earns a bar here. */
   accepts: (type: NoteType | null) => boolean;
 }
@@ -38,10 +35,7 @@ interface BarTarget {
  * carries one: a note outside reading mode (edit mode has its own CodeMirror
  * panel), a view with no file, anything that is neither a note nor a PDF.
  */
-function targetOf(
-  view: View,
-  plugin: IncrementalReadingPlugin
-): BarTarget | null {
+function targetOf(view: View): BarTarget | null {
   if (view instanceof MarkdownView) {
     const { file } = view;
     if (view.getMode() !== 'preview' || !file) return null;
@@ -49,7 +43,6 @@ function targetOf(
       file,
       container: view.previewMode.containerEl,
       className: 'ir-reading-mode-bar',
-      lookUpType: () => ObsidianHelpers.getNoteType(file, plugin.app),
       accepts: (type) => type !== null,
     };
   }
@@ -65,7 +58,6 @@ function targetOf(
       file,
       container: view.contentEl,
       className: 'ir-pdf-leaf-bar',
-      lookUpType: () => plugin.reviewManager.articles.getItemType(file),
       accepts: (type) => type === 'article',
     };
   }
@@ -91,14 +83,16 @@ class LeafActionBarController {
   async sync(): Promise<void> {
     const thisSync = {};
     this.latestSync = thisSync;
-    const target = targetOf(this.leaf.view, this.plugin);
+    const target = targetOf(this.leaf.view);
     if (!target) {
       this.unmount();
       return;
     }
     let type: NoteType | null;
     try {
-      type = await target.lookUpType();
+      // The item layer types a note by its tags or, lacking them, by the row
+      // its `ir-id` names, and a PDF by the row at its path
+      type = await this.plugin.reviewManager.articles.getItemType(target.file);
     } catch (error) {
       // A note whose frontmatter won't parse, say: no type, so no bar
       console.error(
@@ -217,9 +211,10 @@ export function registerReadingModeActionBar(
   plugin.registerEvent(workspace.on('file-open', queueSyncAll));
   plugin.registerEvent(workspace.on('active-leaf-change', queueSyncAll));
   // A PDF is an article only by its row, which a rename or an import settles
-  // after the workspace events for it have fired. A note's type is in its
-  // frontmatter, which no database write changes: the cache hook below
-  // covers notes.
+  // after the workspace events for it have fired. A note is re-checked by the
+  // cache hook below only: one typed by its tags keeps them through any
+  // database write, but one typed by its row alone (no type tag) misses a
+  // write that moves or tombstones that row until its next change.
   const unsubscribe = plugin.reviewManager.repo.onDataChange(() =>
     syncLeaves((ctrl) => ctrl.showsPdf())
   );

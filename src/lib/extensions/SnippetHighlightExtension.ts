@@ -241,16 +241,23 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
 
       if (!plugin || !info || !this.file) return;
 
+      const reviewManager = plugin.reviewManager;
+      if (!reviewManager) return;
+
+      // Only sources, articles, and snippets can have child snippets. This
+      // repeats `SnippetManager.getHighlights`' own check, but gates more than
+      // the load: a note let through is marked loaded, and from then on its
+      // highlights are mapped through every edit and reloaded from the
+      // database on every sync, which a note no snippet can be taken from has
+      // no need of. Typed as the item layer types it, so a note that lost its
+      // type tag qualifies by the row its `ir-id` names; a plain note costs
+      // no query.
       const isSource = Obsidian.isSourceNote(this.file, info.app);
-      const noteType = await Obsidian.getNoteType(this.file, info.app);
+      const noteType = await reviewManager.snippets.getItemType(this.file);
       if (this.destroyed) return;
-      // Only sources, articles, and snippets can have child snippets
       if (!(isSource || noteType === 'article' || noteType === 'snippet')) {
         return;
       }
-
-      const reviewManager = plugin.reviewManager;
-      if (!reviewManager) return;
 
       // Load highlights from database into tracker (offsets are body-relative)
       await reviewManager.getSnippetHighlights(this.file);

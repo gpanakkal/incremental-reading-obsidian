@@ -37,6 +37,7 @@ import {
   textItemSpecArb,
 } from '#/test/due-query';
 import {
+  insertItemAt,
   makeItemVault,
   runOutMergeWait,
   TestRepository,
@@ -303,7 +304,12 @@ async function snipFrom(parent: TFile, priority: number | null) {
   } as unknown as SQLiteRepository;
   const manager = new SnippetManager(
     {
-      app: { vault, fileManager: { processFrontMatter } },
+      app: {
+        vault,
+        fileManager: { processFrontMatter },
+        // No `ir-id` cached: a note untagged is no item
+        metadataCache: { getFileCache: () => null },
+      },
       settings: {},
     } as never,
     repo
@@ -386,8 +392,13 @@ async function snipWith(
   vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue(null);
   const notify = vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
   const warn = vi.spyOn(console, 'warn').mockReturnValue(undefined);
+  // No `ir-id` cached for the note, which is no item
+  const metadataCache = {
+    getFileCache: () => null,
+    ...(app.metadataCache as object | undefined),
+  };
   const manager = new SnippetManager(
-    { app, settings: {} } as never,
+    { app: { ...app, metadataCache }, settings: {} } as never,
     makeSimpleRepo()
   );
   const createEntry = vi
@@ -5374,5 +5385,68 @@ describe('highlights following their parent rows', () => {
     expect(wired.redrawn()).toStrictEqual([]);
     wired.stop();
     wired.repo.dispose();
+  });
+});
+
+describe('highlights in a note that lost its type tag', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("highlights a snippet taken from a note carrying its live row's ir-id, then and after reopening", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom('article', 'snippet' as const),
+        async (table) => {
+          vi.restoreAllMocks();
+          const { vault, repo, manager } = await wireSnippets({
+            [PARENT]: { 'ir-id': 'note-id' },
+          });
+          insertItemAt(repo, table, {
+            id: 'note-id',
+            reference: PARENT,
+            deleted: false,
+          });
+          const doc = 'alpha beta gamma';
+          const state = EditorState.create({
+            doc,
+            selection: EditorSelection.single(6, 10),
+          });
+          const file = vault.files.get(PARENT)!;
+          Object.assign(vault.app, { workspace: { trigger: vi.fn() } });
+
+          const made = await manager.create(
+            // The editor's redraw is the highlight extension's to test
+            {
+              getSelection: () => 'beta',
+              cm: { state, dispatch: () => {} },
+            } as never,
+            {
+              file,
+              getViewType: () => 'markdown',
+              getSelection: () => '',
+            } as never
+          );
+          // A fresh manager has no tracker to remember the snippet by
+          const reopened = new SnippetManager(
+            { app: vault.app, settings: {} } as never,
+            repo
+          );
+
+          expect(made).not.toBeNull();
+          // Its parent is the row, so no source link names the note
+          expect(
+            repo.rows('snippet').find(({ id }) => id === made!.data.id)
+          ).toMatchObject({ parent: 'note-id' });
+          for (const reader of [manager, reopened]) {
+            expect(
+              (await reader.getHighlights(file)).map(({ id }) => id)
+            ).toEqual([made!.data.id]);
+          }
+          repo.dispose();
+        }
+      ),
+      { numRuns: 4 }
+    );
   });
 });

@@ -2,7 +2,7 @@ import { NOT_PURGED } from '#/lib/items/row-delete';
 import { MERGE_WAIT_MS } from '#/lib/readiness';
 import { disarmRowStamps, SYNCED_TABLES } from '#/lib/repository/row-stamps';
 import { SQLJSRepository } from '#/lib/repository/SQLJSRepository';
-import type { Readiness } from '#/lib/types';
+import type { Readiness, RowTypes, SQLiteRepository } from '#/lib/types';
 import type { Primitive } from '#/lib/utility-types';
 import { readFileSync } from 'fs';
 import type { App, TFile } from 'obsidian';
@@ -128,6 +128,32 @@ export class TestRepository extends SQLJSRepository {
   }
 
   /**
+   * Make reads answer later, as a repository other than sql.js would: each
+   * waits until the function returned is called. Undone by
+   * `vi.restoreAllMocks()`.
+   */
+  deferReads(): () => void {
+    const waiting: (() => void)[] = [];
+    vi.spyOn(this as SQLiteRepository, 'query').mockImplementation(
+      (query: string, params?: Primitive[]) =>
+        new Promise<RowTypes[]>((resolve) => {
+          waiting.push(() =>
+            resolve(
+              SQLJSRepository.prototype.query.call(
+                this,
+                query,
+                params
+              ) as RowTypes[]
+            )
+          );
+        })
+    );
+    return () => {
+      for (const answer of waiting.splice(0)) answer();
+    };
+  }
+
+  /**
    * Make the write whose SQL `matches` throw, as a statement SQLite rejects
    * does, while every other write runs.
    */
@@ -182,6 +208,32 @@ export class TestRepository extends SQLJSRepository {
   }
 
   protected override async save() {}
+}
+
+/**
+ * Put a row of item `table` in `repo`, with id `id`, naming `reference`, live
+ * or a tombstone, its other columns whatever the schema takes.
+ */
+export function insertItemAt(
+  repo: TestRepository,
+  table: 'article' | 'snippet' | 'srs_card',
+  {
+    id,
+    reference,
+    deleted,
+  }: { id: string; reference: string; deleted: boolean }
+) {
+  if (table === 'srs_card') {
+    repo.mutate(
+      `INSERT INTO srs_card (id, reference, deleted, created_at, due, stability, difficulty, elapsed_days, scheduled_days, state) VALUES ($1, $2, $3, 0, 0, 0, 0, 0, 0, 0)`,
+      [id, reference, deleted]
+    );
+    return;
+  }
+  repo.mutate(
+    `INSERT INTO ${table} (id, reference, deleted, due, interval, priority) VALUES ($1, $2, $3, 0, 86400000, 30)`,
+    [id, reference, deleted]
+  );
 }
 
 /** What a vault operation of an {@link makeItemVault} can be made to fail at. */

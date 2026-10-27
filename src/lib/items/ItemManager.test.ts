@@ -1,13 +1,17 @@
 import {
+  ARTICLE_TAG,
+  CARD_TAG,
   MAXIMUM_PRIORITY,
   MINIMUM_PRIORITY,
   MS_PER_YEAR,
+  SNIPPET_TAG,
 } from '#/lib/constants';
 import IRScheduler from '#/lib/IRScheduler';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import { refusalReason } from '#/lib/readiness';
 import type { IArticleBase, NoteType, SQLiteRepository } from '#/lib/types';
 import {
+  insertItemAt,
   makeItemVault,
   runOutMergeWait,
   TestRepository,
@@ -191,6 +195,60 @@ const tableArb = fc.option(
   fc.constantFrom<keyof typeof TABLE_TYPE>('article', 'snippet', 'srs_card'),
   { nil: null }
 );
+/** The tag each type of note carries. */
+const TYPE_TAG = {
+  article: ARTICLE_TAG,
+  snippet: SNIPPET_TAG,
+  card: CARD_TAG,
+} as const;
+
+/** Where the row {@link wireNote} makes, id `x`, says its note is. */
+const ROW_REFERENCE = 'items/note.md';
+
+/**
+ * A note and the row `x` of `table` it might be the note of: live, a
+ * tombstone, or none at all; the note at the row's reference or a copy of it
+ * elsewhere; tagged with a type's tag (any type's), or not; claiming `x`,
+ * another id, something that is no id, or nothing.
+ */
+const noteCaseArb = fc.record({
+  table: fc.constantFrom('article', 'snippet', 'srs_card' as const),
+  row: fc.constantFrom('live', 'deleted', 'absent' as const),
+  atReference: fc.boolean(),
+  tag: fc.option(typeArb, { nil: null }),
+  irId: fc.constantFrom<unknown>('x', 'y', undefined, 7, null),
+});
+type NoteCase = typeof noteCaseArb extends fc.Arbitrary<infer T> ? T : never;
+
+/**
+ * The type a note in `note`'s case is, worked out apart from the code: its
+ * tag's, or else its row's when that row is live, at the note's path, and the
+ * one its `ir-id` names.
+ */
+const expectedType = (note: NoteCase): NoteType | null =>
+  note.tag ??
+  (note.row === 'live' && note.atReference && note.irId === 'x'
+    ? TABLE_TYPE[note.table]
+    : null);
+
+/** The note and row of `note`'s case, and a manager over them. */
+async function wireNote(note: NoteCase) {
+  const path = note.atReference ? ROW_REFERENCE : `copies/${ROW_REFERENCE}`;
+  const frontmatter: Record<string, unknown> = { other: 1 };
+  if (note.tag) frontmatter.tags = ['keep', TYPE_TAG[note.tag]];
+  if (note.irId !== undefined) frontmatter['ir-id'] = note.irId;
+  const vault = makeItemVault({ [path]: frontmatter });
+  const repo = await TestRepository.create();
+  if (note.row !== 'absent') {
+    insertItemAt(repo, note.table, {
+      id: 'x',
+      reference: ROW_REFERENCE,
+      deleted: note.row === 'deleted',
+    });
+  }
+  const manager = new ItemManager({ app: vault.app } as never, repo);
+  return { ...vault, manager, repo, file: vault.files.get(path)! };
+}
 /** Opens the protected `deleteWithNote` to the tests. */
 class DeletingManager extends ItemManager {
   delete(
@@ -533,27 +591,84 @@ describe('getItemType', () => {
     );
   });
 
-  it('types a markdown note by its tags alone, whatever the rows say', async () => {
+  it("types a note by its tag, or else by the live row its ir-id names at the note's own path", async () => {
     await fc.assert(
-      fc.asyncProperty(
-        fc.option(typeArb, { nil: null }),
-        tableArb,
-        async (noteType, table) => {
-          const app = {};
-          const manager = new TestManager({ app } as never, makeRepo().repo);
-          const findItem = vi
-            .spyOn(manager, 'findItem')
-            .mockResolvedValue(table && ({ table } as never));
-          const getNoteType = vi
-            .spyOn(Obsidian, 'getNoteType')
-            .mockResolvedValue(noteType);
-          getNoteType.mockClear();
+      fc.asyncProperty(noteCaseArb, async (note) => {
+        const { manager, file } = await wireNote(note);
 
-          await expect(manager.getItemType(FILE)).resolves.toBe(noteType);
-          expect(getNoteType).toHaveBeenCalledExactlyOnceWith(FILE, app);
-          expect(findItem).not.toHaveBeenCalled();
-        }
-      )
+        await expect(manager.getItemType(file)).resolves.toBe(
+          expectedType(note)
+        );
+      }),
+      { numRuns: 60 }
+    );
+  });
+
+  it("answers from the cache's parse at once, as the note's own type", async () => {
+    await fc.assert(
+      fc.asyncProperty(noteCaseArb, async (note) => {
+        const { manager, file, app } = await wireNote(note);
+
+        const type = manager.itemTypeFromCache(
+          file,
+          app.metadataCache.getFileCache(file)
+        );
+
+        // sql.js answers a query at once, so the editor bar need not wait
+        expect(type).not.toBeInstanceOf(Promise);
+        expect(type).toBe(expectedType(note));
+      }),
+      { numRuns: 60 }
+    );
+  });
+
+  it('gives a note the vault no longer holds no type from the cache, whatever it carries', async () => {
+    await fc.assert(
+      fc.asyncProperty(noteCaseArb, async (note) => {
+        const { manager, file, app, files } = await wireNote(note);
+        const cache = app.metadataCache.getFileCache(file);
+        files.delete(file.path);
+
+        expect(manager.itemTypeFromCache(file, cache)).toBeNull();
+      }),
+      { numRuns: 30 }
+    );
+  });
+
+  it('asks the database only for an untagged note claiming an id, once per lookup', async () => {
+    await fc.assert(
+      fc.asyncProperty(noteCaseArb, async (note) => {
+        const { manager, file, app, repo } = await wireNote(note);
+        const query = vi.spyOn(repo, 'query');
+        const asks = note.tag === null && typeof note.irId === 'string' ? 1 : 0;
+
+        await manager.getItemType(file);
+        expect(query).toHaveBeenCalledTimes(asks);
+        await manager.itemTypeFromCache(
+          file,
+          app.metadataCache.getFileCache(file)
+        );
+        expect(query).toHaveBeenCalledTimes(2 * asks);
+      }),
+      { numRuns: 60 }
+    );
+  });
+
+  it('waits for a repository that answers later, then gives the same type', async () => {
+    await fc.assert(
+      fc.asyncProperty(noteCaseArb, async (note) => {
+        const { manager, file, app, repo } = await wireNote(note);
+        const answer = repo.deferReads();
+
+        const type = manager.itemTypeFromCache(
+          file,
+          app.metadataCache.getFileCache(file)
+        );
+
+        answer();
+        await expect(Promise.resolve(type)).resolves.toBe(expectedType(note));
+      }),
+      { numRuns: 30 }
     );
   });
 });
