@@ -395,20 +395,33 @@ test('the view stays put across mode switches around making a snippet and undoin
   const position = await headingOnScreen();
   if (!position) throw new Error('No heading on screen to keep track of');
 
-  // A snippet of a paragraph on screen
+  // A snippet of a paragraph on screen, found by the plain text it opens
+  // with: live preview shows the markup of the line the cursor is on, so
+  // text past the first `**bold**` or link reads differently once the first
+  // round has selected the line.
   const paragraph = await window.evaluate((selector) => {
     const scroller = document.querySelector<HTMLElement>(selector);
     if (!scroller) return '';
     const { top, bottom } = scroller.getBoundingClientRect();
+    /** The text before the line's first element with text of its own. */
+    const plainStart = (el: Element) => {
+      let text = '';
+      for (const node of el.childNodes) {
+        if (node.nodeType === Node.TEXT_NODE) text += node.textContent;
+        // Widgets with no text, such as the fold indicator, don't count
+        else if (node.textContent) break;
+      }
+      return text;
+    };
     const line = [...scroller.querySelectorAll('.cm-line')].find((el) => {
       const rect = el.getBoundingClientRect();
       return (
         rect.top > top + 150 &&
         rect.bottom < bottom - 50 &&
-        (el.textContent ?? '').trim().length > 40
+        plainStart(el).trim().length >= 30
       );
     });
-    return (line?.textContent ?? '').slice(0, 30);
+    return line ? plainStart(line).slice(0, 30) : '';
   }, SCROLLER);
   expect(paragraph).not.toBe('');
   // Twice over: the jump comes with most passes here, not every one, as it

@@ -724,11 +724,16 @@ test.describe('Review history navigation', () => {
     await expect(pageInput).toHaveValue('2');
 
     await openFromTable();
-    const cardToggle = window.locator(
-      '.ir-type-filter-toggle[data-type="card"]'
-    );
-    await cardToggle.click();
-    await expect(cardToggle).toHaveAttribute('aria-pressed', 'false');
+    const filterButton = window.locator('.ir-type-filter-button');
+    const menu = window.getByRole('menu');
+    const cardRow = menu.locator('.ir-type-filter-row[data-type="card"]');
+    await filterButton.click();
+    await cardRow.click();
+    await expect(cardRow).toHaveAttribute('aria-checked', 'false');
+    await expect(filterButton).toHaveClass(/\bis-filtered\b/);
+    // A second press on the icon closes the menu
+    await filterButton.click();
+    await expect(menu).toHaveCount(0);
     await homeButton.click();
     await expectReviewHome(window);
     await expect(pageInput).toHaveValue('1');
