@@ -65,6 +65,9 @@ export class SnippetOffsetTracker {
   /** Ids of the highlights warned of as reaching past their note's end. */
   private warnedPastEnd = new Set<string>();
 
+  /** Paths of the files warned of as having a highlight's text replaced. */
+  private warnedReplaced = new Set<string>();
+
   /**
    * Load highlights for a file into the cache
    * @param filePath The file path
@@ -275,8 +278,45 @@ export class SnippetOffsetTracker {
         overhang > 0 && live ? Math.max(span[1], newEnd) + overhang : span[1];
       if (!isCollapsed) this.lastLive.set(highlight.id, now);
     });
+    this.warnIfReplaced(filePath, changes, oldBodyStart, mapped);
 
     this.highlightCache.set(filePath, highlights);
+  }
+
+  /**
+   * Tells the console, once per file, of a live highlight `changes` collapsed
+   * while putting other text in where its own was. That is typing over it,
+   * or a rewrite (`editor.setValue`, Obsidian's table editor) whose new text
+   * shares too little with the old for `narrowChanges` to find this
+   * highlight's text in it. Either way it is hidden, and saved so, until the
+   * edit is undone. One only erased, with nothing put in its place, is not
+   * told of.
+   */
+  private warnIfReplaced(
+    filePath: string,
+    changes: ChangeSet,
+    oldBodyStart: number,
+    mapped: { span: Span; isCollapsed: boolean; before: Span }[]
+  ) {
+    if (this.warnedReplaced.has(filePath)) return;
+    const replaced: Span[] = [];
+    changes.iterChanges((fromA, toA, fromB, toB) => {
+      if (fromB < toB)
+        replaced.push([fromA - oldBodyStart, toA - oldBodyStart]);
+    });
+    const lost = mapped.filter(
+      ({ span, isCollapsed, before: [start, end] }) =>
+        !isCollapsed &&
+        span[0] === span[1] &&
+        replaced.some(([from, to]) => from < end && start < to)
+    );
+    if (!lost.length) return;
+    this.warnedReplaced.add(filePath);
+    console.warn(
+      `Incremental Reading: an edit to "${filePath}" replaced all the text ` +
+        `of ${lost.length} snippet highlight(s), which are hidden until it is ` +
+        `undone; this is not reported again for this file`
+    );
   }
 
   /**

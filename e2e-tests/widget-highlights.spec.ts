@@ -1,6 +1,5 @@
-import {
+import test, {
   expect,
-  default as test,
   type ElectronApplication,
   type Page,
 } from '@playwright/test';
@@ -316,3 +315,90 @@ test("shows a table cell's highlight in the cell's editor, through typing in it"
     'missing word'
   );
 });
+
+test('keeps a snippet in a hand-padded table cell on its text when Obsidian pads the table anew', async () => {
+  await setDefaultEditingMode(window, 'live-preview');
+  // Pinned, as CI's window is smaller than the local headless one
+  await window.setViewportSize({ width: 1024, height: 768 });
+  // Padded by hand, unevenly: the first edit to any cell pads every row anew,
+  // in one replacement of the whole table
+  const doc = [
+    'Intro',
+    '',
+    '| Technique | Purpose |',
+    '|---|---|',
+    '|   Spaced repetition | Remember facts over time   |',
+    '| Cloze deletion |Recall a word|',
+    '',
+    'After.',
+  ].join('\n');
+  await openNote(window, 'Hand table note.md', doc);
+  await extract(window, 'facts over', 1);
+  await cursorToEnd(window);
+
+  const table = activeEditorEl(window).locator('.cm-table-widget');
+  const mark = table
+    .locator('td', { hasText: 'Remember' })
+    .locator('.ir-snippet-highlight');
+  await expect(mark).toHaveText('facts over');
+
+  await table.locator('td', { hasText: 'Recall' }).click();
+  await window.keyboard.press('End');
+  await window.keyboard.type('!');
+  await activeEditorEl(window)
+    .locator('.cm-line', { hasText: 'After.' })
+    .click();
+  await expect(table.locator('td .cm-editor')).toHaveCount(0);
+  // The table was padded anew, or this tests nothing
+  await expect.poll(() => docOf(window)).not.toContain('|---|---|');
+  await expect(table.locator('td', { hasText: 'Recall' })).toContainText('!');
+  await expect(mark).toHaveText('facts over');
+});
+
+for (const { row, cell, text, cellText } of [
+  { row: 'header', cell: 'th', text: 'technique', cellText: 'Memory' },
+  { row: 'body', cell: 'td', text: 'facts over', cellText: 'Remember' },
+] as const) {
+  for (const side of ['before', 'after'] as const) {
+    test(`keeps a snippet in a ${row} cell on its text when a column is inserted ${side} that cell`, async () => {
+      await setDefaultEditingMode(window, 'live-preview');
+      // Pinned, as CI's window is smaller than the local headless one
+      await window.setViewportSize({ width: 1024, height: 768 });
+      // Padded as Obsidian's table editor pads it, so entering a cell changes
+      // nothing: the insertion alone rewrites the table
+      const doc = [
+        'Intro',
+        '',
+        '| Memory technique  | Purpose                  |',
+        '| ----------------- | ------------------------ |',
+        '| Spaced repetition | Remember facts over time |',
+        '| Cloze deletion    | Recall a missing word    |',
+        '',
+        'After.',
+      ].join('\n');
+      await openNote(window, 'Column note.md', doc);
+      await extract(window, text, 1);
+      await cursorToEnd(window);
+
+      const table = activeEditorEl(window).locator('.cm-table-widget');
+      const marked = table.locator(cell, { hasText: cellText });
+      const mark = marked.locator('.ir-snippet-highlight');
+      await expect(mark).toHaveText(text);
+
+      // Into the cell, clear of the mark, which opens its snippet on click
+      await marked.click({ position: { x: 4, y: 4 } });
+      await expect(marked.locator('.cm-editor')).toBeVisible();
+      await executeCommandById(window, `editor:table-col-${side}`);
+      // The header row has a pipe more, or this tests nothing
+      await expect
+        .poll(async () => (await docOf(window)).match(/^.*Purpose.*$/m)?.[0])
+        .toMatch(/^(\s*\|[^|]*){3}\|\s*$/);
+
+      await activeEditorEl(window)
+        .locator('.cm-line', { hasText: 'After.' })
+        .click();
+      await expect(table.locator('.cm-editor')).toHaveCount(0);
+      await expect(mark).toHaveText(text);
+    });
+  }
+}

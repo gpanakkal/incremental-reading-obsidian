@@ -104,6 +104,141 @@ function spans(changes: ChangeSet) {
   return out;
 }
 
+/**
+ * Text of a few words and marks, spaced any way: two drawn alike share many
+ * tokens, so `narrowChanges` has a diff to make of them.
+ */
+const wordyTextArb = fc
+  .array(
+    fc.tuple(
+      fc.constantFrom('a', 'b', 'ab', 'cd', '|', '-', '.', '1.'),
+      fc.constantFrom('', ' ', '  ', '\n')
+    ),
+    { maxLength: 12 }
+  )
+  .map((parts) => parts.map(([token, space]) => token + space).join(''));
+
+/** A whole document replaced by another drawn alike, as `setValue` does it. */
+const wordyRewriteArb = fc
+  .record({ before: wordyTextArb, after: wordyTextArb })
+  .map(({ before, after }) => {
+    const doc = Text.of(before.split('\n'));
+    return {
+      doc,
+      changes: ChangeSet.of(
+        { from: 0, to: doc.length, insert: after },
+        doc.length
+      ),
+    };
+  });
+
+/** Whitespace between tokens: never none, or two words would run together. */
+const spaceArb = fc.constantFrom(' ', '  ', '   ', '\n', ' \n ');
+
+/** The same words and marks spaced two ways, as a re-pad or re-wrap leaves them. */
+const respacedArb = fc
+  .array(fc.constantFrom('a', 'bc', 'def', '|', '---', ':', '1.'), {
+    minLength: 1,
+    maxLength: 10,
+  })
+  .chain((tokens) => {
+    const spaced = fc
+      .array(spaceArb, {
+        minLength: tokens.length + 1,
+        maxLength: tokens.length + 1,
+      })
+      .map((spaces) =>
+        tokens.reduce(
+          (text, token, i) => text + token + spaces[i + 1],
+          spaces[0]
+        )
+      );
+    return fc.record({ before: spaced, after: spaced });
+  });
+
+/**
+ * Distinct words spaced one way, and the same spaced another with one of them
+ * swapped, taken out, or put in, and a one-letter word put in at up to three
+ * more places; with where each word left alone starts in either. No two
+ * words share a first or last letter, so trimming the text the two share at
+ * either end never stops inside one; every word left alone (six letters or
+ * more) outweighs the most put in beside it (five), so no run of them is too
+ * short to keep.
+ */
+const editedWordsArb = fc
+  .array(fc.stringMatching(/^[a-z]{4,5}$/), { minLength: 2, maxLength: 12 })
+  .map((mids) =>
+    mids.map(
+      (mid, i) =>
+        String.fromCharCode(97 + i) + mid + String.fromCharCode(65 + i)
+    )
+  )
+  .chain((words) =>
+    fc.record({
+      words: fc.constant(words),
+      at: fc.nat({ max: words.length - 1 }),
+      edit: fc.constantFrom('swap', 'remove', 'add'),
+      adds: fc.array(fc.nat({ max: words.length }), { maxLength: 3 }),
+      spaces: fc.array(spaceArb, {
+        minLength: 2 * words.length + 8,
+        maxLength: 2 * words.length + 8,
+      }),
+    })
+  )
+  .map(({ words, at, edit, adds, spaces }) => {
+    const NEW = 'ZZ';
+    const next = [...words];
+    if (edit === 'swap') next.splice(at, 1, NEW);
+    if (edit === 'remove') next.splice(at, 1);
+    if (edit === 'add') next.splice(at, 0, NEW);
+    for (const add of adds) next.splice(add, 0, 'Z');
+    /** `list` spaced with `spaces` from `first` on, and where each word starts. */
+    const spaced = (list: string[], first: number) => {
+      let text = spaces[first];
+      const starts = new Map<string, number>();
+      list.forEach((word, i) => {
+        starts.set(word, text.length);
+        text += word + spaces[first + i + 1];
+      });
+      return { text, starts };
+    };
+    const before = spaced(words, 0);
+    const after = spaced(next, words.length + 1);
+    const kept = words
+      .filter((word) => after.starts.has(word))
+      .map((word) => ({
+        from: before.starts.get(word)!,
+        to: after.starts.get(word)!,
+        length: word.length,
+      }));
+    return { before: before.text, after: after.text, kept };
+  });
+
+/**
+ * A rewrite of `filler` words that it keeps, between `edits` / 2 words before
+ * and after it that it swaps for others: `edits` tokens added and removed in
+ * all. `kept` is where the kept words start, before and after.
+ */
+function scatteredRewrite(edits: number, filler: number) {
+  const swapped = (word: string, count: number) =>
+    Array.from({ length: count }, () => word);
+  const kept = Array.from({ length: filler }, (_, i) => `w${i}`);
+  const text = (word: string) =>
+    [...swapped(word, edits / 4), ...kept, ...swapped(word, edits / 4)].join(
+      ' '
+    );
+  const before = text('a');
+  const doc = Text.of([before]);
+  return {
+    doc,
+    rewrite: ChangeSet.of(
+      { from: 0, to: doc.length, insert: text('b') },
+      doc.length
+    ),
+    kept: before.indexOf('w0'),
+  };
+}
+
 // #endregion
 
 describe('computeMinimalChange narrows a whole-document swap to the differing span', () => {
@@ -431,13 +566,13 @@ describe('narrowChanges', () => {
     );
   });
 
-  it('narrows each replacement as computeMinimalChange does, in the placement asked for', () => {
+  it('keeps each replacement within the span computeMinimalChange trims it to', () => {
     fc.assert(
       fc.property(
-        docAndChanges,
+        fc.oneof(docAndChanges, wordyRewriteArb),
         placementArb,
         ({ doc, changes }, placement) => {
-          const expected: { from: number; to: number; insert: string }[] = [];
+          const trimmed: [number, number][] = [];
           changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
             const change = computeMinimalChange(
               doc.sliceString(fromA, toA),
@@ -445,26 +580,229 @@ describe('narrowChanges', () => {
               placement
             );
             if (change) {
-              expected.push({
-                from: fromA + change.from,
-                to: fromA + change.to,
-                insert: change.insert,
-              });
+              trimmed.push([fromA + change.from, fromA + change.to]);
             }
           });
-          const actual: { from: number; to: number; insert: string }[] = [];
-          narrowChanges(changes, doc, placement).iterChanges(
-            (fromA, toA, _fromB, _toB, inserted) => {
-              actual.push({
-                from: fromA,
-                to: toA,
-                insert: inserted.toString(),
-              });
-            }
+          const narrowed = narrowChanges(changes, doc, placement);
+          for (const [from, to] of spans(narrowed)) {
+            expect(trimmed.some(([f, t]) => f <= from && to <= t)).toBe(true);
+          }
+          expect(narrowed.apply(doc).toString()).toBe(
+            changes.apply(doc).toString()
           );
-          expect(actual).toEqual(expected);
         }
       )
+    );
+  });
+
+  it('keeps every position on text a rewrite only re-spaced on that text', () => {
+    fc.assert(
+      fc.property(respacedArb, placementArb, ({ before, after }, placement) => {
+        const doc = Text.of(before.split('\n'));
+        const rewrite = ChangeSet.of(
+          { from: 0, to: doc.length, insert: after },
+          doc.length
+        );
+
+        const narrowed = narrowChanges(rewrite, doc, placement);
+
+        for (let i = 0; i < before.length; i++) {
+          if (/\s/.test(before[i])) continue;
+          // Onto the same character, whichever side it sticks to
+          expect(after[narrowed.mapPos(i, 1)]).toBe(before[i]);
+          expect(after[narrowed.mapPos(i + 1, -1) - 1]).toBe(before[i]);
+        }
+      })
+    );
+  });
+
+  it('splits a rewrite where the text it keeps outweighs the edits beside it', () => {
+    const doc = Text.of(['cat, big dog']);
+    const rewrite = ChangeSet.of(
+      { from: 0, to: 12, insert: 'pig, big cow' },
+      12
+    );
+    expect(spans(narrowChanges(rewrite, doc))).toEqual([
+      [0, 3],
+      [9, 12],
+    ]);
+  });
+
+  it('leaves a rewrite whole where the texts share only a scatter of short tokens', () => {
+    // ', a' says nothing of where 'cat' or 'dog' went: no longer than the
+    // most taken out (or put in) on either side of it
+    const doc = Text.of(['cat, a dog']);
+    const rewrite = ChangeSet.of({ from: 0, to: 10, insert: 'p, a q' }, 10);
+    expect(spans(narrowChanges(rewrite, doc))).toEqual([[0, 10]]);
+  });
+
+  it('leaves a rewrite whole where what it keeps is just as long as the edits beside it', () => {
+    const doc = Text.of(['cat, ab dog']);
+    const rewrite = ChangeSet.of(
+      { from: 0, to: 11, insert: 'pig, ab cow' },
+      11
+    );
+    expect(spans(narrowChanges(rewrite, doc))).toEqual([[0, 11]]);
+  });
+
+  it('weighs each kept run by the edits on its own two sides', () => {
+    // 'c' alone is no longer than the words swapped either side of it; the
+    // 'longword's are
+    const before = '1 longword aaaa c bbbb longword 1';
+    const doc = Text.of([before]);
+    const rewrite = ChangeSet.of(
+      { from: 0, to: 33, insert: '2 longword xxxx c yyyy longword 2' },
+      33
+    );
+    expect(spans(narrowChanges(rewrite, doc))).toEqual([
+      [0, 1],
+      [11, 22],
+      [32, 33],
+    ]);
+  });
+
+  it('splits a rewrite that puts in exactly as many tokens as are looked for', () => {
+    const kept = Array.from({ length: 100 }, (_, i) => `w${i}`).join(' ');
+    const added = Array.from({ length: 500 / 2 }, () => 'b').join(' ');
+    const after = `${added} ${kept} ${added}`;
+    const doc = Text.of([kept]);
+    const rewrite = ChangeSet.of(
+      { from: 0, to: doc.length, insert: after },
+      doc.length
+    );
+    expect(narrowChanges(rewrite, doc).mapPos(0, 1)).toBe(after.indexOf('w0'));
+  });
+
+  it('keeps every token a rewrite neither took out nor put in on itself', () => {
+    fc.assert(
+      fc.property(
+        editedWordsArb,
+        placementArb,
+        ({ before, after, kept }, placement) => {
+          const doc = Text.of(before.split('\n'));
+          const rewrite = ChangeSet.of(
+            { from: 0, to: doc.length, insert: after },
+            doc.length
+          );
+
+          const narrowed = narrowChanges(rewrite, doc, placement);
+
+          for (const { from, to, length } of kept) {
+            for (let c = 0; c < length; c++) {
+              expect(narrowed.mapPos(from + c, 1)).toBe(to + c);
+            }
+          }
+        }
+      )
+    );
+  });
+
+  it('weighs a kept run again once the edits beside it join up', () => {
+    // 'ab' outweighs the 'c' → 'e' after it, until the lone 'd' between that
+    // and the long edit after goes, and the edits it parted join
+    const doc = Text.of(['pq ab c d vwxyz']);
+    const rewrite = ChangeSet.of(
+      { from: 0, to: 15, insert: 'rs ab e d fghij' },
+      15
+    );
+    expect(spans(narrowChanges(rewrite, doc))).toEqual([[0, 15]]);
+  });
+
+  it.each(['latest', 'earliest'] as const)(
+    'keeps a one-character cell where a re-pad puts pipes at both its sides (%s)',
+    (placement) => {
+      // Rows given the pipes they lacked at their ends: each pipe added
+      // counts for nothing against the lone 'p' between two of them
+      const before = ' ro  |lu y  \n|  :-: |  :-:  \n|   |p ';
+      const after = '| ro  | lu y |\n| :-: | :--: |\n|     | p    |';
+      const doc = Text.of(before.split('\n'));
+      const rewrite = ChangeSet.of(
+        { from: 0, to: before.length, insert: after },
+        before.length
+      );
+      const narrowed = narrowChanges(rewrite, doc, placement);
+      const p = before.indexOf('p');
+      expect([narrowed.mapPos(p, 1), narrowed.mapPos(p + 1, -1)]).toEqual([
+        after.indexOf('p'),
+        after.indexOf('p') + 1,
+      ]);
+    }
+  );
+
+  it.each(['latest', 'earliest'] as const)(
+    'keeps text between separator rows whose dashes grow by more than it holds (%s)',
+    (placement) => {
+      const before = '|-|\n|ab|\n|-|';
+      const dashes = '-'.repeat(10);
+      const after = `| ${dashes} |\n| ab |\n| ${dashes} |`;
+      const doc = Text.of(before.split('\n'));
+      const narrowed = narrowChanges(
+        ChangeSet.of(
+          { from: 0, to: before.length, insert: after },
+          before.length
+        ),
+        doc,
+        placement
+      );
+      const ab = before.indexOf('ab');
+      expect([narrowed.mapPos(ab, 1), narrowed.mapPos(ab + 2, -1)]).toEqual([
+        after.indexOf('ab'),
+        after.indexOf('ab') + 2,
+      ]);
+    }
+  );
+
+  it('splits a re-pad that widens a separator row by more dashes than it looks for edits', () => {
+    // Columns 300 wide: 598 dashes added, as one run each
+    const wide = (c: string) => c.repeat(300);
+    const before = `|a|b|\n|-|-|\n|${wide('x')}|${wide('y')}|`;
+    const after = [
+      `| ${'a'.padEnd(300)} | ${'b'.padEnd(300)} |`,
+      `| ${wide('-')} | ${wide('-')} |`,
+      `| ${wide('x')} | ${wide('y')} |`,
+    ].join('\n');
+    const doc = Text.of(before.split('\n'));
+    const narrowed = narrowChanges(
+      ChangeSet.of(
+        { from: 0, to: before.length, insert: after },
+        before.length
+      ),
+      doc
+    );
+    expect([narrowed.mapPos(1, 1), narrowed.mapPos(2, -1)]).toEqual([2, 3]);
+  });
+
+  it('keeps a token among like ones by the placement it is told', () => {
+    // One of the two 'a's goes: 'latest' keeps the first, 'earliest' the last
+    const doc = Text.of(['|a  a|']);
+    const rewrite = ChangeSet.of({ from: 0, to: 6, insert: '| a |' }, 6);
+    expect(narrowChanges(rewrite, doc, 'latest').mapPos(1, 1)).toBe(2);
+    expect(narrowChanges(rewrite, doc, 'latest').mapPos(4, 1)).toBe(4);
+    expect(narrowChanges(rewrite, doc, 'earliest').mapPos(1, 1)).toBe(1);
+    expect(narrowChanges(rewrite, doc, 'earliest').mapPos(4, 1)).toBe(2);
+  });
+
+  it('splits a rewrite that adds and removes a few hundred tokens around text it keeps', () => {
+    const { doc, rewrite, kept } = scatteredRewrite(400, 2_000);
+    const narrowed = narrowChanges(rewrite, doc);
+    expect(narrowed.mapPos(kept, 1)).toBe(kept);
+  });
+
+  it('leaves a rewrite whole that adds and removes more tokens than are worth diffing', () => {
+    const { doc, rewrite, kept } = scatteredRewrite(600, 2_000);
+    expect(spans(narrowChanges(rewrite, doc))).toEqual([[0, doc.length]]);
+    expect(narrowChanges(rewrite, doc).mapPos(kept, 1)).not.toBe(kept);
+  });
+
+  it('diffs a long rewrite only as far as it can do cheaply', () => {
+    // Long enough that fewer edits are looked for than in a short one
+    const far = scatteredRewrite(300, 20_000);
+    expect(spans(narrowChanges(far.rewrite, far.doc))).toEqual([
+      [0, far.doc.length],
+    ]);
+    const near = scatteredRewrite(60, 20_000);
+    expect(narrowChanges(near.rewrite, near.doc).mapPos(near.kept, 1)).toBe(
+      near.kept
     );
   });
 

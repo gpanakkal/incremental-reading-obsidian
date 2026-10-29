@@ -1,3 +1,4 @@
+import { gridArb } from '#/test/table-arbitraries';
 import { ChangeSet, Text, type ChangeSpec } from '@codemirror/state';
 import * as fc from 'fast-check';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -248,6 +249,213 @@ const shownCaseArb = fc.record({
   bodyStart: fc.nat({ max: 20 }),
   docLength: fc.nat({ max: 50 }),
 });
+
+/** Text around the table in the documents the re-pad cases rewrite. */
+const INTRO = 'Intro\n\n';
+const OUTRO = '\n\nOutro';
+
+/**
+ * A generated table re-padded as Obsidian's table editor does it: every cell's
+ * text kept, its padding changed, and the separator row's dashes lengthened
+ * (they follow the column width); with a highlight on part of one cell's text.
+ */
+const repaddedTableArb = gridArb.chain(({ doc, lines }) => {
+  const cells = lines.flatMap(({ cells }, row) =>
+    cells.map((cell) => ({ ...cell, row }))
+  );
+  // Cells with text a highlight can lie on: never the separator's dashes
+  const marked = cells.filter(
+    ({ row, start, end }) => row !== 1 && doc.slice(start, end).trim() !== ''
+  );
+  return fc
+    .record({
+      pads: fc.array(fc.tuple(fc.nat({ max: 3 }), fc.nat({ max: 3 })), {
+        minLength: cells.length,
+        maxLength: cells.length,
+      }),
+      dashes: fc.nat({ max: 3 }),
+      cell: fc.constantFrom(...marked),
+      from: fc.nat(),
+      to: fc.nat(),
+    })
+    .map(({ pads, dashes, cell, from, to }) => {
+      let after = '';
+      let last = 0;
+      cells.forEach(({ start, end, row }, i) => {
+        let text = doc.slice(start, end).trim();
+        if (row === 1) {
+          text = text.replace(/-+/, (run) => run + '-'.repeat(dashes));
+        }
+        after += doc.slice(last, start) + ' '.repeat(pads[i][0]) + text;
+        after += ' '.repeat(pads[i][1]);
+        last = end;
+      });
+      after += doc.slice(last);
+      const raw = doc.slice(cell.start, cell.end);
+      const text = raw.trim();
+      const textStart = INTRO.length + cell.start + raw.indexOf(text);
+      const p = from % text.length;
+      const q = p + 1 + (to % (text.length - p));
+      return {
+        before: INTRO + doc + OUTRO,
+        after: INTRO + after + OUTRO,
+        table: {
+          from: INTRO.length,
+          to: INTRO.length + doc.length,
+          insert: after,
+        },
+        highlight: [textStart + p, textStart + q] as const,
+        text: text.slice(p, q),
+      };
+    });
+});
+
+/**
+ * A generated table laid out as Obsidian's table editor lays one out: a pipe
+ * at each side of every row, each cell padded to its column's widest, the
+ * separator's dashes as wide; with a highlight from anywhere off the
+ * separator row to anywhere off it, padding and pipes included.
+ */
+const reformattedTableArb = gridArb.chain(({ doc, lines }) => {
+  const texts = lines.map(({ cells }) =>
+    cells.map(({ start, end }) => doc.slice(start, end).trim())
+  );
+  const widths = texts[0].map((_, c) =>
+    Math.max(3, ...texts.map((row) => row[c].length))
+  );
+  const after = texts
+    .map((row, k) => {
+      const cells = row.map((text, c) =>
+        k === 1
+          ? text.replace(/-+/, (run) =>
+              run.padEnd(run.length + widths[c] - text.length, '-')
+            )
+          : text.padEnd(widths[c])
+      );
+      return `| ${cells.join(' | ')} |`;
+    })
+    .join('\n');
+  const separator = {
+    from: lines[0].text.length,
+    to: doc.indexOf('\n', lines[0].text.length + 1) + 1,
+  };
+  // Off the separator row: before its line break or after its own
+  const offSeparator = fc
+    .nat({ max: doc.length - (separator.to - separator.from) })
+    .map((p) => (p <= separator.from ? p : p + separator.to - separator.from));
+  return fc
+    .tuple(offSeparator, offSeparator)
+    .filter(([p, q]) => p !== q)
+    .map(([p, q]) => ({
+      before: INTRO + doc + OUTRO,
+      after: INTRO + after + OUTRO,
+      table: {
+        from: INTRO.length,
+        to: INTRO.length + doc.length,
+        insert: after,
+      },
+      highlight: [
+        INTRO.length + Math.min(p, q),
+        INTRO.length + Math.max(p, q),
+      ] as const,
+    }));
+});
+
+/**
+ * A generated table rewritten whole as Obsidian's table commands rewrite it to
+ * insert a column: an empty column at any index, laid out anew (a pipe at
+ * each side of every row, each cell padded to its column's widest); with a
+ * highlight on part of one cell's text, in any row off the separator.
+ */
+const columnInsertedTableArb = gridArb.chain(({ doc, lines }) => {
+  const texts = lines.map(({ cells }) =>
+    cells.map(({ start, end }) => doc.slice(start, end).trim())
+  );
+  const marked = lines.flatMap(({ cells }, row) =>
+    row === 1
+      ? []
+      : cells.filter(({ start, end }) => doc.slice(start, end).trim() !== '')
+  );
+  return fc
+    .record({
+      at: fc.nat({ max: texts[0].length }),
+      cell: fc.constantFrom(...marked),
+      from: fc.nat(),
+      to: fc.nat(),
+    })
+    .map(({ at, cell, from, to }) => {
+      const grown = texts.map((row, k) => [
+        ...row.slice(0, at),
+        k === 1 ? '---' : '',
+        ...row.slice(at),
+      ]);
+      const widths = grown[0].map((_, c) =>
+        Math.max(3, ...grown.map((row) => row[c].length))
+      );
+      const after = grown
+        .map((row, k) => {
+          const cells = row.map((text, c) =>
+            k === 1
+              ? text.replace(/-+/, (run) =>
+                  run.padEnd(run.length + widths[c] - text.length, '-')
+                )
+              : text.padEnd(widths[c])
+          );
+          return `| ${cells.join(' | ')} |`;
+        })
+        .join('\n');
+      const raw = doc.slice(cell.start, cell.end);
+      const text = raw.trim();
+      const textStart = INTRO.length + cell.start + raw.indexOf(text);
+      const p = from % text.length;
+      const q = p + 1 + (to % (text.length - p));
+      return {
+        before: INTRO + doc + OUTRO,
+        after: INTRO + after + OUTRO,
+        table: {
+          from: INTRO.length,
+          to: INTRO.length + doc.length,
+          insert: after,
+        },
+        highlight: [textStart + p, textStart + q] as const,
+        text: text.slice(p, q),
+      };
+    });
+});
+
+/**
+ * `text` less what a re-pad changes in it: its whitespace, its pipes (a row
+ * may gain them at its sides), and how many dashes a run of them has.
+ */
+const sansPadding = (text: string) =>
+  text.replace(/[\s|]+/g, '').replace(/-+/g, '-');
+
+/**
+ * Maps `tracker`'s highlights in `path` through `rewrite` of `before`, narrowed
+ * both ways as `SnippetHighlightExtension` narrows an edit.
+ */
+function mapRewrite(
+  tracker: SnippetOffsetTracker,
+  path: string,
+  before: string,
+  rewrite: ChangeSpec
+): void {
+  const doc = Text.of(before.split('\n'));
+  const changes = ChangeSet.of(rewrite, doc.length);
+  tracker.updateOffsetsWithMapping(
+    path,
+    narrowChanges(changes, doc),
+    0,
+    0,
+    narrowChanges(changes, doc, 'earliest')
+  );
+}
+
+/** The text each of `tracker`'s highlights in `path` lies on in `doc`. */
+const shownIn = (tracker: SnippetOffsetTracker, path: string, doc: string) =>
+  tracker
+    .getHighlights(path)
+    .map((h) => doc.slice(h.start_offset, h.end_offset));
 
 // #endregion
 
@@ -1224,6 +1432,251 @@ describe('SnippetOffsetTracker', () => {
             }
           ),
           { numRuns: 300 }
+        );
+      });
+    });
+
+    describe('when a block is rewritten whole, as Obsidian re-pads a table', () => {
+      beforeEach(() => {
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+      });
+      afterEach(() => vi.restoreAllMocks());
+
+      const before =
+        'Intro\n\n| fruit | n |\n|---|---|\n|apple    | 3 |\n\nOutro';
+      const repadded = '| fruit | n   |\n| ----- | --- |\n| apple | 3   |';
+      const table = {
+        from: before.indexOf('|'),
+        to: before.lastIndexOf('|') + 1,
+      };
+      const after = (insert: string) =>
+        before.slice(0, table.from) + insert + before.slice(table.to);
+      const highlightOn = (text: string, id = 'h') => {
+        const start = before.indexOf(text);
+        return createHighlight(id, start, start + text.length);
+      };
+      const lengths = (path: string) =>
+        tracker.getHighlights(path).map((h) => h.end_offset - h.start_offset);
+
+      it('keeps a highlight in a cell on its text', () => {
+        tracker.loadHighlights(filePath, [highlightOn('apple')]);
+
+        mapRewrite(tracker, filePath, before, { ...table, insert: repadded });
+
+        expect(shownIn(tracker, filePath, after(repadded))).toEqual(['apple']);
+      });
+
+      it('keeps a highlight in a cell on its text when another cell was edited in the same rewrite', () => {
+        // The first edit to a hand-padded table: the cell typed in, and every
+        // row re-padded around it
+        const edited = '| fruit | n   |\n| ----- | --- |\n| apple | 30  |';
+        tracker.loadHighlights(filePath, [highlightOn('apple')]);
+
+        mapRewrite(tracker, filePath, before, { ...table, insert: edited });
+
+        expect(shownIn(tracker, filePath, after(edited))).toEqual(['apple']);
+      });
+
+      it('keeps a highlight in a cell on its text when text pasted into another cell widens the separator row as much', () => {
+        // The separator's dashes grow as far as the paste: as many characters
+        // changed on both sides of the row between them as the paste holds
+        const narrow = 'Intro\n\n| fruit |\n|-|\n| apple |\n| |\n\nOutro';
+        const paste = 'a long pasted sentence of words';
+        const width = paste.length;
+        const row = (cell: string) => `| ${cell.padEnd(width)} |`;
+        const wide = [
+          row('fruit'),
+          `| ${'-'.repeat(width)} |`,
+          row('apple'),
+          row(paste),
+        ].join('\n');
+        const from = narrow.indexOf('|');
+        const to = narrow.lastIndexOf('|') + 1;
+        const start = narrow.indexOf('apple');
+        tracker.loadHighlights(filePath, [
+          createHighlight('h', start, start + 5),
+        ]);
+
+        mapRewrite(tracker, filePath, narrow, { from, to, insert: wide });
+
+        expect(
+          shownIn(
+            tracker,
+            filePath,
+            narrow.slice(0, from) + wide + narrow.slice(to)
+          )
+        ).toEqual(['apple']);
+      });
+
+      it('keeps the text under a highlight in any cell of any table, whatever padding it is given', () => {
+        fc.assert(
+          fc.property(
+            repaddedTableArb,
+            ({ before, after, table, highlight, text }) => {
+              const t = new SnippetOffsetTracker();
+              t.loadHighlights(filePath, [createHighlight('h', ...highlight)]);
+
+              mapRewrite(t, filePath, before, table);
+
+              expect(shownIn(t, filePath, after)).toEqual([text]);
+            }
+          ),
+          { numRuns: 300 }
+        );
+      });
+
+      it('keeps the text under a highlight that starts or ends in padding or spans pipes when Obsidian lays the table out anew', () => {
+        fc.assert(
+          fc.property(
+            reformattedTableArb,
+            ({ before, after, table, highlight }) => {
+              const text = sansPadding(before.slice(...highlight));
+              fc.pre(text !== '');
+              const t = new SnippetOffsetTracker();
+              t.loadHighlights(filePath, [createHighlight('h', ...highlight)]);
+
+              mapRewrite(t, filePath, before, table);
+
+              expect(shownIn(t, filePath, after).map(sansPadding)).toEqual([
+                text,
+              ]);
+            }
+          ),
+          { numRuns: 300 }
+        );
+      });
+
+      it('keeps the text under a highlight in any cell when a table command inserts a column anywhere', () => {
+        fc.assert(
+          fc.property(
+            columnInsertedTableArb,
+            ({ before, after, table, highlight, text }) => {
+              const t = new SnippetOffsetTracker();
+              t.loadHighlights(filePath, [createHighlight('h', ...highlight)]);
+
+              mapRewrite(t, filePath, before, table);
+
+              expect(shownIn(t, filePath, after)).toEqual([text]);
+            }
+          ),
+          { numRuns: 300 }
+        );
+      });
+
+      it('keeps a highlight from a header row into the rows below over the separator row the re-pad widens', () => {
+        const table = '|fxy kuon aw |\n  --- |\n   q\\q|\n|   | ';
+        const laidOut =
+          '| fxy kuon aw |\n| ----------- |\n| q\\q         |\n|             |';
+        const before = INTRO + table + OUTRO;
+        // From the space after 'aw' to the end of 'q\q|'
+        const start = before.indexOf(' |');
+        const end = before.indexOf('q|') + 2;
+        tracker.loadHighlights(filePath, [createHighlight('h', start, end)]);
+
+        mapRewrite(tracker, filePath, before, {
+          from: INTRO.length,
+          to: INTRO.length + table.length,
+          insert: laidOut,
+        });
+
+        expect(
+          shownIn(tracker, filePath, INTRO + laidOut + OUTRO).map(sansPadding)
+        ).toEqual([sansPadding(before.slice(start, end))]);
+      });
+
+      it('collapses a highlight whose text the rewrite took out, and warns of it once per file', () => {
+        const warn = vi.mocked(console.warn);
+        const pear = '| fruit | n   |\n| ----- | --- |\n| pear  | 3   |';
+        tracker.loadHighlights(filePath, [highlightOn('apple')]);
+        tracker.loadHighlights('other.md', [highlightOn('apple', 'o')]);
+
+        mapRewrite(tracker, filePath, before, { ...table, insert: pear });
+        expect(lengths(filePath)).toEqual([0]);
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(String(warn.mock.calls[0][0])).toContain(filePath);
+
+        // Again in the same file: already warned of
+        tracker.loadHighlights(filePath, [highlightOn('apple')]);
+        mapRewrite(tracker, filePath, before, { ...table, insert: pear });
+        expect(lengths(filePath)).toEqual([0]);
+        expect(warn).toHaveBeenCalledTimes(1);
+
+        mapRewrite(tracker, 'other.md', before, { ...table, insert: pear });
+        expect(warn).toHaveBeenCalledTimes(2);
+        expect(String(warn.mock.calls[1][0])).toContain('other.md');
+      });
+
+      it('does not warn of a highlight whose text was only deleted', () => {
+        tracker.loadHighlights(filePath, [highlightOn('apple')]);
+        const start = before.indexOf('apple');
+
+        mapRewrite(tracker, filePath, before, { from: start, to: start + 5 });
+
+        expect(lengths(filePath)).toEqual([0]);
+        expect(console.warn).not.toHaveBeenCalled();
+      });
+
+      it('does not warn of a highlight already collapsed before the rewrite', () => {
+        const start = before.indexOf('apple');
+        tracker.loadHighlights(filePath, [createHighlight('h', start, start)]);
+
+        mapRewrite(tracker, filePath, before, { ...table, insert: 'x' });
+
+        expect(console.warn).not.toHaveBeenCalled();
+      });
+
+      it('does not warn of a highlight a rewrite elsewhere left alone', () => {
+        tracker.loadHighlights(filePath, [highlightOn('Outro')]);
+
+        mapRewrite(tracker, filePath, before, { ...table, insert: 'x' });
+
+        expect(shownIn(tracker, filePath, after('x'))).toEqual(['Outro']);
+        expect(console.warn).not.toHaveBeenCalled();
+      });
+
+      describe('in a note whose body starts after its frontmatter', () => {
+        // 'apple' in the body, 10 characters in
+        const text = 'frontmat\n\none apple two';
+        const bodyStart = 10;
+        it.each([
+          {
+            what: 'text put in where its text was',
+            specs: [{ from: 11, to: 19, insert: 'X' }],
+            warns: true,
+          },
+          {
+            what: 'its text erased, and text put in after it, apart',
+            specs: [
+              { from: 14, to: 19 },
+              { from: 20, to: 23, insert: 'six' },
+            ],
+            warns: false,
+          },
+          {
+            what: 'its text erased, and text put in before it, apart',
+            specs: [
+              { from: 10, to: 13, insert: 'six' },
+              { from: 14, to: 19 },
+            ],
+            warns: false,
+          },
+        ])(
+          'warns of a collapsed highlight as $what: $warns',
+          ({ specs, warns }) => {
+            tracker.loadHighlights(filePath, [createHighlight('h', 4, 9)]);
+
+            tracker.updateOffsetsWithMapping(
+              filePath,
+              ChangeSet.of(specs, text.length),
+              bodyStart,
+              bodyStart
+            );
+
+            expect(lengths(filePath)).toEqual([0]);
+            expect(vi.mocked(console.warn).mock.calls.length).toBe(
+              warns ? 1 : 0
+            );
+          }
         );
       });
     });
