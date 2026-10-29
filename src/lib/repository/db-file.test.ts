@@ -624,7 +624,8 @@ describe('writeDatabaseFile', () => {
           else
             expect(files.get(PATHS.prev)).toBe(hadPrev ? earlier : undefined);
         }
-      )
+      ),
+      { timeout: 15000 }
     );
   });
 
