@@ -268,7 +268,7 @@ type SelectingWindow = {
   };
 };
 
-test("a table cell's editor paints no highlights, and an edit in it leaves the note's in place", async () => {
+test("a table cell's editor paints none of the note's highlights outside the cell, and an edit in it leaves the note's in place", async () => {
   await window.setViewportSize({ width: 1024, height: 768 });
   const { notePath } = await importNote(SHORT_NOTE);
 
@@ -319,8 +319,9 @@ test("a table cell's editor paints no highlights, and an edit in it leaves the n
       [SCROLLER, CELL_EDITOR] as const
     );
 
-  // The cell editor's highlights loaded asynchronously when it drew them:
-  // their absence can only be shown by giving them time to appear.
+  // Both highlights lie outside the cell, so its editor marks neither. Marks
+  // arrive asynchronously when it draws any: their absence can only be shown
+  // by giving them time to appear.
   await window.evaluate(
     () => new Promise((resolve) => setTimeout(resolve, 1000))
   );

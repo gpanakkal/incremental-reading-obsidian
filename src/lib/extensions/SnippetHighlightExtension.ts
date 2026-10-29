@@ -122,6 +122,21 @@ export const snippetHighlightHistory = invertedEffects.of((tr) => {
 export const MIDDLE_MOUSE_BUTTON = 1;
 
 /**
+ * Claim a middle mousedown on a highlight that opens a snippet, so the
+ * auxclick that follows is a clean navigation: left alone, the mousedown
+ * starts autoscroll on Windows and pastes the primary selection on Linux.
+ * Not on a highlight that opens nothing, as a table cell editor's marks of
+ * the note's highlights, where the button does what it does on plain text.
+ */
+export function claimMiddleMousedown(event: MouseEvent): void {
+  if (event.button !== MIDDLE_MOUSE_BUTTON) return;
+  const target = event.target as HTMLElement | null;
+  if (target?.closest('.ir-snippet-highlight[data-snippet-ref]')) {
+    event.preventDefault();
+  }
+}
+
+/**
  * Open the snippet, or in a PDF the card, whose highlight the event targeted,
  * honoring the modifier keys the same way Obsidian's own links do.
  *
@@ -516,14 +531,8 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
         return openHighlightFromEvent(plugin, event);
       },
 
-      // Middle-mousedown starts autoscroll on Windows and pastes the primary
-      // selection on Linux. Claim it so the auxclick that follows is a clean
-      // navigation rather than a navigation plus an unwanted default action.
       mousedown: (event: MouseEvent) => {
-        if (event.button !== MIDDLE_MOUSE_BUTTON) return false;
-        const target = event.target as HTMLElement | null;
-        if (!target?.closest('.ir-snippet-highlight')) return false;
-        event.preventDefault();
+        claimMiddleMousedown(event);
         return false;
       },
     },

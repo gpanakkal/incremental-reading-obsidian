@@ -72,6 +72,7 @@ import { createIRExtensions, IR_ID_LOCKED_NOTICE } from './lib/extensions';
 import { registerFileExplorerActiveFileClick } from './lib/extensions/FileExplorerActiveFileClick';
 import { registerReadingModeActionBar } from './lib/extensions/ReadingModeActionBar';
 import {
+  claimMiddleMousedown,
   MIDDLE_MOUSE_BUTTON,
   openHighlightFromEvent,
 } from './lib/extensions/SnippetHighlightExtension';
@@ -548,12 +549,7 @@ export default class IncrementalReadingPlugin extends Plugin {
 
         // Suppress the middle-click default action (autoscroll / primary-paste)
         // over a highlight so the auxclick above is a clean navigation.
-        this.registerDomEvent(document, 'mousedown', (evt: MouseEvent) => {
-          if (evt.button !== MIDDLE_MOUSE_BUTTON) return;
-          const target = evt.target as HTMLElement | null;
-          if (!target?.closest('.ir-snippet-highlight')) return;
-          evt.preventDefault();
-        });
+        this.registerDomEvent(document, 'mousedown', claimMiddleMousedown);
       } catch (error) {
         // Unloaded while startup waited on Sync, so there is nothing to undo
         if (error instanceof StartupCancelledError) return;

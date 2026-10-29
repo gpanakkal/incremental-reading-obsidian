@@ -2095,6 +2095,17 @@ body:not(.is-mobile) .ir-review-interface .ir-card-editor .ir-review-scroller {
   border-bottom-color: var(--text-accent-hover);
 }
 
+/* A table cell editor's marks of the note's highlights open nothing: a click
+ places the cursor, so they look and point as plain text there */
+.ir-snippet-highlight.ir-inert-highlight {
+  cursor: inherit;
+}
+
+.ir-snippet-highlight.ir-inert-highlight:hover {
+  background-color: var(--ir-snippet-highlight-color);
+  border-bottom-color: var(--text-accent);
+}
+
 /* Apply hover to multi-line MathJax components */
 .ir-snippet-highlight:hover div.math-block {
   background-color: var(--ir-snippet-highlight-color-hover);

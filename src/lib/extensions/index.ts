@@ -2,6 +2,7 @@ import type IncrementalReadingPlugin from '#/main';
 import type { Extension } from '@codemirror/state';
 import { actionBarExtension } from './ActionBarExtension';
 import { answerRevealExtension } from './AnswerRevealExtension';
+import { cellEditorHighlights } from './CellEditorHighlights';
 import { contextFlashExtension } from './ContextFlashExtension';
 import { irIdGuardExtension } from './IrIdGuardExtension';
 import { irPluginFacet } from './irPluginFacet';
@@ -11,6 +12,7 @@ import {
   snippetHighlightHistory,
 } from './SnippetHighlightExtension';
 import { transclusionGeometryExtension } from './TransclusionGeometryExtension';
+import { widgetHighlightPainter } from './WidgetHighlightPainter';
 
 // Re-export for convenience
 export {
@@ -62,6 +64,12 @@ export function createIRExtensions(
 
     // Undo and redo put snippet highlights back where they were
     snippetHighlightHistory,
+
+    // Snippet highlights in the callouts and tables live preview draws as widgets
+    widgetHighlightPainter,
+
+    // The note's highlights in a table cell's editor, which shows them nowhere else
+    cellEditorHighlights,
 
     // Fading highlight on a card's answer at the moment it is revealed
     answerRevealExtension,

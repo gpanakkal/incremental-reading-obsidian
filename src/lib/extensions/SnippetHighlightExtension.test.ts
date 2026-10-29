@@ -28,6 +28,7 @@ import {
 } from 'obsidian';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  claimMiddleMousedown,
   isExternalSync,
   openHighlightFromEvent,
   refreshHighlightsEffect,
@@ -2112,6 +2113,14 @@ describe('click event handler', () => {
     expect(event.defaultPrevented).toBe(true);
   });
 
+  it('leaves a right mousedown on a highlight to the editor, which keeps its default action', () => {
+    let event!: MouseEvent;
+    withHighlight(({ span }) => {
+      event = dispatchOn(span, 'mousedown', { button: 2 });
+    });
+    expect(event.defaultPrevented).toBe(false);
+  });
+
   it('middle mousedown outside a highlight keeps its default action', () => {
     const view = makeView('hello', makePlugin(makeReviewManager()));
     const plain = document.createElement('span');
@@ -2122,6 +2131,43 @@ describe('click event handler', () => {
     expect(event.defaultPrevented).toBe(false);
     plain.remove();
     view.destroy();
+  });
+
+  it('claims a middle mousedown only on a highlight that opens a snippet, wherever the listener sits', () => {
+    // As the plugin's document-wide listener sees it: a table cell editor's
+    // mark of the note's highlight opens nothing, so the press stays as on
+    // plain text there
+    const host = document.body.createDiv();
+    const opens = host.createSpan({
+      cls: 'ir-snippet-highlight',
+      attr: { 'data-snippet-ref': 'snippets/a.md' },
+    });
+    const inside = opens.createEl('strong');
+    const inert = host.createSpan({
+      cls: 'ir-snippet-highlight ir-inert-highlight',
+      attr: { 'data-snippet-id': 'h1' },
+    });
+    const plain = host.createSpan();
+    const prevented = (target: Element, button: number) => {
+      const event = new MouseEvent('mousedown', {
+        bubbles: true,
+        cancelable: true,
+        button,
+      });
+      host.addEventListener('mousedown', claimMiddleMousedown, { once: true });
+      target.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+    try {
+      expect(prevented(opens, 1)).toBe(true);
+      expect(prevented(inside, 1)).toBe(true);
+      expect(prevented(opens, 0)).toBe(false);
+      expect(prevented(opens, 2)).toBe(false);
+      expect(prevented(inert, 1)).toBe(false);
+      expect(prevented(plain, 1)).toBe(false);
+    } finally {
+      host.remove();
+    }
   });
 
   it('does not navigate when the highlight lacks data-snippet-ref', () => {
