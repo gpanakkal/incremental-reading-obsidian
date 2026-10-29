@@ -3,6 +3,20 @@ import { ChangeSet, type ChangeSpec, type Text } from '@codemirror/state';
 const isHighSurrogate = (code: number) => code >= 0xd800 && code <= 0xdbff;
 const isLowSurrogate = (code: number) => code >= 0xdc00 && code <= 0xdfff;
 
+/** A character a backslash escapes in Markdown: any ASCII punctuation. */
+const ESCAPABLE = /^[!-/:-@[-`{-~]$/;
+
+/**
+ * Whether a backslash escapes the character at `at` in `text`: an escapable
+ * one, after an odd run of backslashes (an even one escapes itself).
+ */
+function isEscaped(text: string, at: number): boolean {
+  if (!ESCAPABLE.test(text.charAt(at))) return false;
+  let backslashes = 0;
+  while (text.charAt(at - 1 - backslashes) === '\\') backslashes++;
+  return backslashes % 2 === 1;
+}
+
 /**
  * The narrowest replacement that turns `current` into `next`, or `null` when
  * they already match.
@@ -25,11 +39,22 @@ const isLowSurrogate = (code: number) => code >= 0xdc00 && code <= 0xdfff;
  * @param placement where to put the change when it could go in more than one
  *   place — putting `a` into `aa` makes `aaa` wherever it goes: `'latest'`
  *   trims the shared prefix first, `'earliest'` the shared suffix.
+ * @param keepEscapes never start the shared tail on a character a backslash
+ *   escapes in `current`, at the cost of a change one character wider: its
+ *   backslash left in the change, it could match to a bare one in `next`, as
+ *   an escaped pipe in a table cell to the pipe a re-pad puts after it. The
+ *   shared head needs no such care: each of its characters follows the same
+ *   text in both, so is escaped in both or in neither. Nor does an escape
+ *   only `next` has, which the change made: a backslash put in before a
+ *   character, or one left before a character put in, stays outside the
+ *   change, as the highlight it begins or ends does (pulling it in could
+ *   match it to some other backslash).
  */
 export function computeMinimalChange(
   current: string,
   next: string,
-  placement: 'latest' | 'earliest' = 'latest'
+  placement: 'latest' | 'earliest' = 'latest',
+  keepEscapes = false
 ): { from: number; to: number; insert: string } | null {
   if (current === next) return null;
 
@@ -48,13 +73,16 @@ export function computeMinimalChange(
     }
     return n;
   };
+  /** `n` shared code units at the end, less one `current` escapes they start on. */
+  const keepSuffix = (n: number) =>
+    keepEscapes && isEscaped(current, current.length - n) ? n - 1 : n;
   let prefix: number;
   let suffix: number;
   if (placement === 'latest') {
     prefix = shared(shorter, false);
-    suffix = shared(shorter - prefix, true);
+    suffix = keepSuffix(shared(shorter - prefix, true));
   } else {
-    suffix = shared(shorter, true);
+    suffix = keepSuffix(shared(shorter, true));
     prefix = shared(shorter - suffix, false);
   }
 
@@ -80,9 +108,11 @@ type Token = { text: string; at: number };
  * single characters between them, whitespace left out: what a re-pad, a
  * re-wrap or a re-indent never changes. A run of dashes is one token, so a
  * table separator row widened by a re-pad is no edit (see {@link keyOf}),
- * not one per dash added (see {@link MAX_EDITS}).
+ * not one per dash added (see {@link MAX_EDITS}). A backslash escape is one
+ * token too, so an escaped pipe in a cell's text never matches a pipe of the
+ * table's own (see {@link TABLE_MARKUP}).
  */
-const TOKEN = /[\p{L}\p{N}\p{M}_]+|-+|\S/gu;
+const TOKEN = /\\[!-/:-@[-`{-~]|[\p{L}\p{N}\p{M}_]+|-+|\S/gu;
 
 const tokenize = (text: string): Token[] =>
   Array.from(text.matchAll(TOKEN), (m) => ({ text: m[0], at: m.index ?? 0 }));
@@ -242,6 +272,11 @@ function meaningfulRuns(
  * the two share (see {@link tokenize}), or as one replacement of the whole
  * where they share none to speak of or are too far apart to tell. Each is
  * narrowed by {@link computeMinimalChange}, offsets relative to `a`.
+ *
+ * A stretch is narrowed even where that splits a backslash escape: the
+ * escapes the two texts share are tokens kept already, and an edit that
+ * makes or unmakes one, as a `!` typed after a backslash, stays as narrow as
+ * it is.
  */
 function alignByTokens(
   a: string,
@@ -319,7 +354,8 @@ export function narrowChanges(
     const change = computeMinimalChange(
       doc.sliceString(fromA, toA),
       inserted.toString(),
-      placement
+      placement,
+      true
     );
     if (!change) return;
     const removed = doc.sliceString(fromA + change.from, fromA + change.to);

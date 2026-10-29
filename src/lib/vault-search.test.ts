@@ -18,6 +18,13 @@ interface FileSpec {
   unreadable: boolean;
 }
 
+/**
+ * Never hand the thread back: the default yield needs the plugin's `window`,
+ * absent under the node test environment, and only runs once a slice of real
+ * time has passed, so a slow machine would reach it at random.
+ */
+const NO_PAUSE = { pause: async () => {} };
+
 /** A note the query matches, searched like any other. */
 const PLAIN: FileSpec = {
   extension: 'md',
@@ -344,7 +351,7 @@ describe('getVaultSearch', () => {
             filters,
           });
 
-          const search = getVaultSearch(app);
+          const search = getVaultSearch(app, NO_PAUSE);
           await search?.run('query', signal());
 
           const used =
@@ -375,7 +382,7 @@ describe('getVaultSearch', () => {
       explorers: [{}, ...brokenExplorer('no-match'), makeExplorerView(Query)],
     });
 
-    await getVaultSearch(app)?.run('query', signal());
+    await getVaultSearch(app, NO_PAUSE)?.run('query', signal());
 
     expect(log.made).toContain('query');
     // Nothing the explorer's filter reads of itself is missing
@@ -391,7 +398,7 @@ describe('getVaultSearch', () => {
       ],
     });
 
-    await getVaultSearch(app)?.run('query', signal());
+    await getVaultSearch(app, NO_PAUSE)?.run('query', signal());
 
     expect(log.made).toContain('query');
   });
@@ -399,10 +406,10 @@ describe('getVaultSearch', () => {
   it('keeps the query class once found, through the explorer gone since', async () => {
     const { Query, log } = makeQueryClass();
     const { app, leaves } = makeApp({ explorers: [makeExplorerView(Query)] });
-    expect(getVaultSearch(app)).not.toBeNull();
+    expect(getVaultSearch(app, NO_PAUSE)).not.toBeNull();
 
     leaves['file-explorer'] = [];
-    await getVaultSearch(app)?.run('again', signal());
+    await getVaultSearch(app, NO_PAUSE)?.run('again', signal());
 
     expect(log.made).toContain('again');
   });
@@ -461,8 +468,10 @@ describe('getVaultSearch with the query class', () => {
           const { app } = makeVault(specs, false);
           const progress: number[] = [];
 
-          const found = await getVaultSearch(app)!.run('query', signal(), (n) =>
-            progress.push(n)
+          const found = await getVaultSearch(app, NO_PAUSE)!.run(
+            'query',
+            signal(),
+            (n) => progress.push(n)
           );
 
           expect(progress).toEqual(found.map((_, at) => at + 1));
@@ -473,7 +482,7 @@ describe('getVaultSearch with the query class', () => {
 
   it("rethrows the engine's own error for a query it can't parse, reading nothing", async () => {
     const { app, cachedRead, log, errors } = makeVault([PLAIN], true);
-    const search = getVaultSearch(app)!;
+    const search = getVaultSearch(app, NO_PAUSE)!;
 
     const failure = search.run('x:y', signal());
 
@@ -485,7 +494,9 @@ describe('getVaultSearch with the query class', () => {
   it('lists nothing for a query that parses to nothing, reading nothing', async () => {
     const { app, cachedRead, log } = makeVault([PLAIN], true);
 
-    await expect(getVaultSearch(app)!.run('  ', signal())).resolves.toEqual([]);
+    await expect(
+      getVaultSearch(app, NO_PAUSE)!.run('  ', signal())
+    ).resolves.toEqual([]);
     expect(log.matched).toEqual([]);
     expect(cachedRead).not.toHaveBeenCalled();
   });
@@ -501,7 +512,7 @@ describe('getVaultSearch with the query class', () => {
             extension: 'png',
           }));
           const { app, log } = makeVault(specs, false);
-          const search = getVaultSearch(app)!;
+          const search = getVaultSearch(app, NO_PAUSE)!;
           log.matched.length = 0;
           const controller = new AbortController();
           const reason = new Error('stopped');
@@ -524,7 +535,7 @@ describe('getVaultSearch with the query class', () => {
 
   it("matches nothing more once aborted while a file's content is read", async () => {
     const { app, log, cachedRead } = makeVault([PLAIN, PLAIN], true);
-    const search = getVaultSearch(app)!;
+    const search = getVaultSearch(app, NO_PAUSE)!;
     log.matched.length = 0;
     const controller = new AbortController();
     cachedRead.mockImplementation(async () => {
@@ -540,7 +551,7 @@ describe('getVaultSearch with the query class', () => {
 
   it('rejects at once for a signal already aborted', async () => {
     const { app, log, cachedRead } = makeVault([PLAIN], true);
-    const search = getVaultSearch(app)!;
+    const search = getVaultSearch(app, NO_PAUSE)!;
     log.matched.length = 0;
     const controller = new AbortController();
     controller.abort();
@@ -620,7 +631,7 @@ describe('getVaultSearch with the query class', () => {
       [{ ...PLAIN, unreadable: true }],
       true
     );
-    const search = getVaultSearch(app)!;
+    const search = getVaultSearch(app, NO_PAUSE)!;
     log.matched.length = 0;
 
     await expect(search.run('query', signal())).resolves.toEqual(files);
@@ -632,7 +643,7 @@ describe('getVaultSearch with the query class', () => {
     const { Query, log } = makeQueryClass();
     const { app } = makeApp({ explorers: [makeExplorerView(Query)] });
 
-    await getVaultSearch(app)!.run('Some Text', signal());
+    await getVaultSearch(app, NO_PAUSE)!.run('Some Text', signal());
 
     expect(log.made.at(-1)).toBe('Some Text');
     expect(log.args).toEqual(
@@ -659,7 +670,7 @@ describe('getVaultSearch with the CLI', () => {
         const { app } = makeApp({ cli, files, filters: false });
         const progress = vi.fn();
 
-        const found = await getVaultSearch(app)!.run(
+        const found = await getVaultSearch(app, NO_PAUSE)!.run(
           'query',
           signal(),
           progress
@@ -682,9 +693,9 @@ describe('getVaultSearch with the CLI', () => {
     const { cli } = makeCli(() => Promise.resolve('No matches found.'));
     const { app } = makeApp({ cli, filters: false });
 
-    await expect(getVaultSearch(app)!.run('query', signal())).resolves.toEqual(
-      []
-    );
+    await expect(
+      getVaultSearch(app, NO_PAUSE)!.run('query', signal())
+    ).resolves.toEqual([]);
   });
 
   it('rejects with what it says for a query it refuses, as an error', async () => {
@@ -700,7 +711,7 @@ describe('getVaultSearch with the CLI', () => {
           });
           const { app } = makeApp({ cli, filters: false });
 
-          const failure = getVaultSearch(app)!.run('x:', signal());
+          const failure = getVaultSearch(app, NO_PAUSE)!.run('x:', signal());
 
           await expect(failure).rejects.toBeInstanceOf(Error);
           await expect(failure).rejects.toThrow(
@@ -717,9 +728,9 @@ describe('getVaultSearch with the CLI', () => {
     const { cli } = makeCli(() => Promise.resolve('{"total":1}'));
     const { app } = makeApp({ cli, filters: false });
 
-    await expect(getVaultSearch(app)!.run('query', signal())).rejects.toThrow(
-      /total/
-    );
+    await expect(
+      getVaultSearch(app, NO_PAUSE)!.run('query', signal())
+    ).rejects.toThrow(/total/);
   });
 
   it('takes an answer already parsed', async () => {
@@ -727,9 +738,9 @@ describe('getVaultSearch with the CLI', () => {
     const { cli } = makeCli(() => Promise.resolve(['a.md', 3]));
     const { app } = makeApp({ cli, files, filters: false });
 
-    await expect(getVaultSearch(app)!.run('query', signal())).resolves.toEqual(
-      files
-    );
+    await expect(
+      getVaultSearch(app, NO_PAUSE)!.run('query', signal())
+    ).resolves.toEqual(files);
   });
 
   it('rejects with the reason once aborted while it searched', async () => {
@@ -742,7 +753,7 @@ describe('getVaultSearch with the CLI', () => {
     const progress = vi.fn();
 
     await expect(
-      getVaultSearch(app)!.run('query', controller.signal, progress)
+      getVaultSearch(app, NO_PAUSE)!.run('query', controller.signal, progress)
     ).rejects.toBe(controller.signal.reason);
     expect(progress).not.toHaveBeenCalled();
   });
@@ -763,10 +774,10 @@ describe('loadSearchEngine', () => {
     };
     const { app, leaves } = makeApp();
     leaves['file-explorer'] = [shown, deferred];
-    expect(getVaultSearch(app)).toBeNull();
+    expect(getVaultSearch(app, NO_PAUSE)).toBeNull();
 
     await expect(loadSearchEngine(app)).resolves.toBe(true);
-    await getVaultSearch(app)?.run('query', signal());
+    await getVaultSearch(app, NO_PAUSE)?.run('query', signal());
 
     expect(deferred.loadIfDeferred).toHaveBeenCalledOnce();
     expect(shown.loadIfDeferred).not.toHaveBeenCalled();
@@ -779,7 +790,7 @@ describe('loadSearchEngine', () => {
     const { app, leaves } = makeApp({ explorers: [makeExplorerView(Query)] });
     await expect(loadSearchEngine(app)).resolves.toBe(false);
 
-    getVaultSearch(app);
+    getVaultSearch(app, NO_PAUSE);
     leaves['file-explorer'] = [deferred];
 
     await expect(loadSearchEngine(app)).resolves.toBe(false);

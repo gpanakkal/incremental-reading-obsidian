@@ -55,6 +55,27 @@ const localEditArb = fc
 
 const placementArb = fc.constantFrom('latest', 'earliest');
 
+/** Text thick with backslashes, what they escape and what they don't. */
+const escapeyArb = fc.string({
+  unit: fc.constantFrom('a', ' ', '\\', '|', '*', '\u{1F600}'),
+  maxLength: 8,
+});
+
+/**
+ * Where `text` has a character a backslash escapes, read left to right as
+ * Markdown does: a backslash before ASCII punctuation escapes it, an escaped
+ * backslash escapes nothing more.
+ */
+function escapedAt(text: string): Set<number> {
+  const escaped = new Set<number>();
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '\\' && /[!-/:-@[-`{-~]/.test(text[i + 1] ?? '')) {
+      escaped.add(++i);
+    }
+  }
+  return escaped;
+}
+
 /** A line of any UTF-16 text, lone surrogates included, but no line break. */
 const lineArb = fc
   .string({ unit: 'binary', maxLength: 12 })
@@ -384,6 +405,64 @@ describe('computeMinimalChange narrows a whole-document swap to the differing sp
     const change = computeMinimalChange('\u{1F600}', '\u{1FA00}');
 
     expect(change).toEqual({ from: 0, to: 2, insert: '\u{1FA00}' });
+  });
+
+  it.each([
+    // The shared tail would start on the escaped pipe
+    ['a\\|', 'a\\ |', 'latest', { from: 2, to: 3, insert: ' |' }],
+    // ... and put what a re-pad adds between it and its backslash
+    ['a\\|', 'a\\| |', 'earliest', { from: 3, to: 3, insert: ' |' }],
+    // An escape only the new text has stays outside the change
+    ['a |', 'a \\|', 'earliest', { from: 2, to: 2, insert: '\\' }],
+    // A backslash before a letter escapes nothing
+    ['a\\b', 'a\\c', 'latest', { from: 2, to: 3, insert: 'c' }],
+    // An escaped backslash leaves the pipe after it bare, a third escapes it
+    ['x\\\\|', 'x\\\\| |', 'earliest', { from: 3, to: 3, insert: '| ' }],
+    ['x\\\\\\|', 'x\\\\\\| |', 'earliest', { from: 5, to: 5, insert: ' |' }],
+  ] as const)(
+    'keeps a character the current text escapes out of the shared tail when told to: %j to %j, %s',
+    (current, next, placement, change) => {
+      expect(computeMinimalChange(current, next, placement, true)).toEqual(
+        change
+      );
+    }
+  );
+
+  it('keeps a character the current text escapes out of the shared tail, and changes nothing else, when told to (property-based)', () => {
+    fc.assert(
+      fc.property(
+        escapeyArb,
+        escapeyArb,
+        escapeyArb,
+        escapeyArb,
+        placementArb,
+        (head, oldMiddle, newMiddle, tail, placement) => {
+          const current = head + oldMiddle + tail;
+          const next = head + newMiddle + tail;
+          const plain = computeMinimalChange(current, next, placement);
+          const kept = computeMinimalChange(current, next, placement, true);
+          if (plain === null) {
+            expect(kept).toBeNull();
+            return;
+          }
+          expect(applyChange(current, kept!)).toBe(next);
+          expect(splitsSurrogatePair(current, kept!.from)).toBe(false);
+          expect(splitsSurrogatePair(current, kept!.to)).toBe(false);
+          expect(escapedAt(current).has(kept!.to)).toBe(false);
+          if (!escapedAt(current).has(plain.to)) {
+            expect(kept).toEqual(plain);
+          } else {
+            // One character more of the tail in the change, which may let
+            // the head take one more, as an edit that could go anywhere in a
+            // run moves to where it can
+            expect(kept!.to).toBe(plain.to + 1);
+            expect(kept!.from - plain.from).toBeGreaterThanOrEqual(0);
+            expect(kept!.from - plain.from).toBeLessThanOrEqual(1);
+          }
+        }
+      ),
+      { numRuns: 1000 }
+    );
   });
 
   it('handles astral characters that share either surrogate half (property-based)', async () => {
@@ -813,6 +892,53 @@ describe('narrowChanges', () => {
     expect(spans(narrowChanges(whole, doc, 'latest'))).toEqual([[3, 4]]);
     expect(spans(narrowChanges(whole, doc, 'earliest'))).toEqual([[1, 2]]);
   });
+
+  it.each([
+    // A row given the pipe at its end it lacked, and a column besides
+    ['| x | k\\|', '| x | k\\| |'],
+    ['| x | k\\|', '|     | x   | k\\| |'],
+    ['| k\\| |', '| k\\| |     |'],
+    ['| \\|k |', '|     | \\|k |'],
+    ['| \\| |', '| \\| |     |'],
+  ])(
+    'keeps an escaped pipe in a cell on itself, never on a pipe the rewrite puts beside it: %j to %j',
+    (before, after) => {
+      const doc = Text.of([before]);
+      const rewrite = ChangeSet.of(
+        { from: 0, to: before.length, insert: after },
+        before.length
+      );
+      const from = before.indexOf('\\|');
+      for (const placement of ['latest', 'earliest'] as const) {
+        const narrowed = narrowChanges(rewrite, doc, placement);
+        expect([
+          narrowed.mapPos(from, 1),
+          narrowed.mapPos(from + 2, -1),
+        ]).toEqual([after.indexOf('\\|'), after.indexOf('\\|') + 2]);
+      }
+    }
+  );
+
+  it.each([
+    // A backslash made to escape what is typed after it, and the reverse
+    ['a k\\ b', 'a k\\! b', [4, 4]],
+    ['a k\\! b', 'a k\\ b', [4, 5]],
+    // A character escaped by a backslash typed before it, and the reverse
+    ['a |k b', 'a \\|k b', [2, 2]],
+    ['a \\|k b', 'a |k b', [2, 3]],
+  ] as const)(
+    'narrows a rewrite that makes or unmakes an escape to what it puts in or takes out: %j to %j',
+    (before, after, span) => {
+      const doc = Text.of([before]);
+      const rewrite = ChangeSet.of(
+        { from: 0, to: before.length, insert: after },
+        before.length
+      );
+      for (const placement of ['latest', 'earliest'] as const) {
+        expect(spans(narrowChanges(rewrite, doc, placement))).toEqual([span]);
+      }
+    }
+  );
 
   it('drops a replacement of text with itself', () => {
     fc.assert(

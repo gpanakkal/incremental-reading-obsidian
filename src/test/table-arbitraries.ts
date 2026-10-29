@@ -43,9 +43,12 @@ export const gridArb = fc
       wordsArb,
       fc.constant(''),
       wordArb.map((w) => `${w}\\|${w}`),
-      // A backslash before a letter, and an escaped pipe ending a cell
+      // A backslash before a letter, and an escaped pipe ending a cell,
+      // starting one, or all there is in one
       wordArb.map((w) => `${w}\\${w}`),
-      wordArb.map((w) => `${w}\\|`)
+      wordArb.map((w) => `${w}\\|`),
+      wordArb.map((w) => `\\|${w}`),
+      fc.constant('\\|')
     );
     const styleArb = fc.record({
       lead: fc.boolean(),

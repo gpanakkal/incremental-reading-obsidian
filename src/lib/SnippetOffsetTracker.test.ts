@@ -451,6 +451,21 @@ function mapRewrite(
   );
 }
 
+/**
+ * Where `text` has a character a backslash escapes, read left to right as
+ * Markdown does: a backslash before ASCII punctuation escapes it, an escaped
+ * backslash escapes nothing more.
+ */
+function escapedAt(text: string): Set<number> {
+  const escaped = new Set<number>();
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '\\' && /[!-/:-@[-`{-~]/.test(text[i + 1] ?? '')) {
+      escaped.add(++i);
+    }
+  }
+  return escaped;
+}
+
 /** The text each of `tracker`'s highlights in `path` lies on in `doc`. */
 const shownIn = (tracker: SnippetOffsetTracker, path: string, doc: string) =>
   tracker
@@ -1466,6 +1481,111 @@ describe('SnippetOffsetTracker', () => {
         expect(shownIn(tracker, filePath, after(repadded))).toEqual(['apple']);
       });
 
+      it('keeps a highlight ending in an escaped pipe on its text when a column is inserted after its cell', () => {
+        // A row with no pipe at its end, its last cell's text ending in an
+        // escaped one: the rewrite puts the row's own pipe right after it
+        const unpiped = 'Intro\n\n| a | b\n|---|---\n| x | k\\|\n\nOutro';
+        const inserted =
+          '| a   | b   |     |\n| --- | --- | --- |\n| x   | k\\| |     |';
+        const start = unpiped.indexOf('k\\|');
+        tracker.loadHighlights(filePath, [
+          createHighlight('h', start, start + 3),
+        ]);
+
+        const from = unpiped.indexOf('|');
+        mapRewrite(tracker, filePath, unpiped, {
+          from,
+          to: unpiped.indexOf('\n\nOutro'),
+          insert: inserted,
+        });
+
+        expect(
+          shownIn(
+            tracker,
+            filePath,
+            unpiped.slice(0, from) + inserted + '\n\nOutro'
+          )
+        ).toEqual(['k\\|']);
+      });
+
+      it.each([
+        // A character escaped by the backslash ending the highlight
+        ['k\\', '', '!'],
+        // The backslash escaping the character starting the highlight
+        ['|k', '\\', ''],
+        // The same escapes taken back out
+        ['k\\', '!', ''],
+        ['|k', '', '\\'],
+      ])(
+        'keeps a highlight on %j when a whole rewrite makes or unmakes an escape across its edge',
+        (text, oldBeside, newBeside) => {
+          const highlightEnds = text.endsWith('\\');
+          const [before, after] = [oldBeside, newBeside].map((beside) =>
+            highlightEnds ? `a ${text}${beside} b` : `a ${beside}${text} b`
+          );
+          const start = before.indexOf(text);
+          tracker.loadHighlights(filePath, [
+            createHighlight('h', start, start + text.length),
+          ]);
+
+          mapRewrite(tracker, filePath, before, {
+            from: 0,
+            to: before.length,
+            insert: after,
+          });
+
+          expect(shownIn(tracker, filePath, after)).toEqual([text]);
+        }
+      );
+
+      it('keeps the text under a highlight beside an edit in a whole rewrite of text full of escapes', () => {
+        const textArb = fc.string({
+          unit: fc.constantFrom('a', ' ', '\\', '|', '!'),
+          maxLength: 12,
+        });
+        fc.assert(
+          fc.property(
+            textArb.filter((doc) => doc.length > 0),
+            fc.nat(),
+            fc.nat(),
+            fc.nat(),
+            fc.nat(),
+            textArb,
+            (doc, i, j, k, l, insert) => {
+              const [start, end] = [i, j]
+                .map((n) => n % (doc.length + 1))
+                .sort((a, b) => a - b);
+              // One splitting an escape, its edges can't both keep the escape
+              // whole and keep to the highlight
+              fc.pre(
+                start < end &&
+                  !escapedAt(doc).has(start) &&
+                  !escapedAt(doc).has(end)
+              );
+              // Before the highlight, or after it
+              const [lo, hi] = k % 2 ? [0, start] : [end, doc.length];
+              const [from, to] = [k, l]
+                .map((n) => lo + (n % (hi - lo + 1)))
+                .sort((a, b) => a - b);
+              const next = doc.slice(0, from) + insert + doc.slice(to);
+              const t = new SnippetOffsetTracker();
+              t.loadHighlights(filePath, [createHighlight('h', start, end)]);
+
+              mapRewrite(t, filePath, doc, {
+                from: 0,
+                to: doc.length,
+                insert: next,
+              });
+
+              expect(shownIn(t, filePath, next)).toEqual([
+                doc.slice(start, end),
+              ]);
+            }
+          ),
+          { numRuns: 1000 }
+        );
+      });
+
       it('keeps a highlight in a cell on its text when another cell was edited in the same rewrite', () => {
         // The first edit to a hand-padded table: the cell typed in, and every
         // row re-padded around it
@@ -1559,7 +1679,7 @@ describe('SnippetOffsetTracker', () => {
               expect(shownIn(t, filePath, after)).toEqual([text]);
             }
           ),
-          { numRuns: 300 }
+          { numRuns: 1000 }
         );
       });
 
