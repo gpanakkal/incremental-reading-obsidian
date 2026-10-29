@@ -1913,7 +1913,7 @@ body:not(.is-mobile) .ir-review-interface .ir-card-editor .ir-review-scroller {
 }
 
 /* A segmented button group: a track of `.ir-segment` buttons, the pressed one
-   `.is-active` (the bulk-import filter bar, the scheduling modal's strategy). */
+   `.is-active` (the bulk-import filter bar, `SegmentGroup`). */
 .ir-segments {
   display: flex;
   align-self: flex-start;

@@ -139,11 +139,10 @@ test.describe('Bulk import from the review home', () => {
       .locator('.modal')
       .filter({ has: window.locator('.ir-bulk-import-filter') });
     // Folder · Tag · …
-    await modal.locator('.ir-segment').nth(1).click();
-    await expect(modal.locator('.ir-segment').nth(1)).toHaveAttribute(
-      'aria-pressed',
-      'true'
-    );
+    await modal.locator('.ir-bulk-import-filter .ir-segment').nth(1).click();
+    await expect(
+      modal.locator('.ir-bulk-import-filter .ir-segment').nth(1)
+    ).toHaveAttribute('aria-pressed', 'true');
     const tagInput = modal.locator('.ir-bulk-import-tag-input');
     await tagInput.fill(`#${TAG}`);
     // Out of the way of the list: the suggestions close with the field
@@ -197,7 +196,7 @@ test.describe('Bulk import from the review home', () => {
     const modal = window
       .locator('.modal')
       .filter({ has: window.locator('.ir-bulk-import-filter') });
-    const segments = modal.locator('.ir-segment');
+    const segments = modal.locator('.ir-bulk-import-filter .ir-segment');
     // Search is the last filter
     await segments.last().click();
     await expect(segments.last()).toHaveAttribute('aria-pressed', 'true');

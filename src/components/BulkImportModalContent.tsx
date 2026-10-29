@@ -439,7 +439,10 @@ export function BulkImportModalContent({
         <div
           className="ir-bulk-import-options"
           onKeyDown={(e) => {
-            if (e.key === 'Enter') {
+            // A focused segment's own Enter activation presses it. Tag check,
+            // not instanceof: a popout window has its own HTMLButtonElement.
+            const onButton = (e.target as HTMLElement).tagName === 'BUTTON';
+            if (e.key === 'Enter' && !onButton) {
               e.preventDefault();
               confirm();
             }

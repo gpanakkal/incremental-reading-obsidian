@@ -26,7 +26,11 @@ export function ImportModalContent({
     <div
       className="ir-scheduling-modal"
       onKeyDown={(e) => {
-        if (e.key === 'Enter') {
+        // A focused button's own Enter activation clicks it, so Enter on a
+        // segment presses it and Enter on Cancel cancels. Tag check, not
+        // instanceof: a popout window has its own HTMLButtonElement.
+        const onButton = (e.target as HTMLElement).tagName === 'BUTTON';
+        if (e.key === 'Enter' && !onButton) {
           e.preventDefault();
           handleEnter();
         }

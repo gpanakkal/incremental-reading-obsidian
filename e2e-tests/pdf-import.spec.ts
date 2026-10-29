@@ -125,9 +125,12 @@ async function expandFolder(page: Page, folder: string, shown: Locator) {
 const explorerRow = (page: Page, at: string) =>
   page.locator(`.nav-file-title[data-path="${at}"]`);
 
-/** The import dialog's "Make a copy" toggle. */
-const copyToggle = (page: Page) =>
-  page.locator('.ir-scheduling-modal label', { hasText: 'Make a copy' });
+/** The import dialog's copy choice: in place, then a copy. */
+const copySegments = (page: Page) =>
+  page
+    .locator('.ir-scheduling-modal > .ir-segments[role="group"]')
+    .nth(1)
+    .locator(':scope > .ir-segment');
 
 test.beforeEach(async () => {
   vaultPath = await createVaultCopy('pdf-import');
@@ -154,7 +157,10 @@ test.describe('Importing a PDF', () => {
 
     await executeCommandById(window, 'incremental-reading:import-article');
     await expect(window.locator('.ir-scheduling-modal')).toBeVisible();
-    await expect(copyToggle(window).locator('input')).not.toBeChecked();
+    await expect(copySegments(window).nth(0)).toHaveAttribute(
+      'aria-pressed',
+      'true'
+    );
     await finalizeArticleImport(window);
 
     await expect

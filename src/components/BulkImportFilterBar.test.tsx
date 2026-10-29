@@ -179,7 +179,11 @@ function subfolderToggles(container: HTMLElement) {
 }
 
 function segmentButtons(container: HTMLElement) {
-  return [...container.querySelectorAll<HTMLButtonElement>('.ir-segment')];
+  return [
+    ...container.querySelectorAll<HTMLButtonElement>(
+      '.ir-bulk-import-filter .ir-segment'
+    ),
+  ];
 }
 
 /**

@@ -9,12 +9,8 @@ import type { SchedulingStrategy } from '#/lib/types';
 import { useRef, useState } from 'react';
 import { FixedIntervalField } from './action-bar/FixedIntervalField';
 import { PriorityField } from './action-bar/PriorityField';
+import { SegmentGroup, STRATEGY_SEGMENTS } from './SegmentGroup';
 import type { SchedulingModalProps } from './types';
-
-const STRATEGY_SEGMENTS: { strategy: SchedulingStrategy; label: string }[] = [
-  { strategy: 'priority', label: 'Priority scheduling' },
-  { strategy: 'fixed-interval', label: 'Fixed intervals' },
-];
 
 export function SchedulingModalContent({
   plugin,
@@ -90,21 +86,11 @@ export function SchedulingModalContent({
       }}
     >
       {type === 'article' && (
-        <div className="ir-segments" role="group">
-          {STRATEGY_SEGMENTS.map((segment) => (
-            <button
-              key={segment.strategy}
-              className={
-                'ir-segment' +
-                (segment.strategy === strategy ? ' is-active' : '')
-              }
-              aria-pressed={segment.strategy === strategy}
-              onClick={() => setStrategy(segment.strategy)}
-            >
-              {segment.label}
-            </button>
-          ))}
-        </div>
+        <SegmentGroup
+          segments={STRATEGY_SEGMENTS}
+          value={strategy}
+          onChange={setStrategy}
+        />
       )}
       {strategy === 'priority' ? (
         <>

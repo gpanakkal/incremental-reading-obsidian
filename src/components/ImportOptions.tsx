@@ -9,6 +9,7 @@ import type { SchedulingStrategy } from '#/lib/types';
 import { useRef, useState } from 'react';
 import { FixedIntervalField } from './action-bar/FixedIntervalField';
 import { PriorityField } from './action-bar/PriorityField';
+import { SegmentGroup, STRATEGY_SEGMENTS, type Segment } from './SegmentGroup';
 
 /** What the import dialogs ask before importing: how to schedule, and where. */
 export interface ImportOptionValues {
@@ -44,6 +45,11 @@ export function useImportOptions(initial: {
   return { values, update, current: () => latestRef.current };
 }
 
+const COPY_SEGMENTS: Segment<boolean>[] = [
+  { value: false, label: 'Import in place' },
+  { value: true, label: 'Make a copy' },
+];
+
 const INTERVAL_TOOLTIP =
   `Number of days between reviews, from ` +
   `${MINIMUM_FIXED_REVIEW_INTERVAL} to ${MAXIMUM_FIXED_REVIEW_INTERVAL}.`;
@@ -73,30 +79,11 @@ export function ImportOptionsFields({
   const { strategy, makeCopy } = values;
   return (
     <>
-      <div className="ir-toggle">
-        <label className="ir-toggle-label">
-          Fixed intervals
-          <div
-            className={
-              'checkbox-container' +
-              (strategy === 'priority' ? ' is-enabled' : '')
-            }
-          >
-            <input
-              type="checkbox"
-              checked={strategy === 'priority'}
-              onChange={(e) =>
-                update({
-                  strategy: e.currentTarget.checked
-                    ? 'priority'
-                    : 'fixed-interval',
-                })
-              }
-            />
-          </div>
-          Priority scheduling
-        </label>
-      </div>
+      <SegmentGroup
+        segments={STRATEGY_SEGMENTS}
+        value={strategy}
+        onChange={(chosen) => update({ strategy: chosen })}
+      />
       {strategy === 'priority' ? (
         <>
           <PriorityField
@@ -118,21 +105,11 @@ export function ImportOptionsFields({
         </>
       )}
       {canCopy && (
-        <div className="ir-toggle">
-          <label className="ir-toggle-label">
-            Import in place
-            <div
-              className={'checkbox-container' + (makeCopy ? ' is-enabled' : '')}
-            >
-              <input
-                type="checkbox"
-                checked={makeCopy}
-                onChange={(e) => update({ makeCopy: e.currentTarget.checked })}
-              />
-            </div>
-            Make a copy
-          </label>
-        </div>
+        <SegmentGroup
+          segments={COPY_SEGMENTS}
+          value={makeCopy}
+          onChange={(chosen) => update({ makeCopy: chosen })}
+        />
       )}
     </>
   );

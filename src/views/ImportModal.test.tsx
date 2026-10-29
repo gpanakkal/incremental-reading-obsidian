@@ -64,12 +64,33 @@ function makeFile(basename: string, extension = 'md') {
   } as TFile;
 }
 
-/** The "Make a copy" toggle, if the modal offers one. */
+/**
+ * The segments of the modal's `n`th choice (0: strategy, priority then fixed
+ * intervals; 1: copy, in place then a copy), or null when it is not offered.
+ */
+function segments(modal: ImportModal, n: number) {
+  const group = modal.contentEl.querySelectorAll(
+    '.ir-scheduling-modal > .ir-segments[role="group"]'
+  )[n];
+  return group
+    ? [
+        ...group.querySelectorAll<HTMLButtonElement>(
+          ':scope > button.ir-segment'
+        ),
+      ]
+    : null;
+}
+
+/**
+ * The copy choice, if the modal offers one, as an on/off toggle: checked
+ * while its copy segment is pressed; a click presses the other segment.
+ */
 function copyToggle(modal: ImportModal) {
-  const label = [...modal.contentEl.querySelectorAll('label')].find((el) =>
-    el.textContent?.includes('Make a copy')
-  );
-  return label?.querySelector('input') ?? null;
+  const choice = segments(modal, 1);
+  if (!choice) return null;
+  const [inPlace, copy] = choice;
+  const checked = copy.getAttribute('aria-pressed') === 'true';
+  return { checked, click: () => (checked ? inPlace : copy).click() };
 }
 
 function clickButton(modal: ImportModal, text: string) {
@@ -147,7 +168,6 @@ describe('ImportModal', () => {
         const file = makeFile('note');
         const modal = new ImportModal(plugin, fileSubject(file, initial));
         modal.onOpen();
-        // jsdom only fires a checkbox's change event while it is in the page
         document.body.append(modal.contentEl);
         try {
           for (let i = 0; i < flips; i += 1) {
@@ -314,9 +334,7 @@ describe('ImportModal', () => {
           document.body.append(modal.contentEl);
           try {
             if (fixedInterval) {
-              const strategy = [...modal.contentEl.querySelectorAll('label')]
-                .find((el) => el.textContent?.includes('Priority scheduling'))!
-                .querySelector('input')!;
+              const strategy = segments(modal, 0)![1];
               await act(() => strategy.click());
             }
             const input = modal.contentEl.querySelector<HTMLInputElement>(
@@ -355,6 +373,79 @@ describe('ImportModal', () => {
           }
         }
       ),
+      { numRuns: 20 }
+    );
+  });
+
+  it('confirms from a field on no key but Enter', () => {
+    fc.assert(
+      fc.property(
+        fc.oneof(
+          fc.constantFrom('a', 'Tab', 'Escape', ' ', 'ArrowUp'),
+          fc.string({ minLength: 1 }).filter((key) => key !== 'Enter')
+        ),
+        (key) => {
+          const { plugin, importArticle } = makePlugin();
+          const modal = new ImportModal(plugin, fileSubject(makeFile('note')));
+          modal.onOpen();
+          document.body.append(modal.contentEl);
+          try {
+            const input =
+              modal.contentEl.querySelector<HTMLInputElement>(
+                '#ir-priority-input'
+              )!;
+
+            void act(() => {
+              input.dispatchEvent(
+                new KeyboardEvent('keydown', { key, bubbles: true })
+              );
+            });
+
+            expect(importArticle).not.toHaveBeenCalled();
+          } finally {
+            modal.onClose();
+            modal.contentEl.remove();
+          }
+        }
+      ),
+      { numRuns: 20 }
+    );
+  });
+
+  it('leaves Enter on a button to the button, never confirming', () => {
+    // A focused segment's own Enter activation presses it, as Enter on
+    // Cancel cancels
+    fc.assert(
+      fc.property(fc.boolean(), fc.nat(), (initial, pick) => {
+        const { plugin, importArticle } = makePlugin();
+        const modal = new ImportModal(
+          plugin,
+          fileSubject(makeFile('note'), initial)
+        );
+        closeLikeObsidian(modal);
+        const onClose = vi.spyOn(modal, 'onClose');
+        modal.onOpen();
+        document.body.append(modal.contentEl);
+        try {
+          const buttons = [...modal.contentEl.querySelectorAll('button')];
+          const event = new KeyboardEvent('keydown', {
+            key: 'Enter',
+            bubbles: true,
+            cancelable: true,
+          });
+
+          void act(() => {
+            buttons[pick % buttons.length].dispatchEvent(event);
+          });
+
+          expect(event.defaultPrevented).toBe(false);
+          expect(importArticle).not.toHaveBeenCalled();
+          expect(onClose).not.toHaveBeenCalled();
+        } finally {
+          modal.onClose();
+          modal.contentEl.remove();
+        }
+      }),
       { numRuns: 20 }
     );
   });

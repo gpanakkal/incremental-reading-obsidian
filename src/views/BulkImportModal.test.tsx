@@ -208,18 +208,42 @@ function spinner(modal: BulkImportModal) {
   return modal.contentEl.querySelector('.ir-loading');
 }
 
-function copyToggle(modal: BulkImportModal) {
-  const label = [...modal.contentEl.querySelectorAll('label')].find((el) =>
-    el.textContent?.includes('Make a copy')
-  );
-  return label?.querySelector('input') ?? null;
+/**
+ * The segments of the import options' `n`th choice (0: strategy, priority
+ * then fixed intervals; 1: copy, in place then a copy), or null when it
+ * is not offered.
+ */
+function optionSegments(modal: BulkImportModal, n: number) {
+  const group = modal.contentEl.querySelectorAll(
+    '.ir-bulk-import-options > .ir-segments[role="group"]'
+  )[n];
+  return group
+    ? [
+        ...group.querySelectorAll<HTMLButtonElement>(
+          ':scope > button.ir-segment'
+        ),
+      ]
+    : null;
 }
 
+const isPressed = (segment: HTMLElement) =>
+  segment.getAttribute('aria-pressed') === 'true';
+
+/**
+ * The copy choice, if offered, as an on/off toggle: checked while its copy
+ * segment is pressed; a click presses the other segment.
+ */
+function copyToggle(modal: BulkImportModal) {
+  const choice = optionSegments(modal, 1);
+  if (!choice) return null;
+  const [inPlace, copy] = choice;
+  const checked = isPressed(copy);
+  return { checked, click: () => (checked ? inPlace : copy).click() };
+}
+
+/** The strategy segment not pressed now: a click switches strategy. */
 function strategyToggle(modal: BulkImportModal) {
-  const label = [...modal.contentEl.querySelectorAll('label')].find((el) =>
-    el.textContent?.includes('Priority scheduling')
-  );
-  return label!.querySelector('input')!;
+  return optionSegments(modal, 0)!.find((segment) => !isPressed(segment))!;
 }
 
 /** What a field reads `typed` as, or `kept` for text it refuses. */
@@ -231,7 +255,7 @@ function orKept(read: () => number, kept: number) {
   }
 }
 
-async function click(el: HTMLElement) {
+async function click(el: Pick<HTMLElement, 'click'>) {
   await act(() => {
     el.click();
   });
@@ -656,6 +680,38 @@ describe('BulkImportModal', () => {
         }
       ),
       { numRuns: 30 }
+    );
+  });
+
+  it('leaves Enter on a segment to the segment, never importing', async () => {
+    // A focused segment's own Enter activation presses it
+    await fc.assert(
+      fc.asyncProperty(
+        fc.boolean(),
+        fc.constantFrom(0, 1),
+        fc.constantFrom(0, 1),
+        async (copyOnImport, group, index) => {
+          document.body.replaceChildren();
+          const { plugin, importArticles } = makePlugin(copyOnImport);
+          const scan = makeSource();
+          const modal = openModal(plugin, scan.source);
+          await scan.add(makeFile('a.md'));
+          const event = new KeyboardEvent('keydown', {
+            key: 'Enter',
+            bubbles: true,
+            cancelable: true,
+          });
+
+          await act(() => {
+            optionSegments(modal, group)![index].dispatchEvent(event);
+          });
+
+          expect(event.defaultPrevented).toBe(false);
+          expect(importArticles).not.toHaveBeenCalled();
+          modal.close();
+        }
+      ),
+      { numRuns: 16 }
     );
   });
 
@@ -1940,7 +1996,9 @@ describe('BulkImportModal: filter bar', () => {
 
   function segments(modal: BulkImportModal) {
     return [
-      ...modal.contentEl.querySelectorAll<HTMLButtonElement>('.ir-segment'),
+      ...modal.contentEl.querySelectorAll<HTMLButtonElement>(
+        '.ir-bulk-import-filter .ir-segment'
+      ),
     ];
   }
 
@@ -2182,7 +2240,9 @@ describe('BulkImportModal: filter bar', () => {
   /** Press the filter bar's segment for tags. */
   async function pressTag(modal: BulkImportModal) {
     const segment = [
-      ...modal.contentEl.querySelectorAll<HTMLButtonElement>('.ir-segment'),
+      ...modal.contentEl.querySelectorAll<HTMLButtonElement>(
+        '.ir-bulk-import-filter .ir-segment'
+      ),
     ][1];
     await click(segment);
     await settle();
