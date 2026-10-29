@@ -770,6 +770,7 @@ export default class IncrementalReadingPlugin extends Plugin {
       replaySettings: () => ({
         fsrsParams: this.settings.fsrsParams,
         fuzzTextReviews: this.settings.fuzzTextReviews,
+        dayRolloverOffset: this.settings.dayRolloverOffset,
       }),
       holdForSync: (reason) =>
         holdForSync({

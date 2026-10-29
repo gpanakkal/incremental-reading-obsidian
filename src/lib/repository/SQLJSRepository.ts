@@ -59,6 +59,8 @@ import {
   pruneDatabase,
 } from './retention';
 import {
+  fuzzDueBy,
+  fuzzTakenOn,
   mergeInto,
   mergeUnlessLossy,
   openIncoming,
@@ -484,6 +486,10 @@ export class SQLJSRepository implements SQLiteRepository {
           // Unless a migration saved since, which took its own
           repo.#knownGood ??= before;
           repo.#classifyAtStartup(known);
+          // A file another device wrote, taken on whole like a reload's
+          const kind = repo.#startupKind;
+          if (kind !== null && kind !== 'echo') await repo.#fuzzTakenOn();
+          assertLive();
           await repo.applyRetention();
           assertLive();
           return repo;
@@ -1063,6 +1069,8 @@ export class SQLJSRepository implements SQLiteRepository {
         }
         return;
       }
+      await this.#fuzzTakenOn();
+      if (this.#disposed) return;
       // Taken in: what follows only refetches
       this.#setMerging(false);
       this.#reloadCallbacks++;
@@ -1135,6 +1143,8 @@ export class SQLJSRepository implements SQLiteRepository {
    * - a copy from a device away for months (`stale-other`) is left alone,
    *   and memory saved over it, so that device takes this one on in turn.
    * - a copy that has every save memory has (`fast-forward`) is taken on.
+   *   Like every copy taken on, its due text rows lacking fuzz then get some
+   *   (see {@link #fuzzTakenOn}).
    * - one from a device that has every save memory has, but more than six
    *   months on (`stale-self`), is taken on after memory is backed up, since
    *   the saves it lacks are dropped.
@@ -1197,6 +1207,49 @@ export class SQLJSRepository implements SQLiteRepository {
         if (this.#fresh) return this.#backUpMemory(this.db, 'merge');
         return this.#mergeIncoming(this.db, incoming.bytes);
     }
+  }
+
+  /**
+   * Give the text rows of a copy taken on whole that came without fuzz, and
+   * are due by the end of the review day (`fuzzDueBy`), some (`fuzzTakenOn`,
+   * 0176), while text reviews are fuzzed, then save once: a merge fuzzes the
+   * rows it brings in its own save (`mergeInto`), but a copy taken on passes
+   * no merge. A row due later waits for the first merge or take-on after it
+   * falls due. No due row lacking fuzz, no write. It can't loop: the other
+   * device takes the save on in turn and finds none.
+   *
+   * On a device that fuzzes, a live row without fuzz came from elsewhere:
+   * rows get theirs as they are made, and turning fuzz on fills in the rest
+   * (`ItemManager.backfillReviewTimeFuzz`). Skipped, until a later copy is
+   * taken on, while writes are refused or a transaction is open. Never
+   * throws: a failure is logged, as `save` logs its own.
+   */
+  async #fuzzTakenOn(): Promise<void> {
+    const db = this.db;
+    const settings = this.#replaySettings();
+    if (
+      !db ||
+      !settings.fuzzTextReviews ||
+      this.writeRefusal() ||
+      this.#txDepth > 0
+    ) {
+      return;
+    }
+    try {
+      const fuzzed = fuzzTakenOn(
+        db,
+        { deviceId: () => this.#device(), now: this.#rowClock },
+        fuzzDueBy(settings)
+      );
+      if (fuzzed === 0) return;
+    } catch (error) {
+      console.error('Incremental Reading - Failed to fuzz rows:', error);
+      return;
+    }
+    // Listeners hear of the rows it changed, as of any write
+    this.#flushChanges();
+    // Straight to `save`: the rows changed, so 0174's gate would let it pass
+    await this.save().catch(() => undefined);
   }
 
   /**

@@ -8,6 +8,7 @@ import {
 } from '#/lib/items/row-delete';
 import SRSCard from '#/lib/items/SRSCard';
 import * as notices from '#/lib/notices';
+import { dbFilePaths } from '#/lib/repository/db-file';
 import { parseBackupName } from '#/lib/repository/retention';
 import { MERGE_TABLES } from '#/lib/repository/row-merge';
 import {
@@ -17,12 +18,14 @@ import {
   replayCard,
   replayText,
   type LoggedGrade,
+  type ReplaySettings,
 } from '#/lib/repository/scheduling-replay';
 import { makeLinkVault } from '#/test/link-vault';
 import fc from 'fast-check';
 import type { TFile } from 'obsidian';
 import { generatorParameters, Rating, type Grade } from 'ts-fsrs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { DEFAULT_DB_PATH } from './FakeVault';
 import { FakeSync, makeDevice, type FakeDevice } from './SimulationHarness';
 
 // #region HELPERS
@@ -30,6 +33,8 @@ import { FakeSync, makeDevice, type FakeDevice } from './SimulationHarness';
 const T = 1_790_000_000_000;
 const DAY = 24 * 60 * 60 * 1000;
 const REFERENCES = ['notes/n0.md', 'notes/n1.md', 'notes/n2.md', 'pdf/p.pdf'];
+/** Every save writes here first, once, then renames it over the live file. */
+const SAVE_PATH = dbFilePaths(DEFAULT_DB_PATH).tmp;
 
 type Row = Record<string, unknown>;
 
@@ -928,4 +933,149 @@ describe('two devices merging one database file', () => {
       ]);
     }
   });
+
+  it('fuzzes an article made where fuzz is off in the save of the merge that brings it, keeping an edit made there before the fuzz arrived (0176)', async () => {
+    const draw = vi.spyOn(IRScheduler, 'getDueFuzz').mockReturnValue(-7);
+    const a = await makeDevice('a', {
+      now: T,
+      replaySettings: { fsrsParams: {}, fuzzTextReviews: true },
+    });
+    const b = await makeDevice('b', { now: T });
+    await importArticle(a, 'own', 'notes/n1.md');
+    // Fuzzed, as a's own imports are where text reviews are fuzzed
+    a.repo.mutate(`UPDATE article SET due_fuzz = 2 WHERE id = 'own'`);
+    await a.repo.settle();
+    await sync.deliver(a, b);
+
+    b.clock.now += 1000;
+    await importArticle(b, 'note', 'notes/n0.md');
+    a.clock.now += 1000;
+    await savePosition(a, 'own', 5);
+    const writes = vi.spyOn(a.vault.adapter, 'writeBinary');
+    a.clock.now += 5000;
+    await sync.deliver(b, a);
+
+    // The merge's own save, and no other
+    expect(writes.mock.calls.map(([path]) => path)).toEqual([SAVE_PATH]);
+    expect(rows(a, `SELECT due_fuzz FROM article WHERE id = 'note'`)).toEqual([
+      { due_fuzz: -7 },
+    ]);
+
+    // Made after the import, before the fuzz reached b: a fuzz stamped as a's
+    // write would be newer, and this edit would be lost to it
+    b.clock.now += 1000;
+    b.repo.mutate(`UPDATE article SET priority = 50 WHERE id = 'note'`);
+    await b.repo.settle();
+    // A write of a's own, so the edit reaches a by a merge
+    a.clock.now += 1000;
+    await savePosition(a, 'own', 6);
+    await sync.deliver(b, a);
+    await sync.quiesce(a, b);
+
+    for (const device of [a, b]) {
+      expect(
+        rows(device, `SELECT priority, due_fuzz FROM article WHERE id = 'note'`)
+      ).toEqual([{ priority: 50, due_fuzz: -7 }]);
+    }
+    expect(everything(a)).toEqual(everything(b));
+    expect(draw).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves an article made where fuzz is off unfuzzed at the merge that brings it before it is due, and fuzzes it at the first merge after it falls due (0176)', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      // Noon, then noon the next review day (+4h rollover), by the local clock
+      const noon = new Date(2026, 9, 25, 12).getTime();
+      const due = new Date(2026, 9, 26, 12).getTime();
+      vi.setSystemTime(noon);
+      const draw = vi.spyOn(IRScheduler, 'getDueFuzz').mockReturnValue(-7);
+      const a = await makeDevice('a', {
+        now: T,
+        replaySettings: {
+          fsrsParams: {},
+          fuzzTextReviews: true,
+          dayRolloverOffset: 4,
+        },
+      });
+      const b = await makeDevice('b', { now: T });
+      await importArticle(a, 'own', 'notes/n1.md');
+      a.repo.mutate(`UPDATE article SET due_fuzz = 2 WHERE id = 'own'`);
+      await a.repo.settle();
+      await sync.deliver(a, b);
+
+      b.clock.now += 1000;
+      b.repo.mutate(
+        `INSERT INTO article (id, reference, due, interval, priority)
+         VALUES ('note', 'notes/n0.md', $1, $2, 30)`,
+        [due, DAY]
+      );
+      await b.repo.settle();
+      a.clock.now += 1000;
+      await savePosition(a, 'own', 5);
+      a.clock.now += 5000;
+      await sync.deliver(b, a);
+
+      const fuzz = `SELECT due_fuzz FROM article WHERE id = 'note'`;
+      expect(rows(a, fuzz)).toEqual([{ due_fuzz: null }]);
+      expect(draw).not.toHaveBeenCalled();
+
+      // Due now; a merge that brings `note` nothing new
+      vi.setSystemTime(due + 60 * 60 * 1000);
+      b.clock.now += 1000;
+      await savePosition(b, 'own', 7);
+      a.clock.now += 1000;
+      await savePosition(a, 'own', 6);
+      await sync.deliver(b, a);
+      await sync.quiesce(a, b);
+
+      for (const device of [a, b]) {
+        expect(rows(device, fuzz)).toEqual([{ due_fuzz: -7 }]);
+      }
+      expect(everything(a)).toEqual(everything(b));
+      expect(draw).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([false, true])(
+    'fuzzes an article made where fuzz is off in one save of the device that takes it on by fast-forward, which the other takes on in turn without saving (other fuzzes: %s) (0176)',
+    async (otherFuzzes) => {
+      const draw = vi.spyOn(IRScheduler, 'getDueFuzz').mockReturnValue(-7);
+      const fuzzing: ReplaySettings = { fsrsParams: {}, fuzzTextReviews: true };
+      const a = await makeDevice('a', { now: T, replaySettings: fuzzing });
+      const b = await makeDevice('b', {
+        now: T,
+        replaySettings: { ...fuzzing, fuzzTextReviews: otherFuzzes },
+      });
+      await importArticle(a, 'own', 'notes/n1.md');
+      a.repo.mutate(`UPDATE article SET due_fuzz = 2 WHERE id = 'own'`);
+      await a.repo.settle();
+      await sync.deliver(a, b);
+
+      // a sits idle while b imports, then takes b's file on whole
+      b.clock.now += 1000;
+      await importArticle(b, 'note', 'notes/n0.md');
+      const stamp = `SELECT updated_at, updated_by FROM article WHERE id = 'note'`;
+      const made = rows(b, stamp);
+      const aWrites = vi.spyOn(a.vault.adapter, 'writeBinary');
+      a.clock.now += 5000;
+      await sync.deliver(b, a);
+
+      expect(aWrites.mock.calls.map(([path]) => path)).toEqual([SAVE_PATH]);
+      expect(rows(a, `SELECT due_fuzz FROM article WHERE id = 'note'`)).toEqual(
+        [{ due_fuzz: -7 }]
+      );
+      // Unstamped by a, so an edit b makes meanwhile still wins
+      expect(rows(a, stamp)).toEqual(made);
+
+      const bWrites = vi.spyOn(b.vault.adapter, 'writeBinary');
+      b.clock.now += 1000;
+      await sync.deliver(a, b);
+
+      expect(bWrites).not.toHaveBeenCalled();
+      expect(everything(b)).toEqual(everything(a));
+      expect(draw).toHaveBeenCalledTimes(1);
+    }
+  );
 });

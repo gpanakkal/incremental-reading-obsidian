@@ -34,6 +34,7 @@ import {
 import { queryClient } from '#/lib/query-client';
 import { QueuePageMemory } from '#/lib/queue-page-memory';
 import { MERGE_WAIT_MS } from '#/lib/readiness';
+import type { ReplaySettings } from '#/lib/repository/scheduling-replay';
 import {
   DatabaseLoadError,
   SQLJSRepository,
@@ -768,8 +769,10 @@ async function startDatabase(
   let onReloadFromDisk: (() => void | Promise<void>) | undefined;
   let onWriteBlocked: ((error: Error) => void) | undefined;
   let onWritesResumed: (() => void) | undefined;
+  let replaySettings: (() => ReplaySettings) | undefined;
   const handleFileChange = vi.fn(async () => {});
   vi.spyOn(SQLJSRepository, 'start').mockImplementation((params) => {
+    replaySettings = params.replaySettings;
     onReloadFromDisk = params.onReloadFromDisk;
     onWriteBlocked = params.onWriteBlocked;
     onWritesResumed = params.onWritesResumed;
@@ -809,6 +812,7 @@ async function startDatabase(
     reload: () => onReloadFromDisk!(),
     blockWrites: (error: Error) => onWriteBlocked!(error),
     resumeWrites: () => onWritesResumed!(),
+    replaySettings: () => replaySettings!(),
     fireVault,
     handleFileChange,
   };
@@ -4537,6 +4541,19 @@ describe('IncrementalReadingPlugin database reload', () => {
     await reload();
 
     expect(resync).toHaveBeenCalledOnce();
+  });
+
+  it('merges with the settings in force at the time, the review day rollover included', async () => {
+    const settings = {
+      fsrsParams: { w: [1] },
+      fuzzTextReviews: true,
+      dayRolloverOffset: 4,
+    };
+    const { replaySettings } = await startDatabase(undefined, { settings });
+
+    expect(replaySettings()).toEqual(settings);
+    Object.assign(settings, { fuzzTextReviews: false, dayRolloverOffset: -5 });
+    expect(replaySettings()).toEqual(settings);
   });
 
   it('reloads without error before the action bars are registered', async () => {

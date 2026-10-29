@@ -1,4 +1,5 @@
 import { migrations } from '#/db/migrations';
+import IRScheduler from '#/lib/IRScheduler';
 import { evictedSpot } from '#/lib/moved-note-scan';
 import fc from 'fast-check';
 import { readFileSync } from 'fs';
@@ -9,9 +10,19 @@ import initSqlJs, {
   type SqlJsStatic,
   type SqlValue,
 } from 'sql.js';
-import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import {
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest';
 import {
   copyIntoAttached,
+  fuzzDueBy,
+  fuzzTakenOn,
   INCOMING_SCHEMA,
   MERGE_TABLES,
   mergeInto,
@@ -21,6 +32,7 @@ import {
   type MergeReport,
 } from './row-merge';
 import { armRowStamps, SYNCED_TABLES, type StampSource } from './row-stamps';
+import { type ReplaySettings } from './scheduling-replay';
 
 // #region HELPERS
 
@@ -280,6 +292,157 @@ const copyArb: fc.Arbitrary<Copy> = fc
     };
   });
 
+/**
+ * When the merges and take-ons that fuzz run (pinned with fake timers): noon
+ * of a review day, by the local clock, as the queue's review days go.
+ */
+const NOW = new Date(2026, 9, 25, 12).getTime();
+const HOUR = 60 * 60 * 1000;
+/** The end of the review day {@link NOW} falls in, under a +4h rollover. */
+const DUE_BY = new Date(2026, 9, 26, 4).getTime();
+/** The settings of a device that fuzzes, with a +4h rollover. */
+const FUZZING: ReplaySettings = {
+  fsrsParams: {},
+  fuzzTextReviews: true,
+  dayRolloverOffset: 4,
+};
+
+/** An article or snippet row, for merges that fuzz the rows they bring. */
+interface TextRow {
+  id: string;
+  reference: string;
+  /** Mostly either side of {@link DUE_BY}, to tell due rows from the rest. */
+  due: number;
+  due_fuzz: number | null;
+  deleted: number;
+  /** Even in this device's copy, odd in the other's: where a row came from. */
+  scroll_top: number;
+  updated_at: number;
+  updated_by: string;
+}
+
+/** A copy of the item tables, cards included, with any fuzz or none. */
+interface TextCopy {
+  article: TextRow[];
+  snippet: TextRow[];
+  cards: {
+    id: string;
+    reference: string;
+    updated_at: number;
+    updated_by: string;
+  }[];
+  writeStamp: Record<string, number>;
+}
+
+/** A database holding `copy`, its stamps exactly as given. */
+function buildTexts(copy: TextCopy, armed = false): Database {
+  const db = build({ articles: [], writeStamp: copy.writeStamp });
+  for (const table of ['article', 'snippet'] as const) {
+    for (const r of copy[table]) {
+      db.run(
+        `INSERT INTO ${table} (id, reference, due, due_fuzz, interval,
+           priority, deleted, scroll_top, updated_at, updated_by)
+         VALUES (?, ?, ?, ?, 1, 30, ?, ?, ?, ?)`,
+        [
+          r.id,
+          r.reference,
+          r.due,
+          r.due_fuzz,
+          r.deleted,
+          r.scroll_top,
+          r.updated_at,
+          r.updated_by,
+        ]
+      );
+    }
+  }
+  for (const c of copy.cards) {
+    db.run(
+      `INSERT INTO srs_card (id, reference, created_at, due, stability,
+         difficulty, elapsed_days, scheduled_days, state, updated_at,
+         updated_by) VALUES (?, ?, 1, 1, 1, 1, 0, 0, 0, ?, ?)`,
+      [c.id, c.reference, c.updated_at, c.updated_by]
+    );
+  }
+  if (armed) armRowStamps(db, THIS_DEVICE);
+  return db;
+}
+
+/** Merge `theirs` into `mine` as a device that replays with `replay`. */
+function mergedTexts(
+  mine: TextCopy,
+  theirs: TextCopy,
+  replay?: ReplaySettings
+): { db: Database; report: MergeReport } {
+  const db = buildTexts(mine, true);
+  const source = buildTexts(theirs);
+  const copy = openIncoming(SQL, source.export(), migrations);
+  open.push(copy);
+  const report = mergeInto(db, copy, THIS_DEVICE, replay);
+  return { db, report };
+}
+
+/** Copies of the item tables with `rows` as their articles, nothing else. */
+function articlesOf(...rows: TextRow[]): TextCopy {
+  return { article: rows, snippet: [], cards: [], writeStamp: {} };
+}
+
+/**
+ * One copy of the item tables, from small pools of keys, references and
+ * stamps (this device's among them) so that both copies often hold one row,
+ * stamped alike or not, live or a tombstone, fuzzed or not. `parity` marks
+ * each row's `scroll_top` with the copy it is from.
+ */
+const textCopyArb = (parity: 0 | 1): fc.Arbitrary<TextCopy> => {
+  const rowsArb = (prefix: string) =>
+    fc
+      .uniqueArray(
+        fc.record({
+          id: fc.constantFrom(...KEYS),
+          reference: fc.constantFrom(...REFERENCES),
+          due: fc.constantFrom(
+            DUE_BY - HOUR,
+            DUE_BY,
+            DUE_BY + 1,
+            DUE_BY + HOUR
+          ),
+          due_fuzz: fc.option(fc.integer({ min: -3, max: 3 }), { nil: null }),
+          deleted: fc.constantFrom(0, 1),
+          scroll_top: fc.constantFrom(parity, parity + 2),
+          updated_at: fc.nat(3),
+          updated_by: fc.constantFrom('', 'a', 'here'),
+        }),
+        { selector: (r) => r.id, maxLength: KEYS.length }
+      )
+      .map((rows) => {
+        // A copy holds each reference once, as UNIQUE makes it
+        const seen = new Set<string>();
+        return rows.map((r) => {
+          const reference = seen.has(r.reference)
+            ? `own/${r.id}.md`
+            : r.reference;
+          seen.add(reference);
+          return { ...r, id: `${prefix}${r.id}`, reference };
+        });
+      });
+  return fc.record({
+    article: rowsArb('a-'),
+    snippet: rowsArb('s-'),
+    cards: fc
+      .uniqueArray(
+        fc.record({
+          id: fc.constantFrom(...KEYS),
+          reference: fc.constantFrom(...REFERENCES),
+          updated_at: fc.nat(3),
+          updated_by: fc.constantFrom('', 'a', 'here'),
+        }),
+        { selector: (c) => c.reference, maxLength: 3 }
+      )
+      .map((cards) => [...new Map(cards.map((c) => [c.id, c])).values()]),
+    writeStamp: fc.dictionary(fc.constantFrom('a', 'here'), fc.nat(4)),
+  });
+};
+
 // #endregion
 
 describe('MERGE_TABLES', () => {
@@ -318,6 +481,15 @@ describe('MERGE_TABLES', () => {
         .flatMap((row) => db.exec(`PRAGMA index_info(${String(row[1])})`))
         .map((r) => r.values[0][2]);
       expect(uniques).toEqual(unique ? [unique] : []);
+    }
+  });
+
+  it('marks as fuzzed exactly the tables whose rows carry a due_fuzz', () => {
+    const db = build({ articles: [] });
+    for (const { name, fuzzed } of MERGE_TABLES) {
+      const [info] = db.exec(`PRAGMA table_info(${name})`);
+      const columns = info.values.map((row) => row[1]);
+      expect(!!fuzzed).toBe(columns.includes('due_fuzz'));
     }
   });
 });
@@ -881,6 +1053,323 @@ describe('mergeInto', () => {
     // Armed again: a write is stamped
     db.run("UPDATE article SET priority = 10 WHERE id = 'k0'");
     expect(stamp(articles(db)[0])).toEqual([1e12, 'here']);
+  });
+});
+
+describe('mergeInto, fuzzing the text rows it brings (0176)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(NOW);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  /** A text row of {@link buildTexts} from the other copy, live, unfuzzed. */
+  const theirRow = (due: number): TextRow => ({
+    id: 'k0',
+    reference: 'n0.md',
+    due,
+    due_fuzz: null,
+    deleted: 0,
+    scroll_top: 1,
+    updated_at: 1,
+    updated_by: 'a',
+  });
+
+  it('property: gives each live text row it takes from the other copy without fuzz the fuzz this device held for it, else, due by the end of the review day, a new one, as it does a row of its own, and changes nothing else', () => {
+    fc.assert(
+      fc.property(
+        textCopyArb(0),
+        textCopyArb(1),
+        fc.boolean(),
+        (mine, theirs, fuzzTextReviews) => {
+          // Reset per case: afterEach runs once per `it`, and a failed case
+          // (while shrinking, say) leaves its spy and its calls behind
+          vi.restoreAllMocks();
+          let drawn = 0;
+          const draw = vi
+            .spyOn(IRScheduler, 'getDueFuzz')
+            .mockImplementation(() => 1000 + drawn++);
+          const plain = mergedTexts(mine, theirs, {
+            ...FUZZING,
+            fuzzTextReviews: false,
+          });
+          expect(draw).not.toHaveBeenCalled();
+          const unfuzzed = everything(plain.db);
+
+          const merged = mergedTexts(mine, theirs, {
+            ...FUZZING,
+            fuzzTextReviews,
+          });
+          const fuzzed = everything(merged.db);
+
+          // What the merge without fuzz gives, with the fuzz each row should get
+          let fresh = 0;
+          let kept = 0;
+          const expected = { ...unfuzzed };
+          for (const table of ['article', 'snippet'] as const) {
+            const held = new Map(mine[table].map((r) => [r.id, r.due_fuzz]));
+            expected[table] = unfuzzed[table].map((row) => {
+              if (
+                !fuzzTextReviews ||
+                row.deleted !== 0 ||
+                row.due_fuzz !== null
+              ) {
+                return row;
+              }
+              const fromTheirs = (row.scroll_top as number) % 2 === 1;
+              const own = fromTheirs
+                ? (held.get(row.id as string) ?? null)
+                : null;
+              // This device's fuzz for the row, due or not: no draw to save
+              if (own !== null) return { ...row, due_fuzz: own };
+              if ((row.due as number) > DUE_BY) return row;
+              fresh++;
+              // A row of this device's the merge leaves, written only for it
+              if (!fromTheirs) kept++;
+              return { ...row, due_fuzz: expect.any(Number) as number };
+            });
+          }
+          expect(fuzzed).toEqual(expected);
+          expect(draw).toHaveBeenCalledTimes(fresh);
+          expect(merged.report).toEqual({
+            ...plain.report,
+            written: plain.report.written + kept,
+          });
+          // Each new fuzz is a draw of its own
+          const draws = ['article', 'snippet']
+            .flatMap((table) => fuzzed[table].map((row) => row.due_fuzz))
+            .filter((fuzz) => (fuzz as number) >= 1000);
+          expect(new Set(draws).size).toBe(fresh);
+        }
+      ),
+      { numRuns: 200 }
+    );
+  }, 60_000);
+
+  it('gives a row it brings without fuzz, not yet due, the fuzz this device held for it', () => {
+    const draw = vi.spyOn(IRScheduler, 'getDueFuzz');
+    const own = { ...theirRow(DUE_BY - HOUR), due_fuzz: 7, scroll_top: 0 };
+    const theirs = { ...theirRow(DUE_BY + HOUR), updated_at: 2 };
+
+    const { db } = mergedTexts(articlesOf(own), articlesOf(theirs), FUZZING);
+
+    expect(rowsOf(db, 'article', 'id')[0]).toMatchObject({
+      due: DUE_BY + HOUR,
+      due_fuzz: 7,
+      updated_at: 2,
+    });
+    expect(draw).not.toHaveBeenCalled();
+  });
+
+  it('leaves a row it brings that falls due after the review day without fuzz, and fuzzes it at the first merge after it falls due', () => {
+    vi.spyOn(IRScheduler, 'getDueFuzz').mockReturnValue(9);
+    const due = DUE_BY + 8 * HOUR;
+    const db = buildTexts(articlesOf(), true);
+    const copy = () => {
+      const source = buildTexts(articlesOf(theirRow(due)));
+      const incoming = openIncoming(SQL, source.export(), migrations);
+      open.push(source, incoming);
+      return incoming;
+    };
+
+    mergeInto(db, copy(), THIS_DEVICE, FUZZING);
+    expect(rowsOf(db, 'article', 'id')[0].due_fuzz).toBeNull();
+
+    // The next review day, the row due in it: the copy brings nothing new
+    vi.setSystemTime(due + HOUR);
+    const report = mergeInto(db, copy(), THIS_DEVICE, FUZZING);
+
+    expect(rowsOf(db, 'article', 'id')[0]).toMatchObject({
+      due_fuzz: 9,
+      updated_at: 1,
+      updated_by: 'a',
+    });
+    expect(report).toEqual({ replaced: 0, written: 1 });
+  });
+
+  it.each([
+    [4, 9],
+    [undefined, 9],
+    [0, null],
+    [-5, null],
+  ])(
+    'counts a row due at 02:00 as due by the end of the review day under a rollover offset of %s',
+    (dayRolloverOffset, fuzz) => {
+      vi.spyOn(IRScheduler, 'getDueFuzz').mockReturnValue(9);
+
+      const { db } = mergedTexts(
+        articlesOf(),
+        articlesOf(theirRow(DUE_BY - 2 * HOUR)),
+        { fsrsParams: {}, fuzzTextReviews: true, dayRolloverOffset }
+      );
+
+      expect(rowsOf(db, 'article', 'id')[0].due_fuzz).toBe(fuzz);
+    }
+  );
+
+  it('fuzzes nothing given no settings to replay with', () => {
+    const draw = vi.spyOn(IRScheduler, 'getDueFuzz');
+    const row = theirRow(NOW);
+    const { db } = mergedTexts(articlesOf(), {
+      article: [row],
+      snippet: [row],
+      cards: [],
+      writeStamp: {},
+    });
+
+    expect(rowsOf(db, 'article', 'id')[0].due_fuzz).toBeNull();
+    expect(rowsOf(db, 'snippet', 'id')[0].due_fuzz).toBeNull();
+    expect(draw).not.toHaveBeenCalled();
+  });
+});
+
+describe('fuzzDueBy (0176)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it.each([
+    { at: 'noon', now: NOW, dayRolloverOffset: 4, end: DUE_BY },
+    { at: 'noon', now: NOW, dayRolloverOffset: undefined, end: DUE_BY },
+    {
+      at: 'noon',
+      now: NOW,
+      dayRolloverOffset: -5,
+      end: new Date(2026, 9, 25, 19).getTime(),
+    },
+    // Before the rollover: still the day before
+    {
+      at: '03:00 the day after',
+      now: new Date(2026, 9, 26, 3).getTime(),
+      dayRolloverOffset: 4,
+      end: DUE_BY,
+    },
+    {
+      at: 'the rollover',
+      now: DUE_BY,
+      dayRolloverOffset: 4,
+      end: new Date(2026, 9, 27, 4).getTime(),
+    },
+  ])(
+    'at $at under a rollover offset of $dayRolloverOffset, is the end of the review day the queue counts as due',
+    ({ now, dayRolloverOffset, end }) => {
+      vi.setSystemTime(now);
+
+      expect(fuzzDueBy({ dayRolloverOffset })).toBe(end);
+    }
+  );
+});
+
+describe('fuzzTakenOn (0176)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** A text row of {@link buildTexts}, live, unfuzzed and due unless told. */
+  const textRow = (id: string, over: Partial<TextRow> = {}): TextRow => ({
+    id,
+    reference: `${id}.md`,
+    due: DUE_BY,
+    due_fuzz: null,
+    deleted: 0,
+    scroll_top: 0,
+    updated_at: 2,
+    updated_by: 'a',
+    ...over,
+  });
+
+  /** `rows` with each live unfuzzed one due by `dueBy` given a fuzz. */
+  const fuzzedBy = (rows: Row[], dueBy: number) => {
+    let fresh = 0;
+    const expected = rows.map((row) => {
+      if (
+        row.deleted !== 0 ||
+        row.due_fuzz !== null ||
+        (row.due as number) > dueBy
+      ) {
+        return row;
+      }
+      fresh++;
+      return { ...row, due_fuzz: expect.any(Number) as number };
+    });
+    return { expected, fresh };
+  };
+
+  it('property: gives each live text row due by the cutoff without fuzz a new one of its own, leaving stamps and every other row as they were, and at a later cutoff the rows that fell due since', () => {
+    fc.assert(
+      fc.property(textCopyArb(0), (copy) => {
+        // Reset per case: afterEach runs once per `it`
+        vi.restoreAllMocks();
+        let drawn = 0;
+        const draw = vi
+          .spyOn(IRScheduler, 'getDueFuzz')
+          .mockImplementation(() => 1000 + drawn++);
+        const db = buildTexts(copy, true);
+        let total = 0;
+
+        // Again at one cutoff: nothing left; at a later one, what fell due
+        for (const dueBy of [DUE_BY, DUE_BY, DUE_BY + HOUR]) {
+          const before = everything(db);
+          const expected = { ...before };
+          let fresh = 0;
+          for (const table of ['article', 'snippet'] as const) {
+            const next = fuzzedBy(before[table], dueBy);
+            expected[table] = next.expected;
+            fresh += next.fresh;
+          }
+
+          expect(fuzzTakenOn(db, THIS_DEVICE, dueBy)).toBe(fresh);
+
+          expect(everything(db)).toEqual(expected);
+          total += fresh;
+          expect(draw).toHaveBeenCalledTimes(total);
+        }
+        const after = everything(db);
+        const draws = ['article', 'snippet']
+          .flatMap((table) => after[table].map((row) => row.due_fuzz))
+          .filter((fuzz) => (fuzz as number) >= 1000);
+        expect(new Set(draws).size).toBe(total);
+      }),
+      { numRuns: 200 }
+    );
+  }, 60_000);
+
+  it('arms the row stamps again after, so the next write is stamped', () => {
+    const db = buildTexts(articlesOf(textRow('k0')), true);
+
+    fuzzTakenOn(db, THIS_DEVICE, DUE_BY);
+    db.run("UPDATE article SET priority = 40 WHERE id = 'k0'");
+
+    expect(rowsOf(db, 'article', 'id')[0]).toMatchObject({
+      updated_at: 1e12,
+      updated_by: 'here',
+    });
+  });
+
+  it('changes nothing, and arms the row stamps again, when a row fails', () => {
+    const db = buildTexts(articlesOf(textRow('k0'), textRow('k1')), true);
+    const before = everything(db);
+    vi.spyOn(IRScheduler, 'getDueFuzz')
+      .mockReturnValueOnce(5)
+      .mockImplementationOnce(() => {
+        throw new Error('no fuzz');
+      });
+
+    expect(() => fuzzTakenOn(db, THIS_DEVICE, DUE_BY)).toThrow('no fuzz');
+
+    expect(everything(db)).toEqual(before);
+    db.run("UPDATE article SET priority = 40 WHERE id = 'k0'");
+    expect(rowsOf(db, 'article', 'id')[0]).toMatchObject({
+      updated_by: 'here',
+    });
   });
 });
 

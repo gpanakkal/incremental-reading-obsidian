@@ -7,6 +7,7 @@ import {
   DATABASE_FILE_PATH,
 } from '#/lib/constants';
 import { getDeviceId } from '#/lib/device-id';
+import IRScheduler from '#/lib/IRScheduler';
 import * as notices from '#/lib/notices';
 import type { SyncHoldReason } from '#/lib/obsidian-sync';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
@@ -32,6 +33,7 @@ import { BulkMutateError } from './BulkMutateError';
 import { backupFileName, type BackupKind } from './retention';
 import * as rowMerge from './row-merge';
 import { disarmRowStamps } from './row-stamps';
+import type { ReplaySettings } from './scheduling-replay';
 import {
   DAMAGED_FILE_HOLD_MS,
   DatabaseLoadError,
@@ -1167,6 +1169,136 @@ async function savedOnTopBy(
   const out = db.export();
   db.close();
   return out;
+}
+
+/** An article or snippet row another device saved, for fuzz (0176). */
+interface TextRowSpec {
+  id: string;
+  table: 'article' | 'snippet';
+  /** By default {@link FIXED_DUE}, long due. */
+  due?: number;
+  due_fuzz: number | null;
+  deleted: number;
+  updated_at: number;
+  updated_by: string;
+}
+
+/**
+ * `bytes` with `rows` added and another device's generation raised: that
+ * device's next save, which this device takes on as a fast-forward.
+ */
+async function textsSavedOnTopBy(
+  bytes: Uint8Array | undefined,
+  rows: readonly TextRowSpec[]
+): Promise<Uint8Array> {
+  const SQL = await getSharedSql();
+  const db = new SQL.Database(bytes);
+  for (const r of rows) {
+    db.run(
+      `INSERT INTO ${r.table} (id, reference, due, interval, priority,
+         due_fuzz, deleted, updated_at, updated_by)
+       VALUES (?, ?, ?, 86400000, 30, ?, ?, ?, ?)`,
+      [
+        r.id,
+        `${r.table}s/${r.id}.md`,
+        r.due ?? FIXED_DUE,
+        r.due_fuzz,
+        r.deleted,
+        r.updated_at,
+        r.updated_by,
+      ]
+    );
+  }
+  stampAsRemote(db);
+  const out = db.export();
+  db.close();
+  return out;
+}
+
+/**
+ * A live article row another device saved without fuzz, lately: a tombstone
+ * made of it stays inside the sync horizon, which retention prunes past.
+ */
+const REMOTE_TEXT: TextRowSpec = {
+  id: 'remote',
+  table: 'article',
+  due_fuzz: null,
+  deleted: 0,
+  updated_at: Date.now(),
+  updated_by: REMOTE_DEVICE,
+};
+
+/** What a test reads of every article and snippet row, by id. */
+const TEXT_ROWS_SQL = `SELECT 'article' AS tbl, id, due, due_fuzz, deleted,
+    updated_at, updated_by FROM article
+  UNION ALL
+  SELECT 'snippet', id, due, due_fuzz, deleted, updated_at, updated_by
+    FROM snippet
+  ORDER BY tbl, id`;
+
+/**
+ * When the tests of fuzz by due date run (pinned with fake timers): noon of
+ * a review day, by the local clock, as the queue's review days go.
+ */
+const TODAY_NOON = new Date(2026, 9, 25, 12).getTime();
+const HOUR_MS = 60 * 60 * 1000;
+/** The end of the review day {@link TODAY_NOON} falls in, at a +4h rollover. */
+const TODAY_DUE_BY = new Date(2026, 9, 26, 4).getTime();
+/** Due long after any review day the tests run in. */
+const FAR_DUE = new Date(2100, 0, 1).getTime();
+/** The settings of a device that fuzzes, with a +4h rollover. */
+const FUZZING_AT_4: ReplaySettings = {
+  fsrsParams: {},
+  fuzzTextReviews: true,
+  dayRolloverOffset: 4,
+};
+
+/** Every article and snippet row of the database file `bytes`, by id. */
+async function textRowsIn(
+  bytes: Uint8Array | undefined
+): Promise<Record<string, unknown>[]> {
+  const SQL = await getSharedSql();
+  const db = new SQL.Database(bytes);
+  const [result] = db.exec(TEXT_ROWS_SQL);
+  db.close();
+  return (result?.values ?? []).map((values) =>
+    Object.fromEntries(values.map((v, i) => [result.columns[i], v]))
+  );
+}
+
+/**
+ * `rows` as fuzzing every live one without fuzz due by `dueBy` leaves them
+ * (0176): each such row with a fuzz of its own, every other column as it was.
+ * @returns the rows, and how many get a new fuzz
+ */
+function fuzzedTexts(
+  rows: readonly Record<string, unknown>[],
+  dueBy = Number.POSITIVE_INFINITY
+) {
+  let fresh = 0;
+  const expected = rows.map((row) => {
+    if (
+      row.deleted !== 0 ||
+      row.due_fuzz !== null ||
+      (row.due as number) > dueBy
+    ) {
+      return row;
+    }
+    fresh++;
+    return { ...row, due_fuzz: expect.any(Number) as number };
+  });
+  return { expected, fresh };
+}
+
+/**
+ * Saves of the database file `adapter` was asked for: each save writes the
+ * hidden sibling once and renames it into place.
+ */
+function dbWritesOf(adapter: {
+  writeBinary: MockInstance<DataAdapter['writeBinary']>;
+}): number {
+  return adapter.writeBinary.mock.calls.filter(([path]) => path === TMP_PATH)
+    .length;
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -4466,12 +4598,15 @@ describe("telling another device's copy from this device's own save", () => {
   });
 
   /** A started repository over a file holding `ids`, with localStorage. */
-  async function startStored(ids: readonly string[]) {
+  async function startStored(
+    ids: readonly string[],
+    params: Partial<Parameters<typeof SQLJSRepository.start>[0]> = {}
+  ) {
     const files = new Map([[DATABASE_FILE_PATH, await dbFileWith(ids)]]);
     const vault = makeVault(INDEXED, files);
     const app = withStorage(vault.app);
     const onReloadFromDisk = vi.fn();
-    const repo = await startRepo(app, { onReloadFromDisk });
+    const repo = await startRepo(app, { onReloadFromDisk, ...params });
     const device = app.storage.get('incremental-reading-device-id');
     return { ...vault, app, repo, onReloadFromDisk, device };
   }
@@ -5048,6 +5183,266 @@ describe("telling another device's copy from this device's own save", () => {
     repo.db?.close();
   });
 
+  it.each([true, false])(
+    'gives the rows a merge brings without fuzz some in its one save only while text reviews are fuzzed (%s), and the reads after it write nothing',
+    async (fuzzTextReviews) => {
+      const { repo, files, adapter, onReloadFromDisk } = await startStored(
+        ['a'],
+        { replaySettings: () => ({ fsrsParams: {}, fuzzTextReviews }) }
+      );
+      insertArticleRow(repo, 'b');
+      await settle();
+      vi.spyOn(IRScheduler, 'getDueFuzz').mockReturnValue(-7);
+      // What the review tab reads: the refetch after the merge, then a poll
+      const readQueue = () =>
+        repo.query(
+          `SELECT * FROM article WHERE deleted = FALSE
+           ORDER BY due + COALESCE(due_fuzz, 0)`
+        );
+      onReloadFromDisk.mockImplementation(readQueue);
+      adapter.writeBinary.mockClear();
+      const dbWrites = () => dbWritesOf(adapter);
+
+      const incoming = await dbFileWith(['remote']);
+      files.set(DATABASE_FILE_PATH, incoming);
+      await repo.handleFileChange(dbFileChange);
+      await settle();
+      readQueue();
+      await settle();
+
+      expect(onReloadFromDisk).toHaveBeenCalledTimes(1);
+      expect(dbWrites()).toBe(1);
+      const SQL = await getSharedSql();
+      const rowsIn = (bytes: Uint8Array) => {
+        const db = new SQL.Database(bytes);
+        const [result] = db.exec(
+          'SELECT id, due_fuzz, updated_at, updated_by FROM article ORDER BY id'
+        );
+        db.close();
+        return result.values;
+      };
+      const [[, , at, by]] = rowsIn(incoming);
+      const stamped = repo.query(
+        'SELECT updated_at, updated_by FROM article WHERE id = $1',
+        ['b']
+      ) as unknown as { updated_at: number; updated_by: string }[];
+      // Every due row lacking fuzz, this device's own too (written here
+      // without), each keeping its stamp
+      const fuzz = fuzzTextReviews ? -7 : null;
+      expect(rowsIn(files.get(DATABASE_FILE_PATH)!)).toEqual([
+        ['a', fuzz, 0, ''],
+        ['b', fuzz, stamped[0].updated_at, stamped[0].updated_by],
+        ['remote', fuzz, at, by],
+      ]);
+      repo.db?.close();
+    }
+  );
+
+  it('property: gives the live text rows of a copy it takes on as a fast-forward that lack fuzz some, keeping their stamps, in one save only while text reviews are fuzzed and only when a row lacks fuzz', async () => {
+    const textRowArb = fc.record({
+      id: fc.constantFrom('r0', 'r1', 'r2', 'r3'),
+      table: fc.constantFrom('article' as const, 'snippet' as const),
+      due: fc.constantFrom(FIXED_DUE, TODAY_DUE_BY, TODAY_DUE_BY + 1),
+      due_fuzz: fc.option(fc.integer({ min: -5, max: 5 }), { nil: null }),
+      deleted: fc.constantFrom(0, 1),
+      updated_at: fc.nat(3),
+      updated_by: fc.constantFrom('', REMOTE_DEVICE),
+    });
+    vi.useFakeTimers({ toFake: ['Date'] });
+    await fc.assert(
+      fc.asyncProperty(
+        fc.uniqueArray(textRowArb, { selector: (r) => r.id, maxLength: 4 }),
+        fc.boolean(),
+        fc.boolean(),
+        async (rows, ownFuzzed, fuzzTextReviews) => {
+          // Reset per case: afterEach runs once per `it`
+          vi.restoreAllMocks();
+          vi.setSystemTime(TODAY_NOON);
+          let drawn = 0;
+          const draw = vi
+            .spyOn(IRScheduler, 'getDueFuzz')
+            .mockImplementation(() => 1000 + drawn++);
+          const { repo, files, adapter, onReloadFromDisk } = await startStored(
+            ['a'],
+            {
+              replaySettings: () => ({ ...FUZZING_AT_4, fuzzTextReviews }),
+            }
+          );
+          insertArticleRow(repo, 'b');
+          if (ownFuzzed) repo.mutate('UPDATE article SET due_fuzz = 3');
+          await settle();
+          const incoming = await textsSavedOnTopBy(
+            files.get(DATABASE_FILE_PATH),
+            rows
+          );
+          adapter.writeBinary.mockClear();
+
+          files.set(DATABASE_FILE_PATH, incoming);
+          await repo.handleFileChange(dbFileChange);
+          await settle();
+          // The refetch after it, then a poll, write nothing
+          repo.query('SELECT * FROM article WHERE deleted = FALSE');
+          await settle();
+
+          const taken = await textRowsIn(incoming);
+          const { expected, fresh } = fuzzTextReviews
+            ? fuzzedTexts(taken, TODAY_DUE_BY)
+            : { expected: taken, fresh: 0 };
+          expect(onReloadFromDisk).toHaveBeenCalledOnce();
+          expect(draw).toHaveBeenCalledTimes(fresh);
+          expect(dbWritesOf(adapter)).toBe(fresh > 0 ? 1 : 0);
+          const written = await textRowsIn(files.get(DATABASE_FILE_PATH));
+          expect(written).toEqual(expected);
+          expect(repo.query(TEXT_ROWS_SQL)).toEqual(written);
+          repo.dispose();
+        }
+      ),
+      { numRuns: 30 }
+    );
+  }, 60_000);
+
+  it('gives fuzz in a copy it takes on only to rows due by the end of the review day, and to one due later at the first copy it takes on after it falls due', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(TODAY_NOON);
+    vi.spyOn(IRScheduler, 'getDueFuzz').mockReturnValue(-7);
+    const { repo, files, adapter } = await startStored(['a'], {
+      replaySettings: () => FUZZING_AT_4,
+    });
+    const later = TODAY_DUE_BY + 8 * HOUR_MS;
+    const fuzzOf = (id: string) =>
+      repo.query('SELECT due_fuzz FROM article WHERE id = $1', [id]);
+    files.set(
+      DATABASE_FILE_PATH,
+      await textsSavedOnTopBy(files.get(DATABASE_FILE_PATH), [
+        { ...REMOTE_TEXT, id: 'later', due: later },
+        { ...REMOTE_TEXT, id: 'edge', due: TODAY_DUE_BY },
+      ])
+    );
+    await repo.handleFileChange(dbFileChange);
+    await settle();
+
+    expect(fuzzOf('a')).toEqual([{ due_fuzz: -7 }]);
+    expect(fuzzOf('edge')).toEqual([{ due_fuzz: -7 }]);
+    expect(fuzzOf('later')).toEqual([{ due_fuzz: null }]);
+
+    // The next review day, `later` due in it
+    vi.setSystemTime(later + HOUR_MS);
+    adapter.writeBinary.mockClear();
+    files.set(
+      DATABASE_FILE_PATH,
+      await savedOnTopBy(files.get(DATABASE_FILE_PATH), ['c'])
+    );
+    await repo.handleFileChange(dbFileChange);
+    await settle();
+
+    expect(fuzzOf('later')).toEqual([{ due_fuzz: -7 }]);
+    expect(fuzzOf('c')).toEqual([{ due_fuzz: -7 }]);
+    expect(dbWritesOf(adapter)).toBe(1);
+    repo.dispose();
+  });
+
+  it.each([
+    [4, -7],
+    [0, null],
+  ])(
+    'counts a row of a copy it takes on due at 02:00 as due by the end of the review day under the rollover offset of its settings, %s',
+    async (dayRolloverOffset, fuzz) => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(TODAY_NOON);
+      vi.spyOn(IRScheduler, 'getDueFuzz').mockReturnValue(-7);
+      const { repo, files } = await startStored([], {
+        replaySettings: () => ({ ...FUZZING_AT_4, dayRolloverOffset }),
+      });
+      files.set(
+        DATABASE_FILE_PATH,
+        await textsSavedOnTopBy(files.get(DATABASE_FILE_PATH), [
+          { ...REMOTE_TEXT, due: TODAY_DUE_BY - 2 * HOUR_MS },
+        ])
+      );
+
+      await repo.handleFileChange(dbFileChange);
+      await settle();
+
+      expect(repo.query('SELECT due_fuzz FROM article')).toEqual([
+        { due_fuzz: fuzz },
+      ]);
+      repo.dispose();
+    }
+  );
+
+  it('refetches nothing when disposed while saving the fuzz of a copy it took on', async () => {
+    const { repo, files, adapter, onReloadFromDisk } = await startStored(
+      ['a'],
+      { replaySettings: () => ({ fsrsParams: {}, fuzzTextReviews: true }) }
+    );
+    adapter.writeBinary.mockImplementationOnce(async () => {
+      repo.dispose();
+    });
+
+    files.set(
+      DATABASE_FILE_PATH,
+      await savedOnTopBy(files.get(DATABASE_FILE_PATH), ['c'])
+    );
+    await repo.handleFileChange(dbFileChange);
+    await settle();
+
+    expect(dbWritesOf(adapter)).toBe(1);
+    expect(onReloadFromDisk).not.toHaveBeenCalled();
+  });
+
+  it('fuzzes nothing in a copy it takes on while writes are refused', async () => {
+    const { repo, files, adapter } = await startStored(['a'], {
+      replaySettings: () => ({ fsrsParams: {}, fuzzTextReviews: true }),
+    });
+    const draw = vi.spyOn(IRScheduler, 'getDueFuzz');
+    vi.spyOn(repo, 'writeRefusal').mockReturnValue(new Error('refused'));
+    adapter.writeBinary.mockClear();
+
+    files.set(
+      DATABASE_FILE_PATH,
+      await savedOnTopBy(files.get(DATABASE_FILE_PATH), ['c'])
+    );
+    await repo.handleFileChange(dbFileChange);
+    await settle();
+
+    expect(articleIds(repo).sort()).toEqual(['a', 'c']);
+    expect(draw).not.toHaveBeenCalled();
+    expect(dbWritesOf(adapter)).toBe(0);
+    repo.dispose();
+  });
+
+  it('takes on a fast-forward unfuzzed, saving nothing, when fuzzing its rows fails', async () => {
+    const { repo, files, adapter, onReloadFromDisk } = await startStored(
+      ['a'],
+      { replaySettings: () => ({ fsrsParams: {}, fuzzTextReviews: true }) }
+    );
+    vi.spyOn(IRScheduler, 'getDueFuzz').mockImplementation(() => {
+      throw new Error('no fuzz');
+    });
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    adapter.writeBinary.mockClear();
+
+    files.set(
+      DATABASE_FILE_PATH,
+      await savedOnTopBy(files.get(DATABASE_FILE_PATH), ['c'])
+    );
+    await repo.handleFileChange(dbFileChange);
+    await settle();
+
+    expect(articleIds(repo).sort()).toEqual(['a', 'c']);
+    expect(repo.query('SELECT due_fuzz FROM article')).toEqual([
+      { due_fuzz: null },
+      { due_fuzz: null },
+    ]);
+    expect(onReloadFromDisk).toHaveBeenCalledOnce();
+    expect(dbWritesOf(adapter)).toBe(0);
+    expect(error).toHaveBeenCalledWith(
+      expect.stringMatching(/fuzz/),
+      expect.any(Error)
+    );
+    repo.dispose();
+  });
+
   it('takes on a copy it cannot merge, after backing memory up', async () => {
     const { repo, files, adapter, onReloadFromDisk } = await startStored(['a']);
     insertArticleRow(repo, 'b');
@@ -5171,6 +5566,92 @@ describe("telling another device's copy from this device's own save", () => {
       expect(articleIds(repo).sort()).toEqual(['a', 'b', 'c']);
       expect(warn).not.toHaveBeenCalled();
       repo.dispose();
+    });
+
+    it.each([true, false])(
+      'gives the live text rows of a fast-forward it starts on that lack fuzz some, keeping their stamps, in one save only while text reviews are fuzzed (%s)',
+      async (fuzzTextReviews) => {
+        const { app, files, adapter } = await firstSession(['a'], 'b');
+        const incoming = await textsSavedOnTopBy(
+          files.get(DATABASE_FILE_PATH),
+          [
+            { ...REMOTE_TEXT, id: 'new' },
+            { ...REMOTE_TEXT, id: 'fuzzed', due_fuzz: 4 },
+            { ...REMOTE_TEXT, id: 'gone', deleted: 1 },
+            { ...REMOTE_TEXT, id: 'clip', table: 'snippet' },
+            // Due long after the review day in progress
+            { ...REMOTE_TEXT, id: 'later', due: FAR_DUE },
+          ]
+        );
+        files.set(DATABASE_FILE_PATH, incoming);
+        const draw = vi.spyOn(IRScheduler, 'getDueFuzz').mockReturnValue(-9);
+        adapter.writeBinary.mockClear();
+
+        const repo = await startRepo(app, {
+          replaySettings: () => ({ fsrsParams: {}, fuzzTextReviews }),
+        });
+
+        expect(repo.startupKind).toBe('fast-forward');
+        const taken = await textRowsIn(incoming);
+        const unfuzzed = ['a', 'b', 'new', 'clip'];
+        expect(await textRowsIn(files.get(DATABASE_FILE_PATH))).toEqual(
+          fuzzTextReviews
+            ? taken.map((row) =>
+                unfuzzed.includes(row.id as string)
+                  ? { ...row, due_fuzz: -9 }
+                  : row
+              )
+            : taken
+        );
+        expect(draw).toHaveBeenCalledTimes(fuzzTextReviews ? 4 : 0);
+        expect(dbWritesOf(adapter)).toBe(fuzzTextReviews ? 1 : 0);
+        repo.dispose();
+      }
+    );
+
+    it('saves nothing on starting on a fast-forward whose live text rows all have fuzz', async () => {
+      const { app, files, adapter } = await firstSession([], 'b');
+      const SQL = await getSharedSql();
+      const db = new SQL.Database(files.get(DATABASE_FILE_PATH));
+      db.run('UPDATE article SET due_fuzz = 1');
+      const own = db.export();
+      db.close();
+      files.set(
+        DATABASE_FILE_PATH,
+        await textsSavedOnTopBy(own, [
+          { ...REMOTE_TEXT, id: 'fuzzed', due_fuzz: 4 },
+          { ...REMOTE_TEXT, id: 'gone', deleted: 1 },
+        ])
+      );
+      const draw = vi.spyOn(IRScheduler, 'getDueFuzz');
+      adapter.writeBinary.mockClear();
+
+      const repo = await startRepo(app, {
+        replaySettings: () => ({ fsrsParams: {}, fuzzTextReviews: true }),
+      });
+
+      expect(repo.startupKind).toBe('fast-forward');
+      expect(draw).not.toHaveBeenCalled();
+      expect(dbWritesOf(adapter)).toBe(0);
+      repo.dispose();
+    });
+
+    it('fuzzes nothing on starting on its own echo, or on a file it cannot place', async () => {
+      const draw = vi.spyOn(IRScheduler, 'getDueFuzz');
+      const fuzzing = {
+        replaySettings: () => ({ fsrsParams: {}, fuzzTextReviews: true }),
+      };
+      const { app, files } = await firstSession(['a'], 'b');
+
+      const echo = await startRepo(app, fuzzing);
+      expect(echo.startupKind).toBe('echo');
+      echo.dispose();
+      files.set(DATABASE_FILE_PATH, await staleFileWith(['old']));
+      const unplaced = await startRepo(app, fuzzing);
+      expect(unplaced.startupKind).toBeNull();
+      unplaced.dispose();
+
+      expect(draw).not.toHaveBeenCalled();
     });
 
     it("reports a file another device wrote while the plugin was not running that lacks this device's last save", async () => {

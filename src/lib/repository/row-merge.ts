@@ -1,4 +1,7 @@
 import { applyMigrations, type Migration } from '#/db/migration-helpers';
+import { DAY_ROLLOVER_OFFSET_HOURS } from '#/lib/constants';
+import IRScheduler from '#/lib/IRScheduler';
+import { getEndOfDay } from '#/lib/utils';
 import type initSqlJs from 'sql.js';
 import type { Database } from 'sql.js';
 import { markPhase } from './phase-timing';
@@ -31,6 +34,12 @@ export interface MergeTable {
    * (one note imported on both devices, say); all but one give it up.
    */
   unique?: string;
+  /**
+   * The table's rows carry a `due_fuzz`, which a row of the other copy's
+   * arrives without when it was made where text reviews are not fuzzed
+   * (see {@link fuzzArrivals}).
+   */
+  fuzzed?: boolean;
 }
 
 /**
@@ -38,8 +47,8 @@ export interface MergeTable {
  * before the row its foreign key names.
  */
 export const MERGE_TABLES: readonly MergeTable[] = [
-  { name: 'article', key: 'id', log: false, unique: 'reference' },
-  { name: 'snippet', key: 'id', log: false, unique: 'reference' },
+  { name: 'article', key: 'id', log: false, unique: 'reference', fuzzed: true },
+  { name: 'snippet', key: 'id', log: false, unique: 'reference', fuzzed: true },
   { name: 'srs_card', key: 'id', log: false, unique: 'reference' },
   { name: 'article_review', key: 'id', log: true },
   { name: 'snippet_review', key: 'id', log: true },
@@ -141,14 +150,23 @@ function planTables(db: Database): MergeReport {
  *
  * Rows keep the stamps they came with: the stamp triggers are taken off for
  * the merge and armed again from `stamps` after it, as after a migration.
- * The result depends only on the two copies, so merging the same pair either
- * way round gives the same rows, and merging again changes nothing.
+ * Fuzz aside, the result depends only on the two copies, so merging the same
+ * pair either way round gives the same rows, and merging again changes
+ * nothing.
  *
  * Given `replay`, an item whose review log the two copies disagree on then
  * gets its scheduling columns from the merged log instead of the row that
  * won (see `replaySchedules`), in the same transaction: those rows are this
  * device's writes, stamped by the triggers armed again first.
+ *
+ * When `replay` fuzzes text reviews, a live text row of the other copy's
+ * that wins without a `due_fuzz` is written with one if this device held
+ * one for it or it is due (see {@link fuzzArrivals}), and a row of this
+ * device's that lacks one and has fallen due since it arrived gets one too,
+ * as part of the merge and so of its one save. Due is due by the end of the review day the merge runs in
+ * ({@link fuzzDueBy}), so that much depends on the clock as well.
  * @param replay the settings to replay review logs with; none, no replay
+ *   and no fuzz
  * @throws if a statement fails, having rolled back and changed nothing
  */
 export function mergeInto(
@@ -202,7 +220,13 @@ function merge(
           // copy's log and schedule (see `readDivergences`)
           const diverged = replay && readDivergences(db, INCOMING_SCHEMA);
           markPhase('divergences');
-          for (const table of MERGE_TABLES) applyTable(db, table);
+          const dueBy = replay?.fuzzTextReviews ? fuzzDueBy(replay) : null;
+          for (const table of MERGE_TABLES) {
+            const fuzz = dueBy !== null && table.fuzzed;
+            if (fuzz) fuzzArrivals(db, table, dueBy);
+            applyTable(db, table);
+            if (fuzz) report.written += fuzzFallenDue(db, table, dueBy);
+          }
           mergeWriteStamps(db);
           markPhase('apply');
           if (diverged) {
@@ -482,6 +506,140 @@ function planTable(db: Database, table: MergeTable): MergeReport {
   `);
   const [replaced, written] = counts.values[0] as number[];
   return { replaced, written };
+}
+
+/**
+ * The cutoff of the fuzz a merge or take-on gives rows lacking it: the end of
+ * the review day in progress, the cutoff the review queue counts an article
+ * or snippet due by (`ArticleManager`/`SnippetManager` `dueFilter`). Fuzz
+ * only orders the rows of one queue, so a row due later needs none yet; the
+ * first merge or take-on after it falls due gives it some.
+ * @param settings the rollover offset; none, the default one
+ */
+export function fuzzDueBy(
+  settings: Pick<ReplaySettings, 'dayRolloverOffset'>
+): number {
+  return getEndOfDay(
+    settings.dayRolloverOffset ?? DAY_ROLLOVER_OFFSET_HOURS.DEFAULT
+  );
+}
+
+/**
+ * Give each live row of the other copy's that {@link planTable} has winning
+ * in `table` without a `due_fuzz` one, before {@link applyTable} writes it:
+ * the fuzz this device's own copy of the row has, due or not, else a new
+ * one if it is due by `dueBy` (see {@link fuzzUnfuzzed}). A row made where
+ * text reviews are not fuzzed (or by a version before fuzz) would otherwise
+ * sort at its exact due time here, outside the spread every other row is
+ * in. A row that arrives fuzzed keeps its fuzz, so a row is fuzzed once, by
+ * the first device to take it in. One not yet due, and new to this device's
+ * fuzz, arrives as it is, to be fuzzed once it falls due
+ * ({@link fuzzFallenDue}).
+ *
+ * The row keeps the stamp it came with, as every row the merge takes does:
+ * a stamp of this device's would make the fuzz a newer write than any edit
+ * of the row's that the other device made before this save reached it,
+ * and the edit would lose to it. Unstamped, the fuzzed copy ties with the
+ * copy it came from and wins on content ({@link orderOf}: a value over
+ * none), so the other device takes the fuzz on at its next merge, and an
+ * edit of the row's made there before then still wins, to be fuzzed in turn.
+ */
+function fuzzArrivals(db: Database, { name, key }: MergeTable, dueBy: number) {
+  fuzzUnfuzzed(db, `temp.${winOf(name)}`, key, dueBy, `main.${name}`);
+}
+
+/**
+ * Give each live row of this device's `table` without a `due_fuzz`, and due
+ * by `dueBy`, a new one, after {@link applyTable} wrote the merge: a row that
+ * arrived before it was due, by this merge or an earlier one, or a copy
+ * taken on, and has fallen due since. Unstamped, as {@link fuzzArrivals}.
+ * @returns how many rows it fuzzed
+ */
+function fuzzFallenDue(
+  db: Database,
+  { name, key }: MergeTable,
+  dueBy: number
+): number {
+  return fuzzUnfuzzed(db, `main.${name}`, key, dueBy);
+}
+
+/**
+ * Give every live article and snippet row of `db` that has no `due_fuzz`
+ * and is due by `dueBy` ({@link fuzzDueBy}) a new one, for a copy this device
+ * took on whole rather than merged (a fast-forward, 0176): no merge ran to
+ * fuzz the rows it brought (see {@link fuzzArrivals}), and there is no copy
+ * of this device's to take a fuzz from. A row due later waits for the first
+ * merge or take-on after it falls due. All or nothing, in one transaction.
+ *
+ * Unstamped, for the reason the merge leaves its rows unstamped: the other
+ * device then takes the fuzz on as a fast-forward of this device's next
+ * save, or by content at a merge, and an edit it made meanwhile still wins.
+ * @returns how many rows it fuzzed: none, nothing to save
+ * @throws if a statement fails, having rolled back and changed nothing
+ */
+export function fuzzTakenOn(
+  db: Database,
+  stamps: StampSource,
+  dueBy: number
+): number {
+  disarmRowStamps(db);
+  try {
+    return inTransaction(
+      db,
+      () => true,
+      () =>
+        MERGE_TABLES.filter((table) => table.fuzzed).reduce(
+          (fuzzed, table) => fuzzed + fuzzFallenDue(db, table, dueBy),
+          0
+        )
+    );
+  } finally {
+    armRowStamps(db, stamps);
+  }
+}
+
+/**
+ * Give each live row of `target` without a `due_fuzz` one: the fuzz of the
+ * row with its key in `held`, when given and that row has one, due or not
+ * (it costs no draw, and the row then needs no pass once it falls due), else
+ * a new one if it is due by `dueBy`. A tombstone (a row deleted, whether for
+ * good or not yet) is left as it is, as the backfill of
+ * `ItemManager.backfillReviewTimeFuzz` leaves it. Writes no stamp of its
+ * own: the caller disarms the stamp triggers.
+ * @returns how many rows it fuzzed
+ */
+function fuzzUnfuzzed(
+  db: Database,
+  target: string,
+  key: string,
+  dueBy: number,
+  held?: string
+): number {
+  const [unfuzzed] = db.exec(
+    held
+      ? // A temp table of the rows a merge takes, scanned whole: no index
+        `SELECT t.${key}, h.due_fuzz FROM ${target} t
+         LEFT JOIN ${held} h ON h.${key} = t.${key}
+         WHERE t.due_fuzz IS NULL AND t.deleted = 0
+           AND (h.due_fuzz IS NOT NULL OR t.due <= ?)`
+      : // `due <= ?` first, so that SQLite looks the rows up by `<table>_due`
+        `SELECT ${key}, NULL FROM ${target}
+         WHERE due <= ? AND due_fuzz IS NULL AND deleted = 0`,
+    [dueBy]
+  );
+  const rows = unfuzzed?.values ?? [];
+  // Prepared once: `run` would compile the statement again for every row
+  const update = db.prepare(
+    `UPDATE ${target} SET due_fuzz = ? WHERE ${key} = ?`
+  );
+  try {
+    for (const [id, own] of rows) {
+      update.run([own ?? IRScheduler.getDueFuzz(), id]);
+    }
+  } finally {
+    update.free();
+  }
+  return rows.length;
 }
 
 /**

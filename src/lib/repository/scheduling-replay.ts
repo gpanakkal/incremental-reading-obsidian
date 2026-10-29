@@ -25,8 +25,18 @@ import {
 export interface ReplaySettings {
   /** The FSRS parameters cards are graded with now. */
   fsrsParams: Partial<FSRSParameters>;
-  /** Whether a text's due date is fuzzed when a review moves it. */
+  /**
+   * Whether a text's due date is fuzzed when a review moves it, and a due
+   * text row a merge brings without fuzz is given some (`mergeInto`), as is
+   * one in a copy taken on whole (`fuzzTakenOn`).
+   */
   fuzzTextReviews: boolean;
+  /**
+   * The rollover offset of the review day, in hours: a row a merge or
+   * take-on brings is due, and so fuzzed, by the end of the day in progress
+   * (`fuzzDueBy`). None, the default offset.
+   */
+  dayRolloverOffset?: number;
 }
 
 /** What a merge replays with when it is told nothing about the settings. */
