@@ -1,8 +1,7 @@
 // @vitest-environment jsdom
 import { isSameDay } from '#/lib/utils';
 import fc from 'fast-check';
-import type { ComponentChild } from 'preact';
-import { render } from 'preact';
+import { type ComponentChild, render } from 'preact';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   buildMonthGrid,

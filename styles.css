@@ -99,12 +99,14 @@ body {
 .internal-embed[alt*='ir-hide-title'] {
   padding-inline-start: var(--size-4-2);
   padding-block: 0.2em;
+  /* eslint-disable-next-line css/no-invalid-properties -- @eslint/css 1.4 resolves the nested hue var to its bare `26` */
   border-inline-start-color: var(--ir-transclusion-rule-color);
 
   /* Marks the transcluded run as plugin content. Kept translucent so it
      composites over whatever the theme paints behind it, and so the accent
      rule below still reads through where the two overlap — a transclusion
      that opens its host block starts at the same x as the rule. */
+  /* eslint-disable-next-line css/no-invalid-properties -- @eslint/css 1.4 resolves the nested hue var to its bare `26` */
   background-color: var(--ir-transclusion-tint);
   border-radius: var(--radius-s);
 
@@ -168,6 +170,7 @@ body {
   /* The run's own tint, painted on a real box instead of on inline fragments
      that cannot reach this far. Same color as the fragments around it, so the
      two read as one marked run rather than a block sitting inside one. */
+  /* eslint-disable-next-line css/no-invalid-properties -- @eslint/css 1.4 resolves the nested hue var to its bare `26` */
   background-color: var(--ir-transclusion-tint);
 }
 
@@ -278,10 +281,12 @@ body {
    host's own text before and after the transclusion. Live Preview fits the
    rule to the transclusion's rows instead, below. */
 .markdown-rendered .ir-transclusion-rule {
+  /* eslint-disable css/no-invalid-properties -- @eslint/css 1.4 resolves the nested hue var to its bare `26` */
   background-image: linear-gradient(
     var(--ir-transclusion-rule-color),
     var(--ir-transclusion-rule-color)
   );
+  /* eslint-enable css/no-invalid-properties */
   background-repeat: no-repeat;
   background-size: 2px 100%;
   background-position: 0 0;
@@ -315,6 +320,7 @@ body {
   top: var(--ir-embed-rule-top, 0);
   width: 2px;
   height: var(--ir-embed-rule-height, 0);
+  /* eslint-disable-next-line css/no-invalid-properties -- @eslint/css 1.4 resolves the nested hue var to its bare `26` */
   background-color: var(--ir-transclusion-rule-color);
   pointer-events: none;
 }
@@ -1646,6 +1652,7 @@ body:not(.is-mobile) .ir-grade-row {
 }
 
 .is-mobile .ir-card-editor.mod-cm6 .cm-content {
+  /* eslint-disable-next-line css/no-important -- outranks scrollPastEnd's inline padding-bottom (see above) */
   padding-bottom: 0 !important;
 }
 
@@ -2166,6 +2173,7 @@ body:not(.is-mobile) .ir-review-interface .ir-card-editor .ir-review-scroller {
 
 /* A card's highlight is orange, as its embed is tinted in a note */
 .ir-pdf-highlights > .ir-snippet-highlight.ir-card-highlight {
+  /* eslint-disable-next-line css/no-invalid-properties -- @eslint/css 1.4 resolves the nested hue var to its bare `26` */
   background-color: var(--ir-transclusion-tint);
 }
 
@@ -2178,6 +2186,7 @@ body:not(.is-mobile) .ir-review-interface .ir-card-editor .ir-review-scroller {
 }
 
 .ir-pdf-highlights > .ir-snippet-highlight.ir-card-highlight.ir-hovered {
+  /* eslint-disable-next-line css/no-invalid-properties -- @eslint/css 1.4 resolves the nested hue var to its bare `26` */
   box-shadow: 0 0 0 2px var(--ir-transclusion-rule-color);
 }
 

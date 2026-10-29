@@ -10,8 +10,11 @@ import type { SafeOmit } from '#/lib/utility-types';
 import fc from 'fast-check';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
-import type { Database, SqlJsStatic, SqlValue } from 'sql.js';
-import initSqlJs from 'sql.js';
+import initSqlJs, {
+  type Database,
+  type SqlJsStatic,
+  type SqlValue,
+} from 'sql.js';
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -1073,7 +1076,7 @@ describe('migration v6 — vault-relative references', () => {
   it('prefixes snippet references with DATA_DIRECTORY/', () => {
     applyMigrations(db, migrations);
     const byId = Object.fromEntries(
-      selectAll(db, 'snippet').map((r) => [r.id, r])
+      selectAll(db, 'snippet').map((r) => [r.id as string, r] as const)
     );
     expect(byId['s1'].reference).toBe(`${DATA_DIRECTORY}/snippets/snip.md`);
   });
@@ -1081,7 +1084,7 @@ describe('migration v6 — vault-relative references', () => {
   it('preserves #fragment suffix when prefixing snippet references', () => {
     applyMigrations(db, migrations);
     const byId = Object.fromEntries(
-      selectAll(db, 'snippet').map((r) => [r.id, r])
+      selectAll(db, 'snippet').map((r) => [r.id as string, r] as const)
     );
     expect(byId['s2'].reference).toBe(
       `${DATA_DIRECTORY}/snippets/snip-frag.md#h1`
@@ -1108,7 +1111,7 @@ describe('migration v6 — vault-relative references', () => {
     expect(articles[0].interval).toBe(86400000);
     expect(articles[0].priority).toBe(30);
     const snippets = Object.fromEntries(
-      selectAll(db, 'snippet').map((r) => [r.id, r])
+      selectAll(db, 'snippet').map((r) => [r.id as string, r] as const)
     );
     expect(snippets['s1'].due).toBe(1000);
     expect(snippets['s1'].interval).toBe(86400000);

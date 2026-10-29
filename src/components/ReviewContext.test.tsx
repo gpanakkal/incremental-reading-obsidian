@@ -62,6 +62,7 @@ function captureSaveNote(reviewManager: ReturnType<typeof makeReviewManager>) {
   const ref: { current: SaveNote | null } = { current: null };
 
   function Capture() {
+    // eslint-disable-next-line react-hooks/immutability -- test probe hands the hook's value out to the caller
     ref.current = useReviewContext().saveNote;
     return null;
   }

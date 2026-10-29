@@ -167,11 +167,13 @@ export function ReviewQueue() {
   // render is deliberately skipped, since the table is unmounted then and has
   // not shown the new page yet — updating on it would consume the change and
   // leave the real render looking unchanged.
+  /* eslint-disable react-hooks/refs -- this render's ref read/write is the point (above) */
   const pageChanged =
     !isLoading &&
     renderedPage.current !== null &&
     renderedPage.current !== currentPage;
   if (!isLoading) renderedPage.current = currentPage;
+  /* eslint-enable react-hooks/refs -- end of the render-time block */
 
   // The review days the queue as a whole spans, which bound the date field.
   // Converted with `reviewDayOf` for the same reason `visibleDay` is: the
@@ -259,6 +261,7 @@ export function ReviewQueue() {
           // same-page refetch keeps the key, so the node and its finished
           // animation are reused and nothing flickers during ordinary review.
           key={`page-${currentPage}`}
+          // eslint-disable-next-line react-hooks/refs -- render-time flag, see pageChanged
           changed={pageChanged}
           rows={data.rows}
           columns={buildQueueColumns()}

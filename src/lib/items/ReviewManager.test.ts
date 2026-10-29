@@ -308,7 +308,7 @@ function makeReviewCard(due: number): ReviewCard {
  */
 function wireDueAt(dueTimes: number[]) {
   const repo = makeRepo();
-  vi.mocked(repo.query).mockResolvedValue([] as never);
+  vi.mocked(repo).query.mockResolvedValue([] as never);
   const manager = new ReviewManager(makePlugin(), repo);
   const articles = dueTimes.map((due, i) =>
     makeArticleRow({
@@ -1197,7 +1197,7 @@ describe('ReviewManager.getQueue', () => {
   }) {
     const repo = makeRepo();
     // The only raw query getQueue issues is the parent id → path lookup.
-    vi.mocked(repo.query).mockResolvedValue((rows.parents ?? []) as never);
+    vi.mocked(repo).query.mockResolvedValue((rows.parents ?? []) as never);
     const manager = new ReviewManager(makePlugin(), repo);
     vi.spyOn(manager.articles, 'fetchMany').mockResolvedValue(
       (rows.articles ?? []) as never
@@ -2078,7 +2078,7 @@ describe('ReviewManager.findPageForDate', () => {
   it('skips rows with no due time rather than treating them as due', async () => {
     const target = new Date(2024, 5, 13);
     const repo = makeRepo();
-    vi.mocked(repo.query).mockResolvedValue([] as never);
+    vi.mocked(repo).query.mockResolvedValue([] as never);
     const manager = new ReviewManager(makePlugin(), repo);
     vi.spyOn(manager.articles, 'fetchMany').mockResolvedValue([
       makeArticleRow({ id: 'a0', reference: 'a0.md', due: null }),
@@ -3024,6 +3024,7 @@ describe('ReviewManager.dismissItem and unDismissItem', () => {
     const item = makeReviewItem('article');
 
     await expect(manager.dismissItem(item)).resolves.toBeUndefined();
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- vi.fn mock, no `this` to lose
     expect(repo.mutate).toHaveBeenCalled();
   });
 
@@ -3122,6 +3123,7 @@ describe('ReviewManager.handleExternalRename', () => {
       abstractFile,
       `${IR_DIR}/articles/old.md`
     );
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- vi.fn mock, no `this` to lose
     expect(repo.mutate).not.toHaveBeenCalled();
   });
 
@@ -3137,6 +3139,7 @@ describe('ReviewManager.handleExternalRename', () => {
     );
     const abstractFile = { path: newPath } as TAbstractFile;
     await manager.handleExternalRename(abstractFile, oldPath);
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- vi.fn mock, no `this` to lose
     expect(repo.mutate).toHaveBeenCalled();
     const [sql, params] = (repo.mutate as ReturnType<typeof vi.fn>).mock
       .calls[0] as [string, unknown[]];
@@ -3157,6 +3160,7 @@ describe('ReviewManager.handleExternalRename', () => {
     );
     const abstractFile = { path: newPath } as TAbstractFile;
     await manager.handleExternalRename(abstractFile, oldPath);
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- vi.fn mock, no `this` to lose
     expect(repo.mutate).toHaveBeenCalled();
     const [sql, params] = (repo.mutate as ReturnType<typeof vi.fn>).mock
       .calls[0] as [string, unknown[]];
@@ -3177,6 +3181,7 @@ describe('ReviewManager.handleExternalRename', () => {
     );
     const abstractFile = { path: newPath } as TAbstractFile;
     await manager.handleExternalRename(abstractFile, oldPath);
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- vi.fn mock, no `this` to lose
     expect(repo.mutate).toHaveBeenCalled();
     const [sql, params] = (repo.mutate as ReturnType<typeof vi.fn>).mock
       .calls[0] as [string, unknown[]];
@@ -3217,6 +3222,7 @@ describe('ReviewManager.handleExternalRename', () => {
       abstractFile,
       `${IR_DIR}/articles/same.md`
     );
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- vi.fn mock, no `this` to lose
     expect(repo.mutate).not.toHaveBeenCalled();
   });
 
@@ -3568,6 +3574,7 @@ describe('ReviewManager.handleExternalRename rowId branch', () => {
       oldPath
     );
 
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- vi.fn mock, no `this` to lose
     expect(repo.mutate).toHaveBeenCalled();
     const [sql, params] = (repo.mutate as ReturnType<typeof vi.fn>).mock
       .calls[0] as [string, unknown[]];
@@ -4066,6 +4073,7 @@ describe('ReviewManager.handleExternalRename CARD_TAG condition', () => {
     );
     const abstractFile = { path: newPath } as TAbstractFile;
     await manager.handleExternalRename(abstractFile, oldPath);
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- vi.fn mock, no `this` to lose
     expect(repo.mutate).not.toHaveBeenCalled();
   });
 });
@@ -4126,6 +4134,7 @@ describe('ReviewManager.handleCreation copy detection', () => {
 
     await manager.handleCreation({ path: copyPath } as TAbstractFile);
 
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- vi.fn mock, no `this` to lose
     expect(repo.mutate).not.toHaveBeenCalled();
   });
 
@@ -4147,6 +4156,7 @@ describe('ReviewManager.handleCreation copy detection', () => {
 
     await manager.handleCreation({ path: createdPath } as TAbstractFile);
 
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- vi.fn mock, no `this` to lose
     expect(repo.mutate).toHaveBeenCalled();
     const [, params] = (repo.mutate as ReturnType<typeof vi.fn>).mock
       .calls[0] as [string, unknown[]];
@@ -4168,6 +4178,7 @@ describe('ReviewManager.handleCreation copy detection', () => {
 
     await manager.handleCreation({ path: restoredPath } as TAbstractFile);
 
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- vi.fn mock, no `this` to lose
     expect(repo.mutate).toHaveBeenCalled();
     const [sql, params] = (repo.mutate as ReturnType<typeof vi.fn>).mock
       .calls[0] as [string, unknown[]];
@@ -4189,6 +4200,7 @@ describe('ReviewManager.handleCreation copy detection', () => {
 
     await manager.handleCreation({ path: originalPath } as TAbstractFile);
 
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- vi.fn mock, no `this` to lose
     expect(repo.mutate).toHaveBeenCalled();
     const [, params] = (repo.mutate as ReturnType<typeof vi.fn>).mock
       .calls[0] as [string, unknown[]];
@@ -4229,6 +4241,7 @@ describe('ReviewManager.handleExternalRename console.warn mutant', () => {
     expect(warnSpy).toHaveBeenCalledWith(
       expect.stringContaining('did not change')
     );
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- vi.fn mock, no `this` to lose
     expect(repo.mutate).not.toHaveBeenCalled();
   });
 });

@@ -396,6 +396,7 @@ export function CalendarPopup({
     track.classList.remove(SETTLING_CLASS);
     track.style.transform = `translateX(${settleFrom}px)`;
     track.getBoundingClientRect();
+    // eslint-disable-next-line react-hooks/immutability -- hoisted function declaration; the effect only runs after render
     settleTrack();
   }, [focusedDay]);
 

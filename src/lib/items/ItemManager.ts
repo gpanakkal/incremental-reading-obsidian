@@ -34,6 +34,7 @@ import type {
   NoteType,
   RowTypes,
   SnippetRow,
+  SQLiteRepository,
   SRSCardRow,
   TableName,
 } from '#/lib/types';
@@ -47,7 +48,6 @@ import {
   type TFile,
 } from 'obsidian';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
-import type { SQLiteRepository } from '../types';
 import {
   notedLog,
   planUndo,

@@ -550,7 +550,8 @@ describe('registerHighlightRefreshListener', () => {
     } = {}
   ) {
     const eventHandlers: Map<string, ((...args: unknown[]) => void)[]> =
-      overrides.eventHandlers ?? new Map();
+      overrides.eventHandlers ??
+      new Map<string, ((...args: unknown[]) => void)[]>();
     const leaves = overrides.leaves ?? [];
 
     return {
@@ -602,7 +603,7 @@ describe('registerHighlightRefreshListener', () => {
   it('rerenders immediately when a matching preview leaf is open on ir-highlights-changed', () => {
     const rerender = vi.fn();
     const leaf = {
-      view: Object.assign(Object.create(MarkdownView.prototype), {
+      view: Object.assign(Object.create(MarkdownView.prototype) as object, {
         getMode: () => 'preview',
         file: { path: 'notes/article.md' },
         previewMode: { rerender, containerEl: document.createElement('div') },
@@ -677,7 +678,7 @@ describe('registerHighlightRefreshListener', () => {
     const rerender = vi.fn();
     const { MarkdownView } = await import('obsidian');
     const leaf = {
-      view: Object.assign(Object.create(MarkdownView.prototype), {
+      view: Object.assign(Object.create(MarkdownView.prototype) as object, {
         getMode: () => 'source',
         file: { path: 'notes/article.md' },
         previewMode: { rerender, containerEl: document.createElement('div') },
@@ -697,7 +698,7 @@ describe('registerHighlightRefreshListener', () => {
     const rerender = vi.fn();
     const { MarkdownView } = await import('obsidian');
     const leaf = {
-      view: Object.assign(Object.create(MarkdownView.prototype), {
+      view: Object.assign(Object.create(MarkdownView.prototype) as object, {
         getMode: () => 'preview',
         file: { path: 'notes/other.md' },
         previewMode: { rerender, containerEl: document.createElement('div') },
@@ -717,7 +718,7 @@ describe('registerHighlightRefreshListener', () => {
     const rerender = vi.fn();
     const { MarkdownView } = await import('obsidian');
     const leaf = {
-      view: Object.assign(Object.create(MarkdownView.prototype), {
+      view: Object.assign(Object.create(MarkdownView.prototype) as object, {
         getMode: () => 'preview',
         file: { path: 'notes/article.md' },
         previewMode: { rerender, containerEl: document.createElement('div') },
@@ -755,7 +756,7 @@ describe('registerHighlightRefreshListener', () => {
     const rerender = vi.fn();
     const { MarkdownView } = await import('obsidian');
     const leaf = {
-      view: Object.assign(Object.create(MarkdownView.prototype), {
+      view: Object.assign(Object.create(MarkdownView.prototype) as object, {
         getMode: () => 'preview',
         file: { path: 'notes/article.md' },
         previewMode: { rerender, containerEl: document.createElement('div') },
@@ -813,7 +814,7 @@ describe('registerHighlightRefreshListener', () => {
     const rerender = vi.fn();
     const { MarkdownView } = await import('obsidian');
     const leaf = {
-      view: Object.assign(Object.create(MarkdownView.prototype), {
+      view: Object.assign(Object.create(MarkdownView.prototype) as object, {
         getMode: () => 'preview',
         file: null,
         previewMode: { rerender, containerEl: document.createElement('div') },
@@ -866,7 +867,7 @@ describe('registerHighlightRefreshListener — mutant coverage', () => {
   it('does not add to pendingRefresh when rerender was called (rerenderred=true gates the add)', () => {
     const rerender = vi.fn();
     const leaf = {
-      view: Object.assign(Object.create(MarkdownView.prototype), {
+      view: Object.assign(Object.create(MarkdownView.prototype) as object, {
         getMode: () => 'preview',
         file: { path: 'notes/article.md' },
         previewMode: { rerender, containerEl: document.createElement('div') },
@@ -886,7 +887,7 @@ describe('registerHighlightRefreshListener — mutant coverage', () => {
   it('layout-change does not rerender when leaf is NOT in preview mode', () => {
     const rerender = vi.fn();
     const leaf = {
-      view: Object.assign(Object.create(MarkdownView.prototype), {
+      view: Object.assign(Object.create(MarkdownView.prototype) as object, {
         getMode: () => 'source',
         file: { path: 'notes/article.md' },
         previewMode: { rerender, containerEl: document.createElement('div') },
@@ -907,7 +908,7 @@ describe('registerHighlightRefreshListener — mutant coverage', () => {
     const rerenderA = vi.fn();
     const rerenderB = vi.fn();
     const leafA = {
-      view: Object.assign(Object.create(MarkdownView.prototype), {
+      view: Object.assign(Object.create(MarkdownView.prototype) as object, {
         getMode: () => 'preview',
         file: { path: 'notes/a.md' },
         previewMode: {
@@ -917,7 +918,7 @@ describe('registerHighlightRefreshListener — mutant coverage', () => {
       }),
     };
     const leafB = {
-      view: Object.assign(Object.create(MarkdownView.prototype), {
+      view: Object.assign(Object.create(MarkdownView.prototype) as object, {
         getMode: () => 'preview',
         file: { path: 'notes/b.md' },
         previewMode: {
@@ -966,7 +967,7 @@ describe('registerHighlightRefreshListener — mutant coverage', () => {
     // Covers the !filePath branch in layout-change (leaf.view.file?.path is undefined)
     const rerender = vi.fn();
     const noFileLeaf = {
-      view: Object.assign(Object.create(MarkdownView.prototype), {
+      view: Object.assign(Object.create(MarkdownView.prototype) as object, {
         getMode: () => 'preview',
         file: undefined,
         previewMode: { rerender, containerEl: document.createElement('div') },

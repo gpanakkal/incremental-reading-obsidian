@@ -1701,9 +1701,8 @@ describe('buildDecorations', () => {
     rm.snippets.offsetTracker.loadHighlights(FILE_PATH, [
       makeHighlight({ id: 'h1', start_offset: 0, end_offset: 5 }),
     ]);
-    rm.getSnippetHighlights.mockImplementation(async () => {
-      // highlights already set in tracker; just mark loaded
-    });
+    // highlights already set in tracker; just mark loaded
+    rm.getSnippetHighlights.mockResolvedValue(undefined);
     const irPlugin = makePlugin(rm);
     stubFileInfo(FILE_PATH, 'article');
     const view = makeView('hello world', irPlugin);

@@ -342,18 +342,18 @@ const endsListing = (chars: string) =>
  */
 const said = {
   /** A file put back */
-  file: (chars: string) =>
+  file: (chars: string): unknown =>
     expect.stringMatching(new RegExp(`files.*${endsListing(chars)}`, 's')),
   /** A folder put back */
-  folder: (chars: string) =>
+  folder: (chars: string): unknown =>
     expect.stringMatching(new RegExp(`items.*${endsListing(chars)}`, 's')),
   /** Not put back: where it is, and what to drop */
-  failed: (path: string, chars: string) =>
+  failed: (path: string, chars: string): unknown =>
     expect.stringMatching(
       new RegExp(`"${escapeRegExp(path)}".*${endsListing(chars)}`, 's')
     ),
   /** Put back once already, so left */
-  stays: (path: string, chars: string) =>
+  stays: (path: string, chars: string): unknown =>
     expect.stringMatching(
       new RegExp(`"${escapeRegExp(path)}".*${endsListing(chars)}`, 's')
     ),

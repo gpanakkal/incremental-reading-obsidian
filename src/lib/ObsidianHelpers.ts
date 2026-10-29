@@ -38,7 +38,6 @@ import { isEditableText, supportsFrontmatter } from './mime';
 import { isNestedEditor } from './nested-editor';
 import { notify, type NotifyOptions } from './notices';
 import { parseSourceLink } from './source-link';
-import { stripFrontmatterTags } from './tags';
 import type { FrontMatterUpdates, NoteType, PluginFrontMatter } from './types';
 import { binarySearch, generateId } from './utils';
 

@@ -11,6 +11,7 @@ export function TitleEditor({ item }: { item: ReviewArticle }) {
   const selecting = useAppSelector((state) => state.selectionMode !== null);
   // The item on screen now: review may move on while a rename is pending
   const shownRef = useRef(item);
+  // eslint-disable-next-line react-hooks/refs -- latest-value ref, read only by the async blur handler
   shownRef.current = item;
 
   useLayoutEffect(() => {

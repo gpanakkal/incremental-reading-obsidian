@@ -45,6 +45,7 @@ import {
   type ReviewItem,
   type ReviewSnippet,
   type SnippetRow,
+  type SQLiteRepository,
   type SRSCardRow,
   isArticle,
 } from '#/lib/types';
@@ -61,7 +62,6 @@ import {
 import type { Grade } from 'ts-fsrs';
 import IRScheduler from '../IRScheduler';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
-import type { SQLiteRepository } from '../types';
 import {
   compareDates,
   compareFuzzedDue,

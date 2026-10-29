@@ -2,11 +2,9 @@
 import type { QueueRow } from '#/components/types';
 import fc from 'fast-check';
 import type { TFile } from 'obsidian';
-import type { ComponentChild } from 'preact';
-import { render } from 'preact';
+import { type ComponentChild, render } from 'preact';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { QueueColumnKey } from './columns';
-import { buildQueueColumns } from './columns';
+import { type QueueColumnKey, buildQueueColumns } from './columns';
 import { LONG_PRESS_MS, LONG_PRESS_SLOP_PX, QueueTable } from './QueueTable';
 
 // #region HELPERS

@@ -556,7 +556,7 @@ export class ItemPathGuard {
   /** Once the undo is over: say what happened, and follow what it left. */
   async #settle(undo: Undo) {
     this.#pending.splice(this.#pending.indexOf(undo), 1);
-    const { entry, good, bad } = undo;
+    const { entry, bad } = undo;
     const { vault } = this.#options.app;
     const live = (file: TAbstractFile) =>
       vault.getAbstractFileByPath(file.path) === file;

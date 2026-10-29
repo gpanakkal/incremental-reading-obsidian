@@ -250,9 +250,6 @@ const stateArb = fc.constantFrom(
   State.Relearning
 );
 
-/** Arbitrary covering all StateType string values */
-const stateTypeArb = fc.constantFrom('New', 'Learning', 'Review', 'Relearning');
-
 /** Arbitrary for a valid SRSCardRow */
 const cardRowArb: fc.Arbitrary<SRSCardRow> = fc.record<SRSCardRow>({
   id: fc.uuid(),
@@ -1179,7 +1176,6 @@ describe('delimitText', () => {
     });
 
     it('strips pre-existing delimiters from the non-selected regions', () => {
-      const text = `pre${LEFT}old${RIGHT}answer${LEFT}also${RIGHT}post`;
       // Select "answer" (indices 3+3+3 = 9 to 9+6 = 15 — just select the word)
       // Let's construct a simple, predictable case:
       const pre = `pre${LEFT}x${RIGHT}`; // has delimiters
@@ -5556,7 +5552,7 @@ describe('making and deleting a card, with its note and its row as one unit', ()
         wired.repo.holdMerging();
         runOutMergeWait();
       } else wired.repo.refuseWrites(new Error('Saving is paused.'));
-      const refused = expect.stringContaining(refusalReason(state));
+      const refused: unknown = expect.stringContaining(refusalReason(state));
 
       expect(await wired.fromPdf()).toBeNull();
       expect(wired.notify).toHaveBeenLastCalledWith(refused, { kind: 'error' });

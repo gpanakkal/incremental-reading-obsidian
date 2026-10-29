@@ -2825,6 +2825,7 @@ describe('rename', () => {
 
           await expect(manager.rename(article, name)).resolves.toBe(false);
           expect(renameFile).not.toHaveBeenCalled();
+          // eslint-disable-next-line @typescript-eslint/unbound-method -- vi.fn mock, no `this` to lose
           expect(repo.mutate).not.toHaveBeenCalled();
           expect(Notice.messages).toEqual([INVALID_TITLE_MESSAGE]);
         }
@@ -5924,7 +5925,7 @@ describe('import', () => {
       expect(Notice.messages).toEqual([
         importedWithPriority('my-note', DEFAULT_PRIORITY),
       ]);
-      expect(Obsidian.createNote).not.toHaveBeenCalled();
+      expect(vi.mocked(Obsidian).createNote).not.toHaveBeenCalled();
       const [sql, params] = lastMutateCall(repo);
       expect(sql).toContain('INSERT INTO article');
       expect(params[1]).toBe(IMPORT_FILE.path);
@@ -5936,7 +5937,7 @@ describe('import', () => {
 
       await manager.import(IMPORT_FILE, DEFAULT_PRIORITY, null, false);
 
-      expect(Obsidian.updateFrontMatter).toHaveBeenCalledWith(
+      expect(vi.mocked(Obsidian).updateFrontMatter).toHaveBeenCalledWith(
         IMPORT_FILE,
         expect.objectContaining({ tags: ARTICLE_TAG }),
         expect.anything(),
@@ -5951,7 +5952,7 @@ describe('import', () => {
 
       await manager.import(IMPORT_FILE, DEFAULT_PRIORITY, null, false);
 
-      expect(Obsidian.generateMarkdownLink).not.toHaveBeenCalled();
+      expect(vi.mocked(Obsidian).generateMarkdownLink).not.toHaveBeenCalled();
       const fmCall = (Obsidian.updateFrontMatter as ReturnType<typeof vi.fn>)
         .mock.calls[0] as unknown[];
       expect(fmCall[1]).not.toHaveProperty('source');
@@ -5977,6 +5978,7 @@ describe('import', () => {
 
       await manager.import(IMPORT_FILE, DEFAULT_PRIORITY, null, false);
 
+      // eslint-disable-next-line @typescript-eslint/unbound-method -- vi.fn mock, no `this` to lose
       expect(repo.mutate).not.toHaveBeenCalled();
     });
 
@@ -5989,6 +5991,7 @@ describe('import', () => {
 
       await manager.import(IMPORT_FILE, DEFAULT_PRIORITY, null, false);
 
+      // eslint-disable-next-line @typescript-eslint/unbound-method -- vi.fn mock, no `this` to lose
       expect(repo.mutate).not.toHaveBeenCalled();
     });
 
@@ -6011,7 +6014,7 @@ describe('import', () => {
       expect(sql).toContain('UPDATE article SET reference');
       // A stand-in file with no stat has no fingerprint to record
       expect(params).toEqual([IMPORT_FILE.path, null, EXISTING_ID]);
-      expect(Obsidian.updateFrontMatter).not.toHaveBeenCalled();
+      expect(vi.mocked(Obsidian).updateFrontMatter).not.toHaveBeenCalled();
     });
 
     it('cancels with a specific notice when ir-id is orphaned but reference is already in DB', async () => {
@@ -6029,8 +6032,9 @@ describe('import', () => {
 
       await manager.import(IMPORT_FILE, DEFAULT_PRIORITY, null, false);
 
+      // eslint-disable-next-line @typescript-eslint/unbound-method -- vi.fn mock, no `this` to lose
       expect(repo.mutate).not.toHaveBeenCalled();
-      expect(Obsidian.updateFrontMatter).not.toHaveBeenCalled();
+      expect(vi.mocked(Obsidian).updateFrontMatter).not.toHaveBeenCalled();
     });
 
     it('proceeds with fresh import when ir-id is orphaned and reference is not in DB', async () => {
@@ -6783,7 +6787,7 @@ describe('import', () => {
 
       await manager.import(IMPORT_FILE, DEFAULT_PRIORITY, null);
 
-      expect(Obsidian.createNote).toHaveBeenCalled();
+      expect(vi.mocked(Obsidian).createNote).toHaveBeenCalled();
       const [, params] = lastMutateCall(repo);
       expect(params[1]).toBe(COPY_FILE.path);
     });
@@ -6794,7 +6798,7 @@ describe('import', () => {
 
       await manager.import(IMPORT_FILE, DEFAULT_PRIORITY, null);
 
-      expect(Obsidian.createNote).not.toHaveBeenCalled();
+      expect(vi.mocked(Obsidian).createNote).not.toHaveBeenCalled();
       const [, params] = lastMutateCall(repo);
       expect(params[1]).toBe(IMPORT_FILE.path);
     });

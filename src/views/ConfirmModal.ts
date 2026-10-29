@@ -70,7 +70,7 @@ export class ConfirmModal extends Modal {
         this.#answer(true);
         this.close();
       });
-    if (destructive) confirm.setWarning();
+    if (destructive) confirm.setDestructive().setCta();
     else confirm.setCta();
     this.#confirmEl = confirm.buttonEl;
   }

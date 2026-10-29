@@ -2999,6 +2999,7 @@ describe('getSelectionWithBounds', () => {
 describe('transcludeLink', () => {
   it('calls editor.replaceRange with "!" prepended to the link', () => {
     const editor = makeEditor();
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- vi.fn mock, no `this` to lose
     const replaceRange = editor.replaceRange as ReturnType<typeof vi.fn>;
     const start: EditorPosition = { line: 0, ch: 0 };
     const end: EditorPosition = { line: 0, ch: 5 };
@@ -3012,6 +3013,7 @@ describe('transcludeLink', () => {
     fc.assert(
       fc.property(fc.string(), (link) => {
         const editor = makeEditor();
+        // eslint-disable-next-line @typescript-eslint/unbound-method -- vi.fn mock, no `this` to lose
         const replaceRange = editor.replaceRange as ReturnType<typeof vi.fn>;
         const start: EditorPosition = { line: 0, ch: 0 };
         const end: EditorPosition = { line: 0, ch: 0 };
@@ -3113,6 +3115,7 @@ describe('getNote', () => {
       `${DATA_DIRECTORY}/articles/note.md`,
       app
     );
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- vi.fn mock, no `this` to lose
     expect(app.vault.getFileByPath).toHaveBeenCalledWith(
       `${DATA_DIRECTORY}/articles/note.md`
     );
@@ -3137,6 +3140,7 @@ describe('getNote', () => {
       } as unknown as App['vault'],
     });
     const result = ObsidianHelpers.getNote(fragmentRef, app);
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- vi.fn mock, no `this` to lose
     expect(app.vault.getFileByPath).toHaveBeenCalledWith(fragmentRef);
     expect(result).toBe(file);
   });
@@ -3794,6 +3798,7 @@ describe('getSourceFile', () => {
     const app = makeSourceApp('[[notes/origin|origin]]', dest);
 
     expect(ObsidianHelpers.getSourceFile(makeTFile(), app)).toBe(dest);
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- vi.fn mock, no `this` to lose
     expect(app.metadataCache.getFirstLinkpathDest).toHaveBeenCalledWith(
       'notes/origin',
       expect.any(String)
@@ -3853,6 +3858,7 @@ describe('getSourceFile', () => {
     });
 
     expect(ObsidianHelpers.getSourceFile(makeTFile(), app)).toBeNull();
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- vi.fn mock, no `this` to lose
     expect(app.metadataCache.getFirstLinkpathDest).not.toHaveBeenCalled();
   });
 

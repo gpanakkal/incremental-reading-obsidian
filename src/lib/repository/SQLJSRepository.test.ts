@@ -17,8 +17,7 @@ import fc from 'fast-check';
 import { readFileSync } from 'fs';
 import type { App, DataAdapter, Plugin, TAbstractFile } from 'obsidian';
 import { resolve } from 'path';
-import type { Database, SqlValue } from 'sql.js';
-import initSqlJs from 'sql.js';
+import initSqlJs, { type Database, type SqlValue } from 'sql.js';
 import {
   afterEach,
   beforeEach,
@@ -1951,6 +1950,7 @@ describe('transaction', () => {
   // per statement inside a transaction would also serialize uncommitted state.
   it('saves once per transaction rather than once per statement', async () => {
     const { repo: savingRepo } = await makeSavingRepo();
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- vi.fn mock, no `this` to lose
     const writeBinary = savingRepo.app.vault.adapter.writeBinary as ReturnType<
       typeof vi.fn
     >;
@@ -1973,6 +1973,7 @@ describe('transaction', () => {
   it('does not write to disk when the transaction rolls back', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const { repo: savingRepo } = await makeSavingRepo();
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- vi.fn mock, no `this` to lose
     const writeBinary = savingRepo.app.vault.adapter.writeBinary as ReturnType<
       typeof vi.fn
     >;
@@ -2030,6 +2031,7 @@ describe('transaction', () => {
   // deferral: nothing reaches disk or listeners until the outermost commits.
   it("defers a nested transaction's writes to the outermost commit", async () => {
     const { repo: savingRepo } = await makeSavingRepo();
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- vi.fn mock, no `this` to lose
     const writeBinary = savingRepo.app.vault.adapter.writeBinary as ReturnType<
       typeof vi.fn
     >;

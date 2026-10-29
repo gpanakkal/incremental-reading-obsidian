@@ -1,7 +1,6 @@
 import type { ISRSCardReview, SRSCardReviewRow } from '#/lib/types';
 import fc from 'fast-check';
-import type { ReviewLog } from 'ts-fsrs';
-import { Rating, State } from 'ts-fsrs';
+import { type ReviewLog, Rating, State } from 'ts-fsrs';
 import { describe, expect, it } from 'vitest';
 import SRSCardReview from './SRSCardReview';
 
