@@ -4,12 +4,13 @@ import type IncrementalReadingPlugin from '#/main';
 import * as RelinkModalModule from '#/views/RelinkModal';
 import { RelinkModal } from '#/views/RelinkModal';
 import ReviewView from '#/views/ReviewView';
+import { SchedulingModal } from '#/views/SchedulingModal';
 import fc from 'fast-check';
 import type { Command, TFile } from 'obsidian';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { actionCooldownFor } from './action-cooldown';
 import { currentItemQueryKey, queryClient } from './query-client';
-import { initReviewCommands } from './review-commands';
+import { initReviewCommands, isReviewCoolingDown } from './review-commands';
 import { setCurrentItemId, setShowAnswer, store } from './store';
 import type { MaybeMissingItem, NoteType } from './types';
 
@@ -226,6 +227,50 @@ function guardedSetup(guarded: GuardedCase, seconds: number) {
     Object.values(actions).some((action) => action.mock.calls.length > 0) ||
     (!guarded.showAnswer && store.getState().showAnswer);
   return { view, check, acted };
+}
+
+/**
+ * The scheduling command over a review tab showing a text of `type`, with the
+ * double-click guard set to `seconds`. Modals it opens are collected into
+ * `opened` rather than opened.
+ */
+function schedulingSetup(
+  type: 'article' | 'snippet',
+  seconds: number,
+  { hasView = true } = {}
+) {
+  const view = { file: {} } as unknown as ReviewView;
+  const commands = new Map<string, Command>();
+  const plugin = {
+    app: {},
+    addCommand: (command: Command) => commands.set(command.id, command),
+    getActiveReviewView: () => (hasView ? view : null),
+    settings: { actionCooldownSeconds: seconds },
+  } as unknown as IncrementalReadingPlugin;
+  initReviewCommands(plugin);
+
+  store.dispatch(setCurrentItemId('item-1'));
+  queryClient.setQueryData(currentItemQueryKey('item-1'), {
+    data: {
+      id: 'item-1',
+      type,
+      reference: 'note.md',
+      priority: 50,
+      fixed_interval_days: null,
+    },
+    file: {},
+  } as unknown as MaybeMissingItem);
+
+  const opened: SchedulingModal[] = [];
+  vi.spyOn(SchedulingModal.prototype, 'open').mockImplementation(function (
+    this: SchedulingModal
+  ) {
+    opened.push(this);
+  });
+  const check = commands.get('open-scheduling-modal')?.checkCallback;
+  if (!check)
+    throw new Error('open-scheduling-modal registered no checkCallback');
+  return { view, plugin, check, opened };
 }
 
 /** Put the clock that both the bar and the commands read at `now`. */
@@ -470,5 +515,48 @@ describe('double-click guard on review commands', () => {
         expect(acted()).toBe(false);
       })
     );
+  });
+});
+
+describe('scheduling command', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('opens the modal for the active review tab, whose double-click guard starts as the modal closes', () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom('article' as const, 'snippet' as const),
+        fc.integer({ min: 0, max: 1e9 }),
+        (type, closedAt) => {
+          const { view, plugin, check, opened } = schedulingSetup(type, 1);
+
+          check(false);
+          setNow(closedAt);
+          expect(isReviewCoolingDown(plugin, view)).toBe(false);
+          expect(opened).toHaveLength(1);
+          opened[0].close();
+
+          expect(isReviewCoolingDown(plugin, view)).toBe(true);
+        }
+      )
+    );
+  });
+
+  it('is available over a review tab showing a text, and only reporting so opens nothing', () => {
+    for (const type of ['article', 'snippet'] as const) {
+      const { check, opened } = schedulingSetup(type, 0);
+
+      expect(check(true)).toBe(true);
+      expect(opened).toHaveLength(0);
+    }
+  });
+
+  it('is unavailable with no review tab active, and opens nothing', () => {
+    const { check, opened } = schedulingSetup('article', 0, { hasView: false });
+
+    expect(check(true)).toBe(false);
+    expect(check(false)).toBe(false);
+    expect(opened).toHaveLength(0);
   });
 });

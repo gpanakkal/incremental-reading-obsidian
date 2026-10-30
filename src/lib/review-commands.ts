@@ -104,7 +104,7 @@ export function initReviewCommands(plugin: IncrementalReadingPlugin) {
       const item = getCurrentItemSync();
       if (!item || isMissingItem(item) || !isReviewText(item)) return false;
       if (checking) return true;
-      new SchedulingModal(plugin, item).open();
+      new SchedulingModal(plugin, item, view).open();
     },
   });
 

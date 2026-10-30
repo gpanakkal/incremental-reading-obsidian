@@ -17,7 +17,7 @@ export const SCHEDULING_BUTTON_CLASS = 'ir-scheduling-button';
  * a fixed interval. The icon opens a {@link SchedulingModal}.
  */
 export function TextScheduler({ text }: { text: ReviewText }) {
-  const { plugin, actions } = useReviewContext();
+  const { plugin, actions, reviewView } = useReviewContext();
   const isFixedInterval =
     text.data.type === 'article' && text.data.fixed_interval_days !== null;
 
@@ -26,7 +26,7 @@ export function TextScheduler({ text }: { text: ReviewText }) {
       className={SCHEDULING_BUTTON_CLASS}
       tooltip={SCHEDULING_BUTTON_LABEL}
       handleClick={() => {
-        new SchedulingModal(plugin, text).open();
+        new SchedulingModal(plugin, text, reviewView).open();
       }}
     >
       {icon}

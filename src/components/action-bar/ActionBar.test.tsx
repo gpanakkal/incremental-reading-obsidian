@@ -457,6 +457,20 @@ function queryButton(
   );
 }
 
+/**
+ * Keep scheduling modals the bar opens from opening for real, and collect
+ * them, in order, into the returned array.
+ */
+function collectOpenedSchedulingModals(): SchedulingModal[] {
+  const opened: SchedulingModal[] = [];
+  vi.spyOn(SchedulingModal.prototype, 'open').mockImplementation(function (
+    this: SchedulingModal
+  ) {
+    opened.push(this);
+  });
+  return opened;
+}
+
 /** The icon buttons that open the scheduling modal. */
 function querySchedulingButtons(container: HTMLElement): HTMLButtonElement[] {
   return [
@@ -2627,6 +2641,83 @@ describe('ActionBar double-click guard', () => {
             expect(bar.actions.extract.mock.calls).toEqual(
               live && delay >= cooldownMs ? [[kind, bar.reviewView]] : []
             );
+          } finally {
+            bar.unmount();
+          }
+        }
+      )
+    );
+  });
+
+  /** A text on screen, by each scheduling field its button can lead. */
+  const textItemArb = fc
+    .constantFrom(
+      { type: 'article' as const, fixedIntervalDays: null },
+      { type: 'article' as const, fixedIntervalDays: 7 },
+      { type: 'snippet' as const, fixedIntervalDays: null }
+    )
+    .map(({ type, fixedIntervalDays }) =>
+      makeItem(type, { fixedIntervalDays })
+    );
+
+  it('drops clicks on the scheduling button until an armed cooldown has run out, then opens the modal', () => {
+    fc.assert(
+      fc.property(
+        timeArb,
+        delayArb,
+        cooldownMsArb,
+        delayArb,
+        textItemArb,
+        (mountedAt, gap, cooldownMs, delay, text) => {
+          const opened = collectOpenedSchedulingModals();
+          const bar = mountGuardedBar(text, {
+            seconds: cooldownMs / 1000,
+            mountedAt,
+          });
+          try {
+            const armedAt = mountedAt + gap;
+            actionCooldownFor(bar.reviewView).arm(armedAt);
+            setNow(armedAt + delay);
+
+            querySchedulingButtons(bar.container)[0].click();
+
+            expect(opened).toHaveLength(delay >= cooldownMs ? 1 : 0);
+          } finally {
+            bar.unmount();
+          }
+        }
+      )
+    );
+  });
+
+  it('starts the cooldown as the scheduling modal it opened closes, so a held Enter landing back on the button does not reopen it', () => {
+    fc.assert(
+      fc.property(
+        timeArb,
+        delayArb,
+        cooldownMsArb,
+        delayArb,
+        textItemArb,
+        (mountedAt, gap, cooldownMs, delay, text) => {
+          const opened = collectOpenedSchedulingModals();
+          const bar = mountGuardedBar(text, {
+            seconds: cooldownMs / 1000,
+            mountedAt,
+          });
+          try {
+            // Past the cooldown the item's arrival started, whatever it is
+            const openedAt = mountedAt + 10_000;
+            setNow(openedAt);
+            querySchedulingButtons(bar.container)[0].click();
+            expect(opened).toHaveLength(1);
+            const closedAt = openedAt + gap;
+            setNow(closedAt);
+            opened[0].close();
+            setNow(closedAt + delay);
+
+            querySchedulingButtons(bar.container)[0].click();
+
+            expect(opened).toHaveLength(delay >= cooldownMs ? 2 : 1);
           } finally {
             bar.unmount();
           }

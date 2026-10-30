@@ -1,3 +1,4 @@
+import { actionCooldownFor } from '#/lib/action-cooldown';
 import { invalidateItemQuery } from '#/lib/query-client';
 import type {
   ReviewArticle,
@@ -8,15 +9,49 @@ import type IncrementalReadingPlugin from '#/main';
 import { Modal } from 'obsidian';
 import { render } from 'preact';
 import { SchedulingModalContent } from '../components/SchedulingModalContent';
+import type ReviewView from './ReviewView';
 
 export class SchedulingModal extends Modal {
   plugin: IncrementalReadingPlugin;
   item: ReviewText;
+  /** The review tab it was opened for, if any; see {@link close}. */
+  reviewView: ReviewView | undefined;
+  /**
+   * Whether it has closed yet (each opening is a new modal). A Confirm still
+   * saving closes it once the save ends, maybe after Escape already has.
+   */
+  #closed = false;
 
-  constructor(plugin: IncrementalReadingPlugin, item: ReviewText) {
+  constructor(
+    plugin: IncrementalReadingPlugin,
+    item: ReviewText,
+    reviewView?: ReviewView
+  ) {
     super(plugin.app);
     this.plugin = plugin;
     this.item = item;
+    this.reviewView = reviewView;
+  }
+
+  /**
+   * Starts the review tab's double-click guard (see `ActionCooldown`) as the
+   * modal closes, however it is closed. Obsidian hands focus back to what had
+   * it before, often the bar's scheduling button, so the key repeat of an
+   * Enter held on Confirm would click that button and open the modal again.
+   *
+   * Here rather than in `onClose`: on phones Obsidian runs `onClose` only once
+   * the closing animation ends, but gives focus back at once (undocumented;
+   * read from obsidian.asar).
+   *
+   * Only the first close starts it: a later one, when a slow save ends after
+   * Escape, would hold the bar long after the modal went.
+   */
+  close() {
+    if (this.reviewView && !this.#closed) {
+      actionCooldownFor(this.reviewView).arm(performance.now());
+    }
+    this.#closed = true;
+    super.close();
   }
 
   async handleClose(strategy: SchedulingStrategy, value: number) {
