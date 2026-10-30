@@ -28,6 +28,7 @@ import type {
   SRSCardRow,
 } from '#/lib/types';
 import { excludedIdsOf, seenElsewhereArb } from '#/test/due-query';
+import { makeWindow } from '#/test/fake-window';
 import {
   makeItemVault,
   runOutMergeWait,
@@ -699,6 +700,159 @@ function fsrsColumns(row: Record<string, unknown>) {
     reps,
     lapses,
     state,
+  };
+}
+
+/** How tall each line of `makeViewEditor`'s view is on screen. */
+const LINE_HEIGHT = 20;
+
+/** What `makeViewEditor`'s CodeMirror view is given to dispatch. */
+type ViewSpec = {
+  changes?: { from: number; to: number; insert: string };
+  selection?: { anchor: number; head?: number };
+  scrollIntoView?: boolean;
+  effects?: unknown;
+};
+
+/**
+ * An `Editor` over a plain string, with `selected` (anchor, head) selected,
+ * backed by a CodeMirror view as Obsidian's is: every change and cursor move
+ * reaches the view through `cm.dispatch`. Its own `replaceRange` and
+ * `setSelection` dispatch with `scrollIntoView: true`, as Obsidian's do, so
+ * each scroll card creation causes shows in what `cm.dispatch` was given.
+ * Positions past the last line are the end of the text, as Obsidian has them.
+ *
+ * The view is scrolled to `scrollTop`, each line `LINE_HEIGHT` tall, and
+ * its measures run only when `measure` says, CodeMirror's own anchoring
+ * moving the scroll by `shift` in them, as it does when lines change height.
+ */
+function makeViewEditor(
+  initial: string,
+  selected: readonly [number, number],
+  scrollTop = 0
+) {
+  let text = initial;
+  let [anchor, head] = selected;
+  const lines = () => text.split('\n');
+  const posToOffset = ({ line, ch }: { line: number; ch: number }) =>
+    line >= lines().length
+      ? text.length
+      : lines()
+          .slice(0, line)
+          .reduce((sum, l) => sum + l.length + 1, 0) + ch;
+  const offsetToPos = (offset: number) => {
+    const before = text.slice(0, offset).split('\n');
+    return { line: before.length - 1, ch: before[before.length - 1].length };
+  };
+  // A change maps the selection as CodeMirror's does: a position inside the
+  // replaced range goes to its start, one after it moves with the text
+  const mapped = (
+    pos: number,
+    { from, to, insert }: { from: number; to: number; insert: string }
+  ) =>
+    pos <= from ? pos : pos < to ? from : pos + insert.length - (to - from);
+  const makeDoc = () => ({
+    toString: () => text,
+    length: text.length,
+    line: (n: number) => ({ from: posToOffset({ line: n - 1, ch: 0 }) }),
+    lineAt: (pos: number) => ({
+      from: posToOffset({ line: offsetToPos(pos).line, ch: 0 }),
+    }),
+  });
+  let doc = makeDoc();
+  const dispatch = vi.fn((spec: ViewSpec) => {
+    if (spec.changes) {
+      const { from, to, insert } = spec.changes;
+      text = text.slice(0, from) + insert + text.slice(to);
+      doc = makeDoc();
+      [anchor, head] = [
+        mapped(anchor, spec.changes),
+        mapped(head, spec.changes),
+      ];
+    }
+    if (spec.selection) {
+      anchor = spec.selection.anchor;
+      head = spec.selection.head ?? anchor;
+    }
+  });
+  let top = scrollTop;
+  let pending: {
+    read: (view: unknown) => unknown;
+    write: (measured: unknown) => void;
+  }[] = [];
+  const cm = {
+    get state() {
+      return { doc, selection: { main: { anchor, head } } };
+    },
+    dispatch,
+    // In a window of its own, where the hold listens for the user's input
+    scrollDOM: Object.defineProperty(
+      Object.assign(new EventTarget(), {
+        ownerDocument: { defaultView: makeWindow() },
+      }),
+      'scrollTop',
+      {
+        get: () => top,
+        set: (value: number) => {
+          top = value;
+        },
+      }
+    ) as EventTarget & {
+      scrollTop: number;
+      ownerDocument: { defaultView: ReturnType<typeof makeWindow> };
+    },
+    scaleY: 1,
+    lineBlockAt: (pos: number) => ({
+      top: offsetToPos(pos).line * LINE_HEIGHT,
+    }),
+    requestMeasure: (request: (typeof pending)[number]) => {
+      pending.push(request);
+    },
+  };
+  /** Run the measures requested, and the microtasks they queue. */
+  const measure = async (shift: number) => {
+    const run = pending;
+    pending = [];
+    top += shift;
+    for (const request of run) request.write(request.read(cm));
+    await Promise.resolve();
+  };
+  type Pos = { line: number; ch: number };
+  return {
+    cm,
+    measure,
+    get text() {
+      return text;
+    },
+    getValue: () => text,
+    getLine: (line: number) => lines()[line],
+    lastLine: () => lines().length - 1,
+    posToOffset,
+    offsetToPos,
+    getRange: (from: Pos, to: Pos) =>
+      text.slice(posToOffset(from), posToOffset(to)),
+    getSelection: () =>
+      text.slice(Math.min(anchor, head), Math.max(anchor, head)),
+    getCursor: (which?: 'from' | 'to' | 'head' | 'anchor') =>
+      offsetToPos(
+        which === 'from'
+          ? Math.min(anchor, head)
+          : which === 'to'
+            ? Math.max(anchor, head)
+            : which === 'anchor'
+              ? anchor
+              : head
+      ),
+    replaceRange: (insert: string, from: Pos, to: Pos = from) =>
+      cm.dispatch({
+        changes: { from: posToOffset(from), to: posToOffset(to), insert },
+        scrollIntoView: true,
+      }),
+    setSelection: (from: Pos, to: Pos = from) =>
+      cm.dispatch({
+        selection: { anchor: posToOffset(from), head: posToOffset(to) },
+        scrollIntoView: true,
+      }),
   };
 }
 
@@ -7081,6 +7235,175 @@ describe('create, from a selection over several lines', () => {
         }
       ),
       { numRuns: 300 }
+    );
+  });
+});
+
+describe('making a card of a note in an editor', () => {
+  const sourceFile = { path: 'articles/source.md', extension: 'md' } as TFile;
+  const reviewCard = {
+    file: { path: 'cards/new.md', extension: 'md' },
+    data: { id: 'card-1' },
+  };
+  const LINK = '[[new|ir-hide-title]]';
+
+  /** A card manager that makes any card asked for, linked as `LINK`. */
+  function setUp() {
+    const manager = new CardManager(makePlugin(), makeRepo());
+    const createFileAndEntry = vi
+      .spyOn(
+        manager as unknown as {
+          createFileAndEntry: (text: string, file: TFile) => Promise<unknown>;
+        },
+        'createFileAndEntry'
+      )
+      .mockResolvedValue(reviewCard);
+    vi.spyOn(Obsidian, 'generateMarkdownLink').mockReturnValue(LINK);
+    return { manager, createFileAndEntry };
+  }
+
+  const letterArb = fc.constantFrom('a', 'b');
+  /** A line of the note around the card, blank or not. */
+  const noteLineArb = fc.string({
+    unit: fc.constantFrom('a', 'b', ' '),
+    maxLength: 40,
+  });
+  /**
+   * A line of the card's text, from one word to a paragraph wrapping many
+   * times on screen. Letters at either end, so trimming blank space off a
+   * selection's ends never takes it off this line.
+   */
+  const cardLineArb = fc.oneof(
+    letterArb,
+    fc
+      .tuple(
+        letterArb,
+        fc.string({ unit: fc.constantFrom('a', 'b', ' '), maxLength: 1500 }),
+        letterArb
+      )
+      .map(([first, middle, last]) => first + middle + last)
+  );
+
+  /**
+   * A note, a card's lines in it, and how the card is asked for: quick create
+   * on one line (`line`), on a selection over several (`lines`), or in
+   * selection mode (`span`). `ends` places the selection.
+   */
+  const noteArb = fc.constantFrom('line', 'lines', 'span').chain((how) =>
+    fc.record({
+      how: fc.constant(how),
+      before: fc.array(noteLineArb, { maxLength: 8 }),
+      card: fc.array(cardLineArb, {
+        minLength: how === 'lines' ? 2 : 1,
+        maxLength: how === 'line' ? 1 : 30,
+      }),
+      after: fc.array(noteLineArb, { maxLength: 8 }),
+      ends: fc.tuple(fc.nat(), fc.nat()),
+      backward: fc.boolean(),
+      scrollTop: fc.nat({ max: 100_000 }),
+      // CodeMirror's own anchoring in each measure as the embed renders
+      anchoring: fc.array(fc.integer({ min: -5000, max: 5000 }), {
+        maxLength: 5,
+      }),
+    })
+  );
+
+  const lineStart = (text: string, line: number) =>
+    text
+      .split('\n')
+      .slice(0, line)
+      .reduce((sum, l) => sum + l.length + 1, 0);
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('puts the embed in place of the card without scrolling the note as it renders, and the cursor at the start of the block after it', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        noteArb,
+        async ({
+          how,
+          before,
+          card,
+          after,
+          ends,
+          backward,
+          scrollTop,
+          anchoring,
+        }) => {
+          // The renders after it come within the hold, however slow the run
+          vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+          const { manager, createFileAndEntry } = setUp();
+          const doc = [...before, ...card, ...after].join('\n');
+          const cardFrom = lineStart(doc, before.length);
+          const cardText = card.join('\n');
+          const first = card[0];
+          const last = card[card.length - 1];
+          // The selection: in the first line and the last of the card, or
+          // within its one line
+          const from =
+            cardFrom +
+            (ends[0] % (how === 'span' ? cardText.length : first.length));
+          const to =
+            how === 'lines'
+              ? cardFrom +
+                cardText.length -
+                last.length +
+                1 +
+                (ends[1] % last.length)
+              : how === 'line'
+                ? from + 1 + (ends[1] % (cardFrom + first.length - from))
+                : from + 1 + (ends[1] % (cardFrom + cardText.length - from));
+          const editor = makeViewEditor(
+            doc,
+            backward ? [to, from] : [from, to],
+            scrollTop
+          );
+
+          await (how === 'span'
+            ? manager.createFromSelection(
+                editor as never,
+                { file: sourceFile } as never,
+                {
+                  from: cardFrom,
+                  to: cardFrom + cardText.length,
+                  text: cardText,
+                },
+                [from - cardFrom, to - cardFrom]
+              )
+            : manager.create(editor as never, { file: sourceFile } as never));
+
+          expect(createFileAndEntry).toHaveBeenCalledOnce();
+          const made = [...before, '!' + LINK, ...after].join('\n');
+          expect(editor.text).toBe(made);
+          for (const [spec] of editor.cm.dispatch.mock.calls) {
+            expect(spec.scrollIntoView ?? false).toBe(false);
+            expect(spec.effects).toBeUndefined();
+          }
+          // The block after the embed's, or the embed's own when it is the
+          // note's last; quick create on a line puts the cursor at the
+          // note's end there
+          const cursor =
+            after.length > 0
+              ? lineStart(made, before.length + 1)
+              : how === 'line'
+                ? made.length
+                : lineStart(made, before.length);
+          expect(editor.cm.state.selection.main).toEqual({
+            anchor: cursor,
+            head: cursor,
+          });
+          for (const shift of anchoring) {
+            await editor.measure(shift);
+            // To the pixel the view tells apart
+            expect(
+              Math.abs(editor.cm.scrollDOM.scrollTop - scrollTop)
+            ).toBeLessThanOrEqual(1);
+          }
+        }
+      )
     );
   });
 });

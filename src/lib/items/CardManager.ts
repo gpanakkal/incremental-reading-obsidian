@@ -409,8 +409,11 @@ export class CardManager extends ItemManager {
         { line: lineNumber, ch: end },
         imputed
       );
-      // move the cursor to the next block
-      editor.setSelection({ line: lineNumber + 1, ch: 0 });
+      // Move the cursor to the next block, so quick creates go on down the
+      // note, but without scrolling to it: the embed takes the card's place,
+      // so there is nothing new to show, while a card running past either
+      // edge of the view leaves the next block off screen
+      Obsidian.setCursorInPlace(editor, { line: lineNumber + 1, ch: 0 });
       return {
         reviewCard,
         embed,
@@ -545,7 +548,8 @@ export class CardManager extends ItemManager {
       // Off the embed's line, as `create` does, so live preview renders the
       // embed rather than revealing its source around the cursor. The span may
       // have held several lines, but the embed that replaced it holds one.
-      editor.setSelection({
+      // Without scrolling to it, as in `create`.
+      Obsidian.setCursorInPlace(editor, {
         line: Math.min(start.line + 1, editor.lastLine()),
         ch: 0,
       });

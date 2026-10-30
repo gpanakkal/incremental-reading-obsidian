@@ -16,6 +16,7 @@ import {
 import { ObsidianHelpers } from '#/lib/ObsidianHelpers';
 import type { NoteType } from '#/lib/types';
 import { Notice } from '#/test/__mocks__/obsidian';
+import { makeWindow } from '#/test/fake-window';
 import { makeItemVault } from '#/test/item-vault';
 import { noteText } from '#/test/note-text';
 import type { EditorState } from '@codemirror/state';
@@ -974,6 +975,75 @@ function makeTextVault() {
   } as unknown as App;
   return { app, texts };
 }
+
+/**
+ * An editor (see `makeEditor`, its lines 100 characters apart) with a
+ * CodeMirror view, `editor.cm`, scrolled to `scrollTop`, each line 20 tall.
+ * Its measures run only when `measure` says, CodeMirror's own anchoring
+ * moving the scroll by `shift` in them, as it does when lines change height.
+ */
+function makeViewedEditor(scrollTop = 0) {
+  let top = scrollTop;
+  let pending: {
+    read: (view: unknown) => unknown;
+    write: (measured: unknown) => void;
+  }[] = [];
+  const cm = {
+    state: { doc: { lineAt: (pos: number) => ({ from: pos - (pos % 100) }) } },
+    dispatch: vi.fn(),
+    // In a window of its own, where the hold listens for the user's input
+    scrollDOM: Object.defineProperty(
+      Object.assign(new EventTarget(), {
+        ownerDocument: { defaultView: makeWindow() },
+      }),
+      'scrollTop',
+      {
+        get: () => top,
+        set: (value: number) => {
+          top = value;
+        },
+      }
+    ) as EventTarget & {
+      scrollTop: number;
+      ownerDocument: { defaultView: ReturnType<typeof makeWindow> };
+    },
+    scaleY: 1,
+    lineBlockAt: (pos: number) => ({ top: Math.floor(pos / 100) * 20 }),
+    requestMeasure: (request: (typeof pending)[number]) => {
+      pending.push(request);
+    },
+  };
+  const replaceRange = vi.fn();
+  const setSelection = vi.fn();
+  const editor = makeEditor({ cm, replaceRange, setSelection } as never);
+  return {
+    editor,
+    cm,
+    replaceRange,
+    setSelection,
+    /** Run the measures requested, and the microtasks they queue. */
+    measure: async (shift: number) => {
+      const run = pending;
+      pending = [];
+      top += shift;
+      for (const request of run) request.write(request.read(cm));
+      await Promise.resolve();
+    },
+  };
+}
+
+const positionArb = fc.record({
+  line: fc.nat({ max: 50 }),
+  ch: fc.nat({ max: 99 }),
+});
+
+/** An editor with no CodeMirror view to dispatch to. */
+const viewlessEditorArb = fc.constantFrom<Record<string, unknown>>(
+  {},
+  { cm: undefined },
+  { cm: {} },
+  { cm: { dispatch: 'not a function' } }
+);
 
 // #endregion
 
@@ -3050,6 +3120,119 @@ describe('transcludeLink', () => {
           );
         }
       )
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// replaceRangeInPlace
+// ---------------------------------------------------------------------------
+describe('replaceRangeInPlace', () => {
+  // The renders after the change come within the hold, however slow the run
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("replaces the range through the editor's view without scrolling, the view kept where it was as the change renders", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.string(),
+        positionArb,
+        positionArb,
+        fc.nat({ max: 100_000 }),
+        fc.array(fc.integer({ min: -5000, max: 5000 }), { maxLength: 5 }),
+        async (text, a, b, scrollTop, anchoring) => {
+          const [start, end] = [a, b].sort(
+            (x, y) => x.line * 100 + x.ch - (y.line * 100 + y.ch)
+          );
+          const { editor, cm, replaceRange, measure } =
+            makeViewedEditor(scrollTop);
+
+          ObsidianHelpers.replaceRangeInPlace(editor, text, start, end);
+
+          expect(cm.dispatch).toHaveBeenCalledExactlyOnceWith({
+            changes: {
+              from: start.line * 100 + start.ch,
+              to: end.line * 100 + end.ch,
+              insert: text,
+            },
+          });
+          expect(replaceRange).not.toHaveBeenCalled();
+          for (const shift of anchoring) {
+            await measure(shift);
+            // To the pixel the view tells apart
+            expect(
+              Math.abs(cm.scrollDOM.scrollTop - scrollTop)
+            ).toBeLessThanOrEqual(1);
+          }
+        }
+      )
+    );
+  });
+
+  it('replaces the range as the editor does where it has no view to dispatch to', () => {
+    fc.assert(
+      fc.property(
+        viewlessEditorArb,
+        fc.string(),
+        positionArb,
+        positionArb,
+        (overrides, text, start, end) => {
+          const replaceRange = vi.fn();
+          const editor = makeEditor({
+            ...(overrides as Partial<Editor>),
+            replaceRange,
+          });
+
+          ObsidianHelpers.replaceRangeInPlace(editor, text, start, end);
+
+          expect(replaceRange).toHaveBeenCalledExactlyOnceWith(
+            text,
+            start,
+            end
+          );
+        }
+      )
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// setCursorInPlace
+// ---------------------------------------------------------------------------
+describe('setCursorInPlace', () => {
+  it("moves the cursor through the editor's view without scrolling to it", () => {
+    fc.assert(
+      fc.property(positionArb, (pos) => {
+        const { editor, cm, setSelection } = makeViewedEditor();
+
+        ObsidianHelpers.setCursorInPlace(editor, pos);
+
+        expect(cm.dispatch).toHaveBeenCalledExactlyOnceWith({
+          selection: { anchor: pos.line * 100 + pos.ch },
+        });
+        expect(setSelection).not.toHaveBeenCalled();
+      })
+    );
+  });
+
+  it('moves the cursor as the editor does where it has no view to dispatch to', () => {
+    fc.assert(
+      fc.property(viewlessEditorArb, positionArb, (overrides, pos) => {
+        const setSelection = vi.fn();
+        const editor = makeEditor({
+          ...(overrides as Partial<Editor>),
+          setSelection,
+        });
+
+        ObsidianHelpers.setCursorInPlace(editor, pos);
+
+        expect(setSelection).toHaveBeenCalledExactlyOnceWith(pos);
+      })
     );
   });
 });

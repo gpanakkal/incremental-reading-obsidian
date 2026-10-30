@@ -37,6 +37,7 @@ import { Markdown } from './Markdown';
 import { isEditableText, supportsFrontmatter } from './mime';
 import { isNestedEditor } from './nested-editor';
 import { notify, type NotifyOptions } from './notices';
+import { holdLine } from './scroll-hold';
 import { parseSourceLink } from './source-link';
 import type { FrontMatterUpdates, NoteType, PluginFrontMatter } from './types';
 import { binarySearch, generateId } from './utils';
@@ -278,8 +279,62 @@ export class ObsidianHelpers {
   }
 
   /**
+   * `editor`'s CodeMirror view, or null when it has none to dispatch to.
+   * `editor.cm` is undocumented Obsidian API, so its shape is checked rather
+   * than assumed.
+   */
+  private static viewOf(editor: Editor): EditorView | null {
+    const cm = editor.cm as unknown as Partial<EditorView> | undefined;
+    return typeof cm?.dispatch === 'function' ? (cm as EditorView) : null;
+  }
+
+  /**
+   * Replace `start`–`end` with `text`, as `editor.replaceRange` does, but
+   * leave the editor scrolled where it is, with the line the change starts on
+   * kept in place on screen while the change renders (see `holdLine`).
+   *
+   * Obsidian's `replaceRange`, `setSelection` and `transaction` all dispatch
+   * with `scrollIntoView`, which scrolls the selection, wherever the change
+   * left it, into view: a change starting above the top of the view scrolls
+   * up to its start, and the text the user was reading jumps away. Without a
+   * view to dispatch to (see {@link viewOf}), this is `replaceRange`.
+   */
+  static replaceRangeInPlace(
+    editor: Editor,
+    text: string,
+    start: EditorPosition,
+    end: EditorPosition
+  ) {
+    const view = ObsidianHelpers.viewOf(editor);
+    if (!view) {
+      editor.replaceRange(text, start, end);
+      return;
+    }
+    const from = editor.posToOffset(start);
+    const hold = holdLine(view, from);
+    view.dispatch({
+      changes: { from, to: editor.posToOffset(end), insert: text },
+    });
+    hold();
+  }
+
+  /**
+   * Put the cursor at `pos`, as `editor.setSelection(pos)` does, but leave
+   * the editor scrolled where it is, though the cursor be off screen (see
+   * {@link replaceRangeInPlace}).
+   */
+  static setCursorInPlace(editor: Editor, pos: EditorPosition) {
+    const view = ObsidianHelpers.viewOf(editor);
+    if (!view) {
+      editor.setSelection(pos);
+      return;
+    }
+    view.dispatch({ selection: { anchor: editor.posToOffset(pos) } });
+  }
+
+  /**
    * Put an embed of `link` in place of `start`–`end`, with `before` and
-   * `after` around it.
+   * `after` around it, leaving the editor scrolled where it is.
    * @returns the embed, without `before` and `after`
    */
   static transcludeLink(
@@ -291,7 +346,12 @@ export class ObsidianHelpers {
     after = ''
   ): string {
     const embed = `!${link}`;
-    editor.replaceRange(`${before}${embed}${after}`, start, end);
+    ObsidianHelpers.replaceRangeInPlace(
+      editor,
+      `${before}${embed}${after}`,
+      start,
+      end
+    );
     return embed;
   }
 

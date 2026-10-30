@@ -2595,3 +2595,89 @@ test.describe('Settings tab on mobile', () => {
     expect(await titleBarRows()).toEqual({ obsidian: false, review: false });
   });
 });
+
+test.describe('Making a card', () => {
+  const FOLLOWER = 'The text right after the card stays put.';
+
+  /**
+   * A long note with a paragraph many rows tall, a word in it selected, and
+   * the note scrolled so that the paragraph starts `above` pixels over the
+   * top of the view, as it is when the user has read down into it.
+   *
+   * Unofficial: `window.app`, `editor.cm`.
+   */
+  async function openScrolledIntoParagraph(above: number) {
+    const sentence =
+      'This sentence of the long paragraph runs on to wrap across the editor.';
+    const paragraph = Array.from(
+      { length: 50 },
+      (_, i) => `${i} ${sentence}`
+    ).join(' ');
+    const filler = Array.from(
+      { length: 60 },
+      (_, i) => `Filler paragraph ${i}.`
+    ).join('\n\n');
+    await window.evaluate(
+      async ({ text, line, answer, above }) => {
+        type View = {
+          scrollDOM: HTMLElement;
+          documentTop: number;
+          state: { doc: { line: (n: number) => { from: number } } };
+          lineBlockAt: (pos: number) => { top: number };
+        };
+        const { app } = window as unknown as { app: App };
+        const file = await app.vault.create('Long note.md', text);
+        await app.workspace.getLeaf('tab').openFile(file, { active: true });
+        const editor = app.workspace.activeEditor!.editor!;
+        // The answer: a word in the paragraph's half on screen
+        editor.setSelection({ line, ch: answer }, { line, ch: answer + 2 });
+        const cm = (editor as unknown as { cm: View }).cm;
+        const frame = () =>
+          new Promise((resolve) => requestAnimationFrame(resolve));
+        // Again once the rows scrolled to have been measured
+        for (let i = 0; i < 4; i++) {
+          await frame();
+          const top =
+            cm.lineBlockAt(cm.state.doc.line(line + 1).from).top +
+            cm.documentTop -
+            cm.scrollDOM.getBoundingClientRect().top;
+          cm.scrollDOM.scrollTop += top + above;
+          await frame();
+        }
+      },
+      {
+        text: `${filler}\n\n${paragraph}\n\n${FOLLOWER}\n\n${filler}\n`,
+        line: 120,
+        answer: paragraph.indexOf('40 '),
+        above,
+      }
+    );
+  }
+
+  test('leaves the text after a card where it was on screen, though the card started above the view', async () => {
+    await openScrolledIntoParagraph(400);
+    const follower = window
+      .locator('.workspace-leaf.mod-active .cm-line')
+      .filter({ hasText: FOLLOWER });
+    const top = () => follower.evaluate((el) => el.getBoundingClientRect().top);
+    const before = await top();
+
+    await executeCommandById(window, 'incremental-reading:create-card');
+
+    // Once the embed has its text, at about the height the paragraph had
+    const embed = window.locator(
+      '.workspace-leaf.mod-active .cm-content .internal-embed.is-loaded'
+    );
+    await expect
+      .poll(() => embed.evaluate((el) => el.getBoundingClientRect().height))
+      .toBeGreaterThan(400);
+    await window.evaluate(
+      () =>
+        new Promise((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(resolve))
+        )
+    );
+    // Within what the embed's height differs from the text it replaced by
+    expect(Math.abs((await top()) - before)).toBeLessThan(100);
+  });
+});
