@@ -220,6 +220,8 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
     private file: TFile | null;
     private highlightsLoaded: boolean = false;
     private persistTimeout: number | null = null;
+    // The save `persistTimeout` waits to make, for destroy() to make at once
+    private pendingPersist: (() => void) | null = null;
     private isReviewInterface: boolean = false;
     // keep track of if the ViewPlugin was destroyed
     private destroyed: boolean = false;
@@ -331,7 +333,8 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
         // other plugins'. Only a sync (see `isSync`) is left alone.
         if (!this.isReviewInterface && update.transactions.some(isSync)) {
           // Standard editor: cross-pane sync → reload from DB.
-          // The other pane (which owns the edit) has already persisted.
+          // The other pane (which owns the edit) has persisted its offsets,
+          // or holds them back from this reload until it does.
           // Until the reload paints them anew, the painted ones move with the
           // text: left in the old document's positions, they could lie past
           // the new one's end, where CodeMirror throws on the next update.
@@ -379,6 +382,10 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
         // In regular Obsidian editor, we handle persistence here with debouncing.
         // In the review interface, ReviewItem.saveNote() handles persistence.
         if (!this.isReviewInterface) {
+          // Until saved, the tracker's offsets are newer than the database's,
+          // and a read of the note's highlights meanwhile must keep them:
+          // another pane of this note reads them on each sync of this edit
+          reviewManager.snippets.offsetsPending(this.file.path);
           const highlights = reviewManager.snippets.offsetTracker.getHighlights(
             this.file.path
           );
@@ -431,22 +438,36 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
       if (this.persistTimeout) {
         window.clearTimeout(this.persistTimeout);
       }
-      this.persistTimeout = window.setTimeout(() => {
-        void this.persistHighlights(reviewManager, highlights);
-      }, 2000); // 2 second debounce
+      this.pendingPersist = () => {
+        this.persistTimeout = null;
+        this.pendingPersist = null;
+        // A refused write keeps them held back, for `persistPendingOffsets`
+        this.persistHighlights(reviewManager, highlights).catch(
+          (error: unknown) => console.error(error)
+        );
+      };
+      this.persistTimeout = window.setTimeout(this.pendingPersist, 2000); // 2 second debounce
     }
 
     private async persistHighlights(
       reviewManager: ReviewManager,
       highlights: SnippetHighlight[]
     ) {
-      for (const h of highlights) {
+      // As they are now: the tracker moves its highlights in place, and an
+      // edit made while these are being written has to stay held back
+      const written = highlights.map(({ id, start_offset, end_offset }) => ({
+        id,
+        start_offset,
+        end_offset,
+      }));
+      for (const h of written) {
         await reviewManager.updateSnippetOffsets(
           h.id,
           h.start_offset,
           h.end_offset
         );
       }
+      reviewManager.snippets.offsetsSaved(written);
     }
 
     private buildDecorations(
@@ -504,10 +525,14 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
         this.highlightsChangedRef = null;
       }
 
+      // Saved now rather than dropped: an editor closed within the debounce
+      // would otherwise leave the database with offsets older than its note,
+      // and the tracker holding them back for the rest of the session
       if (this.persistTimeout) {
         window.clearTimeout(this.persistTimeout);
         this.persistTimeout = null;
       }
+      this.pendingPersist?.();
     }
   },
   {

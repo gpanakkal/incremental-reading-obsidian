@@ -62,7 +62,8 @@ export class SnippetManager extends ItemManager {
 
   /**
    * The snippets whose offsets the tracker holds newer than the database
-   * does: the review editor saved its note while writing them was refused.
+   * does: the review editor saved its note while writing them was refused,
+   * or a note editor moved them and hasn't saved them yet.
    * See {@link offsetsPending}.
    */
   #pendingOffsets = new Set<string>();
@@ -74,10 +75,12 @@ export class SnippetManager extends ItemManager {
 
   /**
    * Hold back the offsets the tracker has for the highlights of `path`,
-   * whose note was saved without them, to be written by
-   * {@link persistPendingOffsets} once the database takes writes again.
-   * Until then, they are what the note's highlights read from, as the
-   * database's are older than its text.
+   * whose note was saved without them or was edited since they were last
+   * written, to be written by {@link persistPendingOffsets} once the database
+   * takes writes again, or by the editor that moved them. Until then, they are
+   * what the note's highlights read from, as the database's are older than
+   * its text: another pane of the note, which reads them again on each sync of
+   * the edit, would otherwise put back where they were before it.
    */
   offsetsPending(path: string) {
     for (const { id } of this.offsetTracker.getHighlights(path)) {
@@ -96,12 +99,40 @@ export class SnippetManager extends ItemManager {
       .getTrackedPaths()
       .flatMap((path) => this.offsetTracker.getHighlights(path))
       .filter(({ id }) => this.#pendingOffsets.has(id));
+    // As they are now: the tracker moves its highlights in place
+    const written = pending.map(({ id, start_offset, end_offset }) => ({
+      id,
+      start_offset,
+      end_offset,
+    }));
     try {
-      await this.updateManyOffsets(pending);
+      await this.updateManyOffsets(written);
       // Only those written: more can be held back while this writes
-      for (const { id } of pending) this.#pendingOffsets.delete(id);
+      this.offsetsSaved(written);
     } catch (error) {
       console.error(error);
+    }
+  }
+
+  /**
+   * Stop holding back (see {@link offsetsPending}) the offsets `saved`, just
+   * written to the database, but for those the tracker has moved since: an
+   * edit made while they were being written, whose offsets the next save
+   * writes, keeps them held back until then.
+   */
+  offsetsSaved(saved: readonly StoredOffsets[]) {
+    const tracked = new Map(
+      this.offsetTracker
+        .getTrackedPaths()
+        .flatMap((path) => this.offsetTracker.getHighlights(path))
+        .map((h) => [h.id, h])
+    );
+    for (const { id, start_offset, end_offset } of saved) {
+      const now = tracked.get(id);
+      const movedSince =
+        !!now &&
+        (now.start_offset !== start_offset || now.end_offset !== end_offset);
+      if (!movedSince) this.#pendingOffsets.delete(id);
     }
   }
 

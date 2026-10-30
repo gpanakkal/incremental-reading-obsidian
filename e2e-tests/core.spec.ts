@@ -1777,6 +1777,135 @@ test.describe('Highlights past the note’s end', () => {
   });
 });
 
+test.describe('Highlights while typing', () => {
+  const SOURCE = 'sources/Security Principles';
+  const TEXT = 'Introduce ISO/IEC 19249.';
+
+  /**
+   * Put the cursor at the start of the line above {@link TEXT}'s, so what is
+   * typed lands above its highlight with both still in view.
+   *
+   * Unofficial: `window.app`.
+   */
+  async function cursorAboveText() {
+    await window.evaluate((text) => {
+      const editor = (window as unknown as { app: App }).app.workspace
+        .activeEditor!.editor!;
+      const value = editor.getValue();
+      const lineAbove = value.lastIndexOf('\n', value.indexOf(text) - 2) + 1;
+      editor.setSelection(editor.offsetToPos(lineAbove));
+      editor.focus();
+    }, TEXT);
+  }
+
+  /**
+   * Paste `text` at the cursor, as the editor is handed a paste from the
+   * clipboard: a paste event carrying it. (Ctrl+V after writing the system
+   * clipboard pasted nothing in a headless run.)
+   *
+   * Unofficial: `window.app`, `Editor.cm`.
+   */
+  async function pasteIntoEditor(text: string) {
+    await window.evaluate((text) => {
+      const editor = (window as unknown as { app: App }).app.workspace
+        .activeEditor!.editor! as unknown as {
+        cm: { contentDOM: HTMLElement };
+      };
+      const clipboardData = new DataTransfer();
+      clipboardData.setData('text/plain', text);
+      editor.cm.contentDOM.dispatchEvent(
+        new ClipboardEvent('paste', {
+          clipboardData,
+          bubbles: true,
+          cancelable: true,
+        })
+      );
+    }, text);
+  }
+
+  /**
+   * Check the edit just made went in above the highlight, and that the
+   * highlight still paints the snippet's text in the pane typed into.
+   */
+  async function expectStillOnText(typed: string) {
+    await expect
+      .poll(async () => {
+        const { editorText } = await readSnippetState(window, `${SOURCE}.md`);
+        const typedAt = editorText?.indexOf(typed) ?? -1;
+        // In the editor only: a reading view shown once keeps its own
+        // highlights in the leaf, hidden
+        const painted = await window.evaluate(() =>
+          Array.from(
+            document.querySelectorAll(
+              '.workspace-leaf.mod-active .cm-content .ir-snippet-highlight'
+            )
+          )
+            .map((el) => el.textContent)
+            .join('')
+        );
+        return {
+          typedAbove:
+            typedAt >= 0 && typedAt < (editorText?.indexOf(TEXT) ?? -1),
+          painted,
+        };
+      })
+      .toEqual({ typedAbove: true, painted: TEXT });
+  }
+
+  for (const sourceMode of [false, true]) {
+    test(`move with what is typed or pasted above them in ${sourceMode ? 'source mode' : 'live preview'}, with the note open in another pane too`, async () => {
+      await openNote(window, SOURCE);
+      await scrollToText(window, TEXT);
+      await window.evaluate((text) => {
+        const editor = (window as unknown as { app: App }).app.workspace
+          .activeEditor!.editor!;
+        const at = editor.getValue().indexOf(text);
+        editor.setSelection(
+          editor.offsetToPos(at),
+          editor.offsetToPos(at + text.length)
+        );
+      }, TEXT);
+      await executeCommandById(window, 'incremental-reading:extract-selection');
+      await expectExtractSettled(window, `${SOURCE}.md`, 1);
+      // Every other pane of a note reads its highlights again on each edit
+      await executeCommandById(window, 'workspace:split-vertical');
+      if (sourceMode) {
+        await executeCommandById(window, 'editor:toggle-source');
+      }
+      await scrollToText(window, TEXT);
+
+      await cursorAboveText();
+      await window.keyboard.type('Zz');
+      await expectStillOnText('Zz');
+
+      await pasteIntoEditor('Pasted line\n');
+      await expectStillOnText('Pasted line');
+
+      await window.keyboard.type('Yy');
+      await expectStillOnText('Yy');
+
+      // Once the debounced save has written them, a fresh read of the
+      // database (reading view, then back) still finds them on the text
+      await expect
+        .poll(async () => {
+          const { rows, tracked } = await readSnippetState(
+            window,
+            `${SOURCE}.md`
+          );
+          return rows.every(
+            ({ id, start_offset, end_offset }) =>
+              tracked[id]?.[0] === start_offset &&
+              tracked[id]?.[1] === end_offset
+          );
+        })
+        .toBe(true);
+      await executeCommandById(window, 'markdown:toggle-preview');
+      await executeCommandById(window, 'markdown:toggle-preview');
+      await expectStillOnText('Yy');
+    });
+  }
+});
+
 test.describe('Frontmatter', () => {
   /** The note the import writes `ir-id` and `tags` into, as a quick-switcher prefix. */
   const SOURCE_NOTE =

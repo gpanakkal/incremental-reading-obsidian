@@ -727,6 +727,34 @@ const pendingCaseArb = fc
     })
   );
 
+/**
+ * A {@link pendingCaseArb} case, and what became of each held-back highlight
+ * after its offsets were written: left alone, moved elsewhere in the tracker
+ * (to `to`, never where it was), or dropped from it.
+ */
+const savedCaseArb = pendingCaseArb.chain((pending) =>
+  fc.record({
+    pending: fc.constant(pending),
+    fates: fc.tuple(
+      ...pending.tracked.map((offsets) =>
+        fc.oneof(
+          fc.constant({ fate: 'kept' as const }),
+          fc.constant({ fate: 'dropped' as const }),
+          // Either end alone, or both
+          fc
+            .oneof(
+              fc.tuple(fc.nat(500), fc.constant(offsets[1])),
+              fc.tuple(fc.constant(offsets[0]), fc.nat(500)),
+              fc.tuple(fc.nat(500), fc.nat(500))
+            )
+            .filter(([s, e]) => s !== offsets[0] || e !== offsets[1])
+            .map((to) => ({ fate: 'moved' as const, to }))
+        )
+      )
+    ),
+  })
+);
+
 // #endregion
 
 describe('rowToBase', () => {
@@ -4668,6 +4696,90 @@ describe('offsets held back while saving is paused', () => {
       }),
       { numRuns: 20 }
     );
+  });
+});
+
+describe('offsetsSaved', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('stops holding back those the tracker still has as saved, but not those it moved or dropped since', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        savedCaseArb,
+        async ({ pending: { ids, stored, tracked }, fates }) => {
+          vi.restoreAllMocks();
+          const { vault, manager } = await wirePending(ids, stored, tracked);
+          const saved = manager.offsetTracker
+            .getHighlights(PENDING_ARTICLE)
+            .map(({ id, start_offset, end_offset }) => ({
+              id,
+              start_offset,
+              end_offset,
+            }));
+          const highlights =
+            manager.offsetTracker.getHighlights(PENDING_ARTICLE);
+          manager.offsetTracker.loadHighlights(
+            PENDING_ARTICLE,
+            highlights.flatMap((h, i) => {
+              const fate = fates[i];
+              if (fate.fate === 'dropped') return [];
+              if (fate.fate === 'kept') return [h];
+              return [
+                { ...h, start_offset: fate.to[0], end_offset: fate.to[1] },
+              ];
+            })
+          );
+
+          manager.offsetsSaved(saved);
+          // The database still has `stored`: as another device's copy brings
+          await manager.getHighlights(vault.files.get(PENDING_ARTICLE)!);
+
+          expect(
+            manager.offsetTracker
+              .getHighlights(PENDING_ARTICLE)
+              .map((h) => [h.start_offset, h.end_offset])
+          ).toEqual(
+            fates.map((fate, i) =>
+              fate.fate === 'moved' ? fate.to : stored[i]
+            )
+          );
+        }
+      ),
+      { numRuns: 30 }
+    );
+  });
+
+  it('keeps holding back those the tracker moved while persistPendingOffsets wrote them, until written', async () => {
+    const { vault, repo, manager, offsets } = await wirePending(
+      ['a'],
+      [[1, 2]],
+      [[3, 4]]
+    );
+    const transaction = repo.transaction.bind(
+      repo
+    ) as TestRepository['transaction'];
+    vi.spyOn(repo, 'transaction').mockImplementationOnce(async (work) => {
+      const result = await transaction(work);
+      // As an edit made meanwhile moves it, in place
+      const [a] = manager.offsetTracker.getHighlights(PENDING_ARTICLE);
+      a.start_offset = 7;
+      a.end_offset = 8;
+      return result;
+    });
+
+    await manager.persistPendingOffsets();
+    expect(offsets()).toEqual([[3, 4]]);
+    await manager.getHighlights(vault.files.get(PENDING_ARTICLE)!);
+    expect(
+      manager.offsetTracker
+        .getHighlights(PENDING_ARTICLE)
+        .map((h) => [h.start_offset, h.end_offset])
+    ).toEqual([[7, 8]]);
+
+    await manager.persistPendingOffsets();
+    expect(offsets()).toEqual([[7, 8]]);
   });
 });
 

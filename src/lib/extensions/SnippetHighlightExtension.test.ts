@@ -26,7 +26,15 @@ import {
   type App,
   type TFile,
 } from 'obsidian';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+  type Mock,
+} from 'vitest';
 import {
   claimMiddleMousedown,
   isExternalSync,
@@ -63,12 +71,18 @@ function makeHighlight(
   };
 }
 
+type SavedOffsets = { id: string; start_offset: number; end_offset: number };
+
 type FakeReviewManager = {
-  getSnippetHighlights: ReturnType<typeof vi.fn>;
-  updateSnippetOffsets: ReturnType<typeof vi.fn>;
+  getSnippetHighlights: Mock<(file: { path: string }) => Promise<unknown>>;
+  updateSnippetOffsets: Mock<
+    (id: string, start: number, end: number) => Promise<unknown>
+  >;
   snippets: {
     offsetTracker: SnippetOffsetTracker;
     getItemType: (file: TFile) => Promise<NoteType | null>;
+    offsetsPending: Mock<(path: string) => void>;
+    offsetsSaved: Mock<(saved: SavedOffsets[]) => void>;
   };
 };
 
@@ -82,6 +96,8 @@ function makeReviewManager(filePath = FILE_PATH): FakeReviewManager {
       offsetTracker: tracker,
       // An item layer with no rows, typing a note by its tags alone
       getItemType: (file) => Obsidian.getNoteType(file, {} as App),
+      offsetsPending: vi.fn(),
+      offsetsSaved: vi.fn(),
     },
   };
 }
@@ -557,6 +573,78 @@ function expectRelinkNotice(ref: string, kind: 'card' | 'snippet') {
   const words = message.replace(ref, '').split(/\W+/);
   expect(words).toContain(kind);
   expect(words).not.toContain(kind === 'card' ? 'snippet' : 'card');
+}
+
+/**
+ * Gives `rm` a database holding each tracked highlight's offsets as they are
+ * now, which `updateSnippetOffsets` writes to and `getSnippetHighlights`
+ * reads the tracker's from again, as the real ones do, but for those
+ * `offsetsPending` holds back: `SnippetManager`'s hold, in small. A saved
+ * one stops being held back unless the tracker has moved it since.
+ * @returns the offsets the database holds, by id
+ */
+function storeOffsets(rm: FakeReviewManager) {
+  const tracker = rm.snippets.offsetTracker;
+  const tracked = (id: string) =>
+    tracker
+      .getTrackedPaths()
+      .flatMap((path) => tracker.getHighlights(path))
+      .find((h) => h.id === id);
+  const stored = new Map(
+    tracker
+      .getHighlights(FILE_PATH)
+      .map((h) => [h.id, [h.start_offset, h.end_offset] as const])
+  );
+  const held = new Set<string>();
+  rm.snippets.offsetsPending.mockImplementation((path: string) => {
+    for (const { id } of tracker.getHighlights(path)) held.add(id);
+  });
+  rm.snippets.offsetsSaved.mockImplementation((saved: SavedOffsets[]) => {
+    for (const { id, start_offset, end_offset } of saved) {
+      const now = tracked(id);
+      if (now?.start_offset === start_offset && now.end_offset === end_offset) {
+        held.delete(id);
+      }
+    }
+  });
+  rm.updateSnippetOffsets.mockImplementation(
+    async (id: string, start: number, end: number) => {
+      stored.set(id, [start, end]);
+    }
+  );
+  rm.getSnippetHighlights.mockImplementation(async (file: { path: string }) => {
+    tracker.loadHighlights(
+      file.path,
+      tracker.getHighlights(file.path).map((h) => {
+        const [start_offset, end_offset] = stored.get(h.id) ?? [];
+        return held.has(h.id) || start_offset === undefined
+          ? h
+          : { ...h, start_offset, end_offset: end_offset! };
+      })
+    );
+  });
+  return stored;
+}
+
+/**
+ * Two standard editors open on the same note, as two panes or tabs of it are,
+ * sharing one review manager and its tracker, which holds `highlights`; and
+ * the database behind them (see {@link storeOffsets}).
+ */
+function makeTwoPanes(doc: string, highlights: SnippetHighlight[]) {
+  const rm = makeReviewManager();
+  rm.snippets.offsetTracker.loadHighlights(FILE_PATH, highlights);
+  stubFileInfo(FILE_PATH, 'article');
+  vi.spyOn(Obsidian, 'getBodyStartOffset').mockRestore();
+  // The constructors' own loads never settle, so they overwrite nothing
+  rm.getSnippetHighlights.mockReturnValue(new Promise(() => {}));
+  const views = [makeView(doc, makePlugin(rm)), makeView(doc, makePlugin(rm))];
+  for (const view of views) {
+    view.dispatch({ effects: refreshHighlightsEffect.of(null) });
+  }
+  rm.getSnippetHighlights.mockReset();
+  const stored = storeOffsets(rm);
+  return { editing: views[0], other: views[1], rm, stored };
 }
 
 // #endregion
@@ -1872,22 +1960,61 @@ describe('schedulePersist and destroy', () => {
     view.destroy();
   });
 
-  it('destroy() cancels the pending persist timer', async () => {
+  it('destroy() saves the pending offsets at once, and only once', async () => {
     vi.useFakeTimers();
     const rm = makeReviewManager();
     rm.snippets.offsetTracker.loadHighlights(FILE_PATH, [
-      makeHighlight({ id: 'h1', start_offset: 0, end_offset: 5 }),
+      makeHighlight({ id: 'h1', start_offset: 3, end_offset: 5 }),
     ]);
     const view = makeLoadedView(rm, false);
 
-    view.dispatch({ changes: { from: 5, insert: 'X' }, userEvent: 'input' });
-    view.destroy(); // cancels the timer
-
-    vi.advanceTimersByTime(5000);
+    view.dispatch({ changes: { from: 0, insert: 'X' }, userEvent: 'input' });
+    view.destroy();
     await Promise.resolve();
+    expect(rm.updateSnippetOffsets.mock.calls).toEqual([['h1', 4, 6]]);
+    expect(rm.snippets.offsetsSaved).toHaveBeenCalledWith([
+      { id: 'h1', start_offset: 4, end_offset: 6 },
+    ]);
 
-    // Timer was cancelled, so updateSnippetOffsets should not have been called
-    expect(rm.updateSnippetOffsets).not.toHaveBeenCalled();
+    // Where the debounce would have saved them
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(rm.updateSnippetOffsets).toHaveBeenCalledTimes(1);
+  });
+
+  it('logs a refused save, and leaves the offsets held back', async () => {
+    vi.useFakeTimers();
+    const error = vi.spyOn(console, 'error').mockReturnValue(undefined);
+    const refusal = new Error('Saving is paused.');
+    const rm = makeReviewManager();
+    rm.updateSnippetOffsets.mockRejectedValue(refusal);
+    rm.snippets.offsetTracker.loadHighlights(FILE_PATH, [
+      makeHighlight({ id: 'h1', start_offset: 3, end_offset: 5 }),
+    ]);
+    const view = makeLoadedView(rm, false);
+
+    view.dispatch({ changes: { from: 0, insert: 'X' }, userEvent: 'input' });
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(error).toHaveBeenCalledWith(refusal);
+    expect(rm.snippets.offsetsPending).toHaveBeenCalledWith(FILE_PATH);
+    expect(rm.snippets.offsetsSaved).not.toHaveBeenCalled();
+    view.destroy();
+  });
+
+  it('destroy() saves nothing once the pending offsets are saved', async () => {
+    vi.useFakeTimers();
+    const rm = makeReviewManager();
+    rm.snippets.offsetTracker.loadHighlights(FILE_PATH, [
+      makeHighlight({ id: 'h1', start_offset: 3, end_offset: 5 }),
+    ]);
+    const view = makeLoadedView(rm, false);
+
+    view.dispatch({ changes: { from: 0, insert: 'X' }, userEvent: 'input' });
+    await vi.advanceTimersByTimeAsync(2000);
+    view.destroy();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(rm.updateSnippetOffsets).toHaveBeenCalledTimes(1);
   });
 
   it('destroy() does not throw when no timer is pending', () => {
@@ -3453,4 +3580,338 @@ describe("in an editor nested in a note's, as a table cell's is", () => {
       view.destroy();
     }
   );
+});
+
+describe('update() — offsets an edit moved, until they are saved', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  /** The text each of `view`'s painted highlights covers. */
+  const paintedText = (view: EditorView) =>
+    paintedRanges(view).map(([from, to]) =>
+      view.state.doc.sliceString(from, to)
+    );
+
+  it('keeps them when another pane of the note syncs the edit and reads the highlights again', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        docHighlightAndDisjointEdit,
+        mappedUserEvent,
+        async (
+          { doc, text, highlight, change: [from, to], insert },
+          userEvent
+        ) => {
+          const { editing, other, rm } = makeTwoPanes(doc, [
+            makeHighlight({ id: 's', ...highlight }),
+          ]);
+          try {
+            editing.dispatch({ changes: { from, to, insert }, userEvent });
+            // As Obsidian hands every other pane of the note the edit, which
+            // then reads the note's highlights from the database again
+            other.dispatch({ changes: { from, to, insert }, userEvent: 'set' });
+            await flushAsync();
+            // The next keystroke repaints the editing pane from the tracker
+            editing.dispatch({ selection: { anchor: 0 } });
+
+            const next = editing.state.doc.toString();
+            expect(highlightedText(rm, next)).toEqual([text]);
+            expect(paintedText(editing)).toEqual([text]);
+            expect(paintedText(other)).toEqual(paintedText(editing));
+          } finally {
+            editing.destroy();
+            other.destroy();
+          }
+        }
+      ),
+      { numRuns: 40 }
+    );
+  });
+
+  describe('saving', () => {
+    const DOC = 'intro. snippet text here';
+    const TEXT = 'snippet text';
+
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    });
+
+    const setUp = () => {
+      const panes = makeTwoPanes(DOC, [
+        makeHighlight({
+          id: 's',
+          start_offset: DOC.indexOf(TEXT),
+          end_offset: DOC.indexOf(TEXT) + TEXT.length,
+        }),
+      ]);
+      const read = () => rm.getSnippetHighlights({ path: FILE_PATH });
+      const { rm } = panes;
+      return { ...panes, read };
+    };
+
+    it('stops holding them back once written, so the next read takes the stored ones', async () => {
+      const { editing, rm, stored, read } = setUp();
+      try {
+        editing.dispatch({ changes: { from: 0, insert: 'ab' } });
+        await vi.advanceTimersByTimeAsync(2000);
+        expect(stored.get('s')).toEqual([9, 21]);
+
+        // As another device's copy of the database brings
+        stored.set('s', [3, 5]);
+        await read();
+
+        expect(offsetsOf(rm)).toEqual({ s: [3, 5] });
+      } finally {
+        editing.destroy();
+      }
+    });
+
+    it('keeps holding back those an edit moved while they were being written', async () => {
+      const { editing, rm, stored, read } = setUp();
+      let finishWrite = () => {};
+      rm.updateSnippetOffsets.mockImplementationOnce(
+        async (id: string, start: number, end: number) => {
+          await new Promise<void>((resolve) => (finishWrite = resolve));
+          stored.set(id, [start, end]);
+        }
+      );
+      try {
+        editing.dispatch({ changes: { from: 0, insert: 'ab' } });
+        await vi.advanceTimersByTimeAsync(2000);
+        editing.dispatch({ changes: { from: 0, insert: 'c' } });
+        finishWrite();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(stored.get('s')).toEqual([9, 21]);
+
+        await read();
+
+        expect(highlightedText(rm, editing.state.doc.toString())).toEqual([
+          TEXT,
+        ]);
+      } finally {
+        editing.destroy();
+      }
+    });
+  });
+});
+
+describe('two panes of a note, over the real item layer and database', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  /** The text of each snippet's highlight, and nothing else, in order. */
+  const MARKS = ['[one]', '[two]'] as const;
+  const IDS = ['snip-1', 'snip-2'] as const;
+
+  /** Text an edit may type: none of a mark's characters. */
+  const fillerArb = fc.string({
+    unit: fc.constantFrom('a', 'b', ' ', '\n'),
+    maxLength: 12,
+  });
+
+  type Step =
+    | {
+        kind: 'edit';
+        pane: 0 | 1;
+        at: number;
+        length: number;
+        insert: string;
+      }
+    | { kind: 'settle' | 'wait' | 'read' | 'refuse' | 'resume' };
+
+  const stepArb: fc.Arbitrary<Step> = fc.oneof(
+    {
+      arbitrary: fc.record({
+        kind: fc.constant('edit' as const),
+        pane: fc.constantFrom(0 as const, 1 as const),
+        at: fc.nat(),
+        length: fc.nat(4),
+        insert: fillerArb,
+      }),
+      weight: 4,
+    },
+    {
+      arbitrary: fc.constantFrom(
+        { kind: 'settle' as const },
+        { kind: 'wait' as const },
+        { kind: 'read' as const },
+        { kind: 'refuse' as const },
+        { kind: 'resume' as const }
+      ),
+      weight: 3,
+    }
+  );
+
+  /**
+   * Where each mark is in `doc`, as body offsets: what its snippet's offsets
+   * are once mapped through every edit, as no edit touches a mark.
+   */
+  const marked = (doc: string) =>
+    MARKS.map((mark) => [doc.indexOf(mark), doc.indexOf(mark) + mark.length]);
+
+  /**
+   * A note at {@link FILE_PATH} whose body is `doc`, an article with a
+   * snippet on each of {@link MARKS}, open in two standard editors over one
+   * real `SnippetManager` and database.
+   */
+  async function wireTwoPanes(doc: string) {
+    const vault = makeItemVault({ [FILE_PATH]: { 'ir-id': 'note-id' } });
+    const repo = await TestRepository.create();
+    insertItemAt(repo, 'article', {
+      id: 'note-id',
+      reference: FILE_PATH,
+      deleted: false,
+    });
+    marked(doc).forEach(([start, end], i) => {
+      repo.mutate(
+        `INSERT INTO snippet (id, reference, due, interval, priority, parent, start_offset, end_offset) VALUES ($1, $2, 0, 1, 30, 'note-id', $3, $4)`,
+        [IDS[i], `s/${i}.md`, start, end]
+      );
+    });
+    const snippets = new SnippetManager(
+      { app: vault.app, settings: {} } as never,
+      repo
+    );
+    const rm = {
+      getSnippetHighlights: vi.fn((file: TFile) =>
+        snippets.getHighlights(file)
+      ),
+      updateSnippetOffsets: vi.fn((id: string, start: number, end: number) =>
+        snippets.updateOffsets(id, start, end)
+      ),
+      snippets,
+    };
+    vi.spyOn(Obsidian, 'getFileInfoFromState').mockReturnValue({
+      info: { file: vault.files.get(FILE_PATH), app: vault.app } as never,
+      editorView: null,
+    });
+    const panes = [
+      makeView(doc, makePlugin(rm as never)),
+      makeView(doc, makePlugin(rm as never)),
+    ] as const;
+    await vi.advanceTimersByTimeAsync(0);
+    const file = vault.files.get(FILE_PATH)!;
+    const stored = () =>
+      (
+        repo.query(
+          'SELECT start_offset, end_offset FROM snippet ORDER BY id'
+        ) as { start_offset: number; end_offset: number }[]
+      ).map((r) => [r.start_offset, r.end_offset]);
+    const tracked = () =>
+      snippets.offsetTracker
+        .getHighlights(FILE_PATH)
+        .slice()
+        .sort((a, b) => a.id.localeCompare(b.id))
+        .map((h) => [h.start_offset, h.end_offset]);
+    return { repo, snippets, panes, file, stored, tracked };
+  }
+
+  /**
+   * `step`'s edit as a change to `doc`, clear of every mark, or null where
+   * it would touch one: a change at a mark's edge may or may not take it in,
+   * which is the mapping's own business and tested elsewhere.
+   */
+  function changeFor(
+    doc: string,
+    { at, length, insert }: { at: number; length: number; insert: string }
+  ) {
+    const from = at % (doc.length + 1);
+    const to = Math.min(doc.length, from + length);
+    const touches = marked(doc).some(([s, e]) => from <= e && to >= s);
+    return touches ? null : { from, to, insert };
+  }
+
+  /** The text each of `view`'s painted highlights covers, in order. */
+  const paintedText = (view: EditorView) =>
+    paintedRanges(view).map(([from, to]) =>
+      view.state.doc.sliceString(from, to)
+    );
+
+  it('track the edits made in either, whatever reads the database meanwhile, and stop holding them back once they are written', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.tuple(fillerArb, fillerArb, fillerArb),
+        fc.array(stepArb, { maxLength: 30 }),
+        async ([before, between, after], steps) => {
+          vi.restoreAllMocks();
+          vi.spyOn(console, 'error').mockReturnValue(undefined);
+          vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+          const doc = `${before}${MARKS[0]}${between}${MARKS[1]}${after}`;
+          const { repo, snippets, panes, file, stored, tracked } =
+            await wireTwoPanes(doc);
+          let refused: { mockRestore(): void } | null = null;
+          try {
+            for (const step of steps) {
+              switch (step.kind) {
+                case 'edit': {
+                  const changes = changeFor(
+                    panes[0].state.doc.toString(),
+                    step
+                  );
+                  if (!changes) break;
+                  panes[step.pane].dispatch({
+                    changes,
+                    userEvent: 'input.type',
+                  });
+                  // As Obsidian hands every other pane of the note the edit
+                  panes[1 - step.pane].dispatch({ changes, userEvent: 'set' });
+                  break;
+                }
+                case 'settle':
+                  await vi.advanceTimersByTimeAsync(0);
+                  break;
+                case 'wait':
+                  await vi.advanceTimersByTimeAsync(2000);
+                  break;
+                case 'read':
+                  // As the reading view's post-processor, or a hover preview
+                  void snippets.getHighlights(file);
+                  break;
+                case 'refuse':
+                  refused ??= vi
+                    .spyOn(snippets, 'updateOffsets')
+                    .mockRejectedValue(new Error('Saving is paused.'));
+                  break;
+                case 'resume':
+                  refused?.mockRestore();
+                  refused = null;
+                  // As `onWritesResumed` does
+                  await snippets.persistPendingOffsets();
+                  break;
+              }
+              const now = panes[0].state.doc.toString();
+              expect(panes[1].state.doc.toString()).toBe(now);
+              expect(tracked()).toEqual(marked(now));
+            }
+
+            refused?.mockRestore();
+            refused = null;
+            await snippets.persistPendingOffsets();
+            await vi.advanceTimersByTimeAsync(2000);
+            const end = panes[0].state.doc.toString();
+            expect(tracked()).toEqual(marked(end));
+            for (const pane of panes) {
+              pane.dispatch({ selection: { anchor: 0 } });
+              expect(paintedText(pane)).toEqual([...MARKS]);
+            }
+            expect(stored()).toEqual(marked(end));
+
+            // Written, so no longer held back: the next read takes the
+            // database's, as another device's copy of it brings
+            repo.mutate('UPDATE snippet SET start_offset = 0, end_offset = 1');
+            await snippets.getHighlights(file);
+            expect(tracked()).toEqual(MARKS.map(() => [0, 1]));
+          } finally {
+            refused?.mockRestore();
+            for (const pane of panes) pane.destroy();
+            vi.useRealTimers();
+          }
+        }
+      ),
+      { numRuns: 60 }
+    );
+  });
 });
