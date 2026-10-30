@@ -1,6 +1,10 @@
 import IRScheduler from '#/lib/IRScheduler';
+import {
+  filterPriorityInsertions,
+  sanitizePriorityText,
+} from '#/lib/priority-input';
 import type { ComponentChildren } from 'preact';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 /**
  * Note: pass a `key` prop with the item's ID to ensure priority is updated
@@ -13,6 +17,9 @@ import { useState } from 'react';
  * Escape drops the edit in progress and shows the stored priority again: the
  * one this field last saved, even before it comes back as `initialPriority`,
  * or else the one passed in.
+ *
+ * Only digits and one decimal point ever show: other characters are dropped
+ * from text as it goes in, and from what reaches the input some other way.
  */
 export function PriorityField({
   initialPriority,
@@ -26,6 +33,10 @@ export function PriorityField({
   leading?: ComponentChildren;
 }) {
   const hasLeading = leading !== undefined;
+  const inputRef = useRef<HTMLInputElement>(null);
+  // A plain listener, since preact only hears `onBeforeInput` in engines that
+  // have an `onbeforeinput` property
+  useEffect(() => filterPriorityInsertions(inputRef.current!), []);
   /** The priority last stored, whether passed in or saved from here. */
   const [stored, setStored] = useState(initialPriority);
   /** The `initialPriority` of the last render. */
@@ -58,14 +69,16 @@ export function PriorityField({
       <label className={'ir-priority-label'}>
         {!hasLeading && 'Priority'}
         <input
+          ref={inputRef}
           id={'ir-priority-input'}
           aria-label={hasLeading ? 'Priority' : undefined}
           value={draft ? (draft.text ?? String(draft.value)) : storedText}
           className={'ir-priority-input'}
           type="text"
-          inputMode="numeric"
+          inputMode="decimal"
           onChange={(e) => {
-            const text = e.currentTarget.value;
+            // Drops what got past the filter: compositions, drops, autofill
+            const text = sanitizePriorityText(e.currentTarget.value);
             let value = held;
             try {
               value = IRScheduler.adjustDisplayPriorityOnChange(text);

@@ -1,5 +1,12 @@
 // @vitest-environment jsdom
 import IRScheduler from '#/lib/IRScheduler';
+import { sanitizePriorityText } from '#/lib/priority-input';
+import {
+  type Insertion,
+  insert,
+  insertedTextArb,
+  insertionArb,
+} from '#/test/text-insertion';
 import fc from 'fast-check';
 import { type ComponentChild, h, render } from 'preact';
 import { act } from 'preact/test-utils';
@@ -43,6 +50,26 @@ function type(input: HTMLInputElement, text: string): string {
   return read;
 }
 
+/** Types `char` at the caret, as one keystroke. */
+function keystroke(input: HTMLInputElement, char: string) {
+  void act(() => {
+    insert(input, {
+      inputType: 'insertText',
+      text: char,
+      via: 'data',
+      cancelable: true,
+      anchor: input.selectionStart ?? 0,
+      head: input.selectionEnd ?? 0,
+    });
+  });
+}
+
+function focus(input: HTMLInputElement) {
+  void act(() => {
+    input.focus();
+  });
+}
+
 /** Saves on Enter, which only gives up focus the field has. */
 function enter(input: HTMLInputElement) {
   void act(() => {
@@ -70,7 +97,9 @@ function blur(input: HTMLInputElement) {
  */
 function keptAfterTyping(previous: number, text: string): number {
   try {
-    return IRScheduler.adjustDisplayPriorityOnChange(text);
+    return IRScheduler.adjustDisplayPriorityOnChange(
+      sanitizePriorityText(text)
+    );
   } catch {
     return previous;
   }
@@ -85,6 +114,9 @@ function textBeforeInput(label: HTMLLabelElement): string {
   }
   return text;
 }
+
+/** Text made of ASCII digits and at most one decimal point. */
+const PRIORITY_TEXT = /^[0-9]*\.?[0-9]*$/;
 
 /** Stand-in for what leads the field, such as an icon button. */
 const LEADING = h('button', { 'data-leading': '' });
@@ -165,6 +197,14 @@ const stepArb: fc.Arbitrary<Step> = fc.oneof(
       (priority): Step => ({ kind: 'stored', priority })
     ),
   }
+);
+
+/** A step, or text put in through the browser's own edits. */
+type Edit = Step | { kind: 'insert'; insertion: Insertion };
+
+const editArb: fc.Arbitrary<Edit> = fc.oneof(
+  stepArb,
+  insertionArb.map((insertion): Edit => ({ kind: 'insert', insertion }))
 );
 // #endregion
 
@@ -394,7 +434,7 @@ describe('PriorityField', () => {
 
           expect(keptAfterTyping(priority / 10, read)).toBe(priority / 10);
           // A half-typed "4." must not be cut back to "4"
-          expect(input.value).toBe(read);
+          expect(input.value).toBe(sanitizePriorityText(read));
           expect(onBlur).not.toHaveBeenCalled();
           document.body.innerHTML = '';
         }
@@ -527,7 +567,11 @@ describe('PriorityField', () => {
               const held: number = edit ? edit.held : stored / 10;
               const read = type(input, step.text);
               const next = keptAfterTyping(held, read);
-              edit = { held: next, shown: next === held ? read : String(next) };
+              edit = {
+                held: next,
+                shown:
+                  next === held ? sanitizePriorityText(read) : String(next),
+              };
             } else if (step.kind === 'escape') {
               press(input, 'Escape');
               edit = null;
@@ -555,5 +599,80 @@ describe('PriorityField', () => {
         }
       )
     );
+  });
+  it('shows nothing but digits and one decimal point, however text gets in', () => {
+    fc.assert(
+      fc.property(
+        priorityArb,
+        fc.boolean(),
+        fc.array(editArb, { minLength: 1, maxLength: 8 }),
+        (initial, focused, edits) => {
+          const { root, input, onBlur } = field({ initialPriority: initial });
+          if (focused) focus(input);
+
+          for (const edit of edits) {
+            if (edit.kind === 'insert') {
+              void act(() => {
+                insert(input, edit.insertion);
+              });
+            } else if (edit.kind === 'type') type(input, edit.text);
+            else if (edit.kind === 'stored') {
+              field({ initialPriority: edit.priority, onBlur }, root);
+            } else if (edit.kind === 'escape') press(input, 'Escape');
+            else if (edit.kind === 'blur') blur(input);
+            else enter(input);
+
+            expect(input.value).toMatch(PRIORITY_TEXT);
+          }
+          document.body.innerHTML = '';
+        }
+      )
+    );
+  });
+
+  it('takes a keystroke of anything but a digit or decimal point as no keystroke at all', () => {
+    fc.assert(
+      fc.property(priorityArb, insertedTextArb, (priority, typed) => {
+        const chars = Array.from(typed);
+        /** What a field shows after `keys`, and the saves its blur makes. */
+        const outcome = (keys: string[]) => {
+          const { input, onBlur } = field({ initialPriority: priority });
+          focus(input);
+          for (const key of keys) keystroke(input, key);
+          const shown = input.value;
+          void act(() => {
+            input.blur();
+          });
+          return { shown, saves: onBlur.mock.calls };
+        };
+
+        expect(outcome(chars)).toEqual(
+          outcome(chars.filter((c) => /^[0-9.]$/.test(c)))
+        );
+        document.body.innerHTML = '';
+      })
+    );
+  });
+
+  it.each([
+    ['a1b2', '1.2', 12],
+    ['4.5', '4.5', 45],
+    ['4..5', '4.5', 45],
+    ['x4,5', '4.5', 45],
+    ['2-', '2', 20],
+  ])('takes keystrokes %j as %j, saving %d', (typed, shown, saved) => {
+    const { input, onBlur } = field({ initialPriority: 30 });
+    focus(input);
+    for (const char of typed) keystroke(input, char);
+
+    expect(input.value).toBe(shown);
+    blur(input);
+    expect(onBlur).toHaveBeenCalledExactlyOnceWith(saved);
+  });
+
+  it('asks for a keyboard with a decimal point', () => {
+    const { input } = field();
+
+    expect(input.getAttribute('inputmode')).toBe('decimal');
   });
 });
