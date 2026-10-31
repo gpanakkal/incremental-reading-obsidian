@@ -64,6 +64,7 @@ import {
   showSuccessNotices,
   SUCCESS_NOTICE_LEVELS,
 } from '#/test/success-notices';
+import * as ConfirmModalModule from '#/views/ConfirmModal';
 import fc from 'fast-check';
 import { readFileSync } from 'fs';
 import type { TAbstractFile, TFile } from 'obsidian';
@@ -5998,8 +5999,10 @@ describe('import', () => {
     it('re-associates with the existing DB record when ir-id matches', async () => {
       const EXISTING_ID = 'existing-article-id';
       const repo = makeSimpleRepo();
-      // First query (by reference) returns nothing; second query (by id) matches
+      // No snippet or card holds the note; the query by reference returns
+      // nothing; the query by id matches
       (repo.query as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce([])
         .mockResolvedValueOnce([])
         .mockResolvedValueOnce([{ id: EXISTING_ID }]);
       const manager = new ArticleManager(makeImportPlugin(false), repo);
@@ -6020,9 +6023,11 @@ describe('import', () => {
     it('cancels with a specific notice when ir-id is orphaned but reference is already in DB', async () => {
       const ORPHANED_ID = 'orphaned-id';
       const repo = makeSimpleRepo();
-      // First query (by reference) matches another article; the by-id query is
-      // never reached because the reference collision cancels the import
+      // No snippet or card holds the note; the query by reference matches
+      // another article; the by-id query is never reached because the
+      // reference collision cancels the import
       (repo.query as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce([])
         .mockResolvedValueOnce([{ id: 'some-other-id' }])
         .mockResolvedValueOnce([]);
       const manager = new ArticleManager(makeImportPlugin(false), repo);
@@ -6107,7 +6112,10 @@ describe('import', () => {
       Notice.reset();
       const file = fileAt('x>y/my-note.md');
       const repo = makeSimpleRepo();
+      // No snippet or card holds the note, nor an article its path; its id
+      // names an article
       (repo.query as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce([])
         .mockResolvedValueOnce([])
         .mockResolvedValueOnce([{ id: 'elsewhere' }]);
       vi.spyOn(Obsidian, 'getFrontMatter').mockReturnValue({
@@ -6131,9 +6139,10 @@ describe('import', () => {
       Notice.reset();
       const file = fileAt('C# notes/my-note.md');
       const repo = makeSimpleRepo();
-      (repo.query as ReturnType<typeof vi.fn>).mockResolvedValue([
-        { id: 'existing' },
-      ]);
+      // No snippet or card holds the note; every article query finds its row
+      (repo.query as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce([])
+        .mockResolvedValue([{ id: 'existing' }]);
       vi.spyOn(Obsidian, 'getFrontMatter').mockReturnValue({
         'ir-id': 'existing',
         tags: [ARTICLE_TAG],
@@ -6275,7 +6284,10 @@ describe('import', () => {
         const EXISTING_ID = 'existing-article-id';
         const snippets = makeSnippetsStub([makeAdoptedRow(0)]);
         const repo = makeSimpleRepo();
+        // No snippet or card holds the note, nor an article its path; its id
+        // names an article
         (repo.query as ReturnType<typeof vi.fn>)
+          .mockResolvedValueOnce([])
           .mockResolvedValueOnce([])
           .mockResolvedValueOnce([{ id: EXISTING_ID }]);
         const manager = new ArticleManager(
@@ -6298,10 +6310,11 @@ describe('import', () => {
         const EXISTING_ID = 'existing-article-id';
         const snippets = makeSnippetsStub([makeAdoptedRow(0)]);
         const repo = makeSimpleRepo();
-        // the reference is already registered, under the note's own ir-id
-        (repo.query as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
-          { id: EXISTING_ID },
-        ]);
+        // No snippet or card holds the note, and the reference is already
+        // registered, under the note's own ir-id
+        (repo.query as ReturnType<typeof vi.fn>)
+          .mockResolvedValueOnce([])
+          .mockResolvedValueOnce([{ id: EXISTING_ID }]);
         const manager = new ArticleManager(
           makeImportPluginWithSnippets(false, snippets),
           repo
@@ -6332,9 +6345,10 @@ describe('import', () => {
           { id: 'card-0', reference: 'cards/c.md' },
         ]);
         const repo = makeSimpleRepo();
-        (repo.query as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
-          { id: EXISTING_ID, deleted: 0 },
-        ]);
+        // No snippet or card holds the note; its live row is at its path
+        (repo.query as ReturnType<typeof vi.fn>)
+          .mockResolvedValueOnce([])
+          .mockResolvedValueOnce([{ id: EXISTING_ID, deleted: 0 }]);
         const manager = new ArticleManager(
           makeImportPluginWithSnippets(false, snippets, cards),
           repo
@@ -7888,14 +7902,14 @@ describe('importMany', () => {
         frontmatter: { tags: [SNIPPET_TAG] },
         makeCopy: false,
         status: 'failed',
-        reason: 'has a snippet or card tag',
+        reason: 'is a snippet or card',
       },
       {
         path: 'notes/card.md',
         frontmatter: { tags: [CARD_TAG] },
         makeCopy: true,
         status: 'failed',
-        reason: 'has a snippet or card tag',
+        reason: 'is a snippet or card',
       },
       {
         path: `notes/a${refusedChar}b.md`,
@@ -10846,5 +10860,626 @@ describe('importing a note an article row already answers to (0228)', () => {
     ]);
     expect(vault.frontmatterOf(PATH)?.tags).toEqual(['other', ARTICLE_TAG]);
     repo.dispose();
+  });
+});
+
+describe("importing a snippet's or card's note that lost its type tag (0237)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const PATH = `${DATA_DIRECTORY}/notes/N.md`;
+  type ItemTable = 'article' | 'snippet' | 'srs_card';
+  const TAG_OF: Record<ItemTable, string> = {
+    article: ARTICLE_TAG,
+    snippet: SNIPPET_TAG,
+    srs_card: CARD_TAG,
+  };
+
+  const ELSEWHERE = `${DATA_DIRECTORY}/notes/gone.md`;
+
+  /**
+   * What an import of `file` in place did: as a batch reports it, or,
+   * imported alone, `refused` when it did nothing.
+   */
+  async function importOnce(
+    manager: ArticleManager,
+    file: TFile,
+    batch: boolean
+  ): Promise<{ status: string; reason?: string } & Partial<ImportResult>> {
+    if (batch) {
+      const [outcome] = await manager.importMany([{ file }], {
+        priority: DEFAULT_PRIORITY,
+        fixedIntervalDays: null,
+        makeCopy: false,
+      });
+      return outcome;
+    }
+    const result = await manager.import(file, DEFAULT_PRIORITY, null, false);
+    return result ? { status: 'imported', ...result } : { status: 'refused' };
+  }
+
+  /** Add the `table` row `id` at `reference`, `deleted` or live. */
+  function insertItemRow(
+    repo: TestRepository,
+    table: ItemTable,
+    id: string,
+    reference: string,
+    deleted: boolean
+  ) {
+    const insert = {
+      article: `INSERT INTO article (id, reference, due, interval, priority, deleted)
+         VALUES ($1, $2, 0, 1, 10, $3)`,
+      snippet: `INSERT INTO snippet (id, reference, due, interval, priority, start_offset, end_offset, deleted)
+         VALUES ($1, $2, 0, 1, 20, 0, 5, $3)`,
+      srs_card: `INSERT INTO srs_card (id, reference, created_at, due, stability,
+           difficulty, elapsed_days, scheduled_days, reps, lapses, state, deleted)
+         VALUES ($1, $2, 0, 0, 0, 0, 0, 0, 0, 0, 0, $3)`,
+    }[table];
+    repo.mutate(insert, [id, reference, deleted]);
+  }
+
+  /**
+   * Where an item row is (at the note's path, at another, or deleted for good,
+   * which holds none), whether it is deleted, and whether the note claims its
+   * id.
+   */
+  const rowSpecArb = fc
+    .record({
+      where: fc.constantFrom('here', 'elsewhere', 'purged'),
+      deleted: fc.boolean(),
+      idMatches: fc.boolean(),
+    })
+    .map((spec) => ({
+      ...spec,
+      here: spec.where === 'here',
+      purged: spec.where === 'purged',
+      deleted: spec.deleted || spec.where === 'purged',
+    }));
+
+  /** Where the row `id` of `spec` is. */
+  const referenceOf = (spec: { where: string }, id: string) =>
+    ({ here: PATH, elsewhere: ELSEWHERE, purged: purgedReference(id) })[
+      spec.where
+    ]!;
+
+  /**
+   * The tags a note carries: any of the item types', and others besides. Most
+   * lack a snippet's or card's tag, which refuses the import before any row
+   * is read, so the rows decide most runs.
+   */
+  const noteTagsArb = fc
+    .tuple(
+      fc.oneof(
+        { weight: 3, arbitrary: fc.subarray([ARTICLE_TAG]) },
+        {
+          weight: 1,
+          arbitrary: fc.subarray([ARTICLE_TAG, SNIPPET_TAG, CARD_TAG]),
+        }
+      ),
+      fc.uniqueArray(
+        fc
+          .string()
+          .filter(
+            (tag) =>
+              tag.trim() !== '' &&
+              ![ARTICLE_TAG, SNIPPET_TAG, CARD_TAG].includes(tag)
+          )
+      )
+    )
+    .map(([itemTags, others]) => [...others, ...itemTags]);
+
+  it('refuses a note any snippet or card row not deleted for good holds by path or id, tag or no tag, and otherwise keeps the article rules: refuse, repair, revive or make a new one', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.option(rowSpecArb, { nil: undefined }),
+        fc.option(
+          fc.record({
+            table: fc.constantFrom('snippet' as const, 'srs_card' as const),
+            spec: rowSpecArb,
+          }),
+          { nil: undefined }
+        ),
+        // Mostly the id rows can be given, so the note claims one often
+        fc.oneof(
+          { weight: 2, arbitrary: fc.constant('x') },
+          fc.constant('z'),
+          fc.constant(undefined)
+        ),
+        noteTagsArb,
+        fc.boolean(),
+        async (articleRow, itemRow, noteId, tags, batch) => {
+          vi.restoreAllMocks();
+          const frontmatter: Record<string, unknown> = { tags };
+          if (noteId !== undefined) frontmatter['ir-id'] = noteId;
+          const { vault, repo, manager, before } = await wireArticles(
+            { [PATH]: frontmatter },
+            null
+          );
+          // A row the note claims is `x`; others have ids of their own
+          if (articleRow) {
+            const id = articleRow.idMatches && noteId === 'x' ? 'x' : 'a';
+            const reference = referenceOf(articleRow, id);
+            insertItemRow(repo, 'article', id, reference, articleRow.deleted);
+          }
+          if (itemRow) {
+            const { spec, table } = itemRow;
+            const id = spec.idMatches && noteId === 'x' ? 'x' : 'i';
+            insertItemRow(repo, table, id, referenceOf(spec, id), spec.deleted);
+          }
+          const tablesBefore = itemTables(repo);
+          const file = vault.files.get(PATH)!;
+          // Asked, the user cancels, which refuses the import as a batch does
+          const prompt = vi
+            .spyOn(ConfirmModalModule, 'promptForConfirmation')
+            .mockResolvedValue(false);
+
+          const outcome = await importOnce(manager, file, batch);
+
+          const tablesAfter = itemTables(repo);
+          // A row deleted for good is no row the note can claim
+          const claims = (
+            spec: { idMatches: boolean; purged: boolean } | undefined
+          ) =>
+            spec !== undefined &&
+            spec.idMatches &&
+            !spec.purged &&
+            noteId === 'x';
+          // Only an import of one note asks, and only of a note at an item's
+          // path whose id it doesn't claim, whatever its tags
+          const asks =
+            !batch &&
+            itemRow !== undefined &&
+            itemRow.spec.here &&
+            !claims(itemRow.spec);
+          expect(prompt).toHaveBeenCalledTimes(asks ? 1 : 0);
+          const refusedOutright = () => {
+            expect(outcome.status).toBe(batch ? 'failed' : 'refused');
+            expect(tablesAfter).toEqual(tablesBefore);
+            expect(vault.frontmatterOf(PATH)).toEqual(before[PATH]);
+          };
+          if (
+            tags.includes(SNIPPET_TAG) ||
+            tags.includes(CARD_TAG) ||
+            (itemRow && (itemRow.spec.here || claims(itemRow.spec)))
+          ) {
+            refusedOutright();
+          } else if (articleRow?.here && !claims(articleRow)) {
+            // Another article's path
+            refusedOutright();
+          } else if (
+            articleRow?.here &&
+            !articleRow.deleted &&
+            tags.includes(ARTICLE_TAG)
+          ) {
+            expect(outcome.status).toBe(batch ? 'skipped' : 'refused');
+            expect(tablesAfter).toEqual(tablesBefore);
+            expect(vault.frontmatterOf(PATH)).toEqual(before[PATH]);
+          } else if (articleRow && claims(articleRow)) {
+            // Its own row, repaired or brought back at the note's path
+            expect(outcome).toMatchObject({
+              status: 'imported',
+              articleId: 'x',
+              effect: articleRow.deleted ? 'restored' : 'linked',
+            });
+            expect(tablesAfter.article).toMatchObject([
+              { id: 'x', reference: PATH, deleted: 0 },
+            ]);
+            expect(vault.frontmatterOf(PATH)?.['ir-id']).toBe('x');
+          } else {
+            // Nothing holds its path or id: a new article where it is
+            const made = tablesAfter.article.find(
+              ({ id }) => !['x', 'a'].includes(id as string)
+            );
+            expect(outcome).toMatchObject({
+              status: 'imported',
+              effect: 'created',
+              articleId: made?.id,
+            });
+            expect(made).toMatchObject({ reference: PATH, deleted: 0 });
+            expect(tablesAfter.article).toHaveLength(
+              tablesBefore.article.length + 1
+            );
+            expect(vault.frontmatterOf(PATH)?.['ir-id']).toBe(made?.id);
+          }
+          // Never a second row for a snippet's or card's note, nor any change
+          // to the snippet or card
+          expect(tablesAfter.snippet).toEqual(tablesBefore.snippet);
+          expect(tablesAfter.srs_card).toEqual(tablesBefore.srs_card);
+          repo.dispose();
+        }
+      ),
+      { numRuns: 120 }
+    );
+  });
+
+  it('refuses an untagged note whose live snippet or card row is at its path, leaving the note and the rows as they were', async () => {
+    for (const table of ['snippet', 'srs_card'] as const) {
+      vi.restoreAllMocks();
+      const { vault, repo, notify, manager, before } = await wireArticles(
+        { [PATH]: { 'ir-id': 'x', tags: ['kept'] } },
+        null
+      );
+      insertItemRow(repo, table, 'x', PATH, false);
+      const itemRows = repo.rows(table);
+
+      const article = await manager.import(
+        vault.files.get(PATH)!,
+        DEFAULT_PRIORITY,
+        null,
+        false
+      );
+
+      expect(article).toBeNull();
+      expect(repo.rows('article')).toEqual([]);
+      expect(repo.rows(table)).toEqual(itemRows);
+      expect(vault.frontmatterOf(PATH)).toEqual(before[PATH]);
+      expect(notify).toHaveBeenCalledExactlyOnceWith(expect.any(String));
+      repo.dispose();
+    }
+  });
+
+  it('refuses a deleted snippet or card note whether or not it kept its tag', async () => {
+    for (const table of ['snippet', 'srs_card'] as const) {
+      for (const tagged of [true, false]) {
+        vi.restoreAllMocks();
+        const { vault, repo, notify, manager, before } = await wireArticles(
+          {
+            [PATH]: {
+              'ir-id': 'x',
+              tags: tagged ? [TAG_OF[table]] : ['kept'],
+            },
+          },
+          null
+        );
+        insertItemRow(repo, table, 'x', PATH, true);
+
+        const article = await manager.import(
+          vault.files.get(PATH)!,
+          DEFAULT_PRIORITY,
+          null,
+          false
+        );
+
+        expect(article).toBeNull();
+        expect(repo.rows('article')).toEqual([]);
+        expect(vault.frontmatterOf(PATH)).toEqual(before[PATH]);
+        expect(notify).toHaveBeenCalledExactlyOnceWith(expect.any(String));
+        repo.dispose();
+      }
+    }
+  });
+
+  describe("offering to make a note at a snippet's or card's path, which isn't its note, that item's note", () => {
+    const ITEM_ID = 'i';
+
+    /** The day an item was last reviewed as the question names it. */
+    const dayOf = (ms: number) => {
+      const date = new Date(ms);
+      return `${date.getFullYear()}/${date.getMonth() + 1}/${date.getDate()}`;
+    };
+
+    /** Review times, any of them undone. */
+    const reviewsArb = fc.array(
+      fc.record({
+        time: fc.integer({ min: 0, max: 4_000_000_000_000 }),
+        deleted: fc.boolean(),
+      }),
+      { maxLength: 4 }
+    );
+
+    /**
+     * The tags a note carries: none at all, or any of the item types', the
+     * item's own among them, mixed in with others in any order.
+     */
+    const noteTagsArb = fc.option(
+      fc
+        .tuple(
+          fc.uniqueArray(
+            fc
+              .string({ minLength: 1 })
+              .filter(
+                (tag) =>
+                  tag.trim() !== '' &&
+                  ![ARTICLE_TAG, SNIPPET_TAG, CARD_TAG].includes(tag)
+              ),
+            { maxLength: 3 }
+          ),
+          fc.subarray([ARTICLE_TAG, SNIPPET_TAG, CARD_TAG])
+        )
+        .chain(([others, typed]) =>
+          fc.shuffledSubarray([...others, ...typed], {
+            minLength: others.length + typed.length,
+          })
+        ),
+      { nil: undefined }
+    );
+
+    /**
+     * Give the item `ITEM_ID` in `table` a review history: `reviews` for a
+     * snippet, kept in its review table; `cardLastReview` for a card, which
+     * keeps only its last.
+     * @returns when it was last reviewed, if ever
+     */
+    function review(
+      repo: TestRepository,
+      table: 'snippet' | 'srs_card',
+      reviews: { time: number; deleted: boolean }[],
+      cardLastReview: number | null
+    ): number | null {
+      if (table === 'srs_card') {
+        repo.mutate('UPDATE srs_card SET last_review = $1 WHERE id = $2', [
+          cardLastReview,
+          ITEM_ID,
+        ]);
+        return cardLastReview;
+      }
+      reviews.forEach(({ time, deleted }, index) =>
+        repo.mutate(
+          `INSERT INTO snippet_review (id, snippet_id, review_time, deleted)
+           VALUES ($1, $2, $3, $4)`,
+          [`r${index}`, ITEM_ID, time, deleted]
+        )
+      );
+      const kept = reviews.filter(({ deleted }) => !deleted);
+      return kept.length === 0
+        ? null
+        : Math.max(...kept.map(({ time }) => time));
+    }
+
+    /** Every row an import could touch, review histories included. */
+    const allTables = (
+      repo: TestRepository
+    ): Record<string, Record<string, unknown>[]> => ({
+      ...itemTables(repo),
+      snippet_review: repo.rows('snippet_review'),
+    });
+
+    /** Answer the question with `answer`, or as `answer` does. */
+    const spyPrompt = (answer: boolean | (() => Promise<boolean>)) => {
+      const spy = vi.spyOn(ConfirmModalModule, 'promptForConfirmation');
+      return typeof answer === 'boolean'
+        ? spy.mockResolvedValue(answer)
+        : spy.mockImplementation(answer);
+    };
+
+    /** The text of the question asked, title and all. */
+    const askedText = (prompt: ReturnType<typeof spyPrompt>) => {
+      const [, options] = prompt.mock.calls[0];
+      return [options.title, ...options.paragraphs].join('\n');
+    };
+
+    it("asks an import of one note, tagged or not, whether to make it the item's note, naming when the item was last reviewed; Re-associate gives the note the item's id and type tag in place of any other item type's and brings a deleted item back, touching nothing else, and Cancel leaves everything; a batch refuses it unasked", async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          fc.constantFrom('snippet' as const, 'srs_card' as const),
+          fc.boolean(),
+          // No id, or one no snippet or card holds, an article's perhaps
+          fc.constantFrom(undefined, 'z'),
+          fc.boolean(),
+          noteTagsArb,
+          otherPropertiesArb,
+          reviewsArb,
+          fc.option(fc.integer({ min: 0, max: 4_000_000_000_000 }), {
+            nil: null,
+          }),
+          fc.boolean(),
+          fc.boolean(),
+          async (
+            table,
+            deleted,
+            noteId,
+            articleHoldsId,
+            tags,
+            others,
+            reviews,
+            cardLastReview,
+            answer,
+            batch
+          ) => {
+            vi.restoreAllMocks();
+            const frontmatter: Record<string, unknown> = { ...others };
+            if (tags !== undefined) frontmatter.tags = tags;
+            if (noteId !== undefined) frontmatter['ir-id'] = noteId;
+            const { vault, repo, notify, manager, before } = await wireArticles(
+              { [PATH]: frontmatter },
+              null
+            );
+            insertItemRow(repo, table, ITEM_ID, PATH, deleted);
+            if (articleHoldsId) {
+              insertItemRow(repo, 'article', 'z', ELSEWHERE, false);
+            }
+            const lastReview = review(repo, table, reviews, cardLastReview);
+            const tablesBefore = allTables(repo);
+            const fingerprintBefore = repo.storedRows(table)[0].note_mtime;
+            const file = vault.files.get(PATH)!;
+            const mtimeBefore = file.stat.mtime;
+            const prompt = spyPrompt(answer);
+
+            const outcome = await importOnce(manager, file, batch);
+
+            const tablesAfter = allTables(repo);
+            if (batch) {
+              expect(prompt).not.toHaveBeenCalled();
+              expect(outcome.status).toBe('failed');
+              expect(typeof outcome.reason).toBe('string');
+            } else {
+              expect(prompt).toHaveBeenCalledOnce();
+              expect(askedText(prompt)).toContain(
+                lastReview === null ? 'never' : dayOf(lastReview)
+              );
+              // Nothing is imported as an article either way
+              expect(outcome.status).toBe('refused');
+              expect(notify).toHaveBeenCalledOnce();
+            }
+            const fingerprintAfter = repo.storedRows(table)[0].note_mtime;
+            if (!batch && answer) {
+              // The item's own type tag, and no other item type's
+              const otherTypeTags = [ARTICLE_TAG, SNIPPET_TAG, CARD_TAG].filter(
+                (tag) => tag !== TAG_OF[table]
+              );
+              const kept = (tags ?? []).filter(
+                (tag) => !otherTypeTags.includes(tag)
+              );
+              expect(vault.frontmatterOf(PATH)).toEqual({
+                ...before[PATH],
+                'ir-id': ITEM_ID,
+                tags: kept.includes(TAG_OF[table])
+                  ? kept
+                  : [...kept, TAG_OF[table]],
+              });
+              expect(tablesAfter).toEqual({
+                ...tablesBefore,
+                [table]: [{ ...tablesBefore[table][0], deleted: 0 }],
+              });
+              // As the write of the id and tag left the note
+              expect(file.stat.mtime).toBeGreaterThan(mtimeBefore);
+              expect(fingerprintAfter).toBe(file.stat.mtime);
+            } else {
+              expect(vault.frontmatterOf(PATH)).toEqual(before[PATH]);
+              expect(tablesAfter).toEqual(tablesBefore);
+              expect(fingerprintAfter).toBe(fingerprintBefore);
+            }
+            repo.dispose();
+          }
+        ),
+        { numRuns: 120 }
+      );
+    });
+
+    it('refuses unasked a note at a path both a snippet and a card hold, or whose id a snippet or card elsewhere holds, or that claims the id of the item at its path', async () => {
+      const setups: ((repo: TestRepository) => void)[] = [
+        (repo) => {
+          insertItemRow(repo, 'snippet', ITEM_ID, PATH, true);
+          insertItemRow(repo, 'srs_card', 'c', PATH, true);
+        },
+        (repo) => {
+          insertItemRow(repo, 'srs_card', ITEM_ID, PATH, true);
+          insertItemRow(repo, 'snippet', 'z', ELSEWHERE, false);
+        },
+        (repo) => {
+          insertItemRow(repo, 'snippet', ITEM_ID, PATH, true);
+          insertItemRow(repo, 'srs_card', 'z', ELSEWHERE, true);
+        },
+        (repo) => insertItemRow(repo, 'srs_card', 'z', PATH, true),
+      ];
+      for (const setup of setups) {
+        vi.restoreAllMocks();
+        const { vault, repo, notify, manager, before } = await wireArticles(
+          { [PATH]: { 'ir-id': 'z', tags: ['kept'] } },
+          null
+        );
+        setup(repo);
+        const tablesBefore = allTables(repo);
+        const prompt = spyPrompt(true);
+
+        const article = await manager.import(
+          vault.files.get(PATH)!,
+          DEFAULT_PRIORITY,
+          null,
+          false
+        );
+
+        expect(article).toBeNull();
+        expect(prompt).not.toHaveBeenCalled();
+        expect(allTables(repo)).toEqual(tablesBefore);
+        expect(vault.frontmatterOf(PATH)).toEqual(before[PATH]);
+        expect(notify).toHaveBeenCalledOnce();
+        repo.dispose();
+      }
+    });
+
+    it("writes nothing when the item's row has left the note's path, or been deleted for good, by the time the user confirms", async () => {
+      for (const elsewhere of [ELSEWHERE, purgedReference(ITEM_ID)]) {
+        vi.restoreAllMocks();
+        const { vault, repo, notify, manager, before } = await wireArticles(
+          { [PATH]: { tags: ['kept'] } },
+          null
+        );
+        insertItemRow(repo, 'snippet', ITEM_ID, PATH, true);
+        let tablesAsked: ReturnType<typeof allTables> | null = null;
+        spyPrompt(async () => {
+          repo.mutate('UPDATE snippet SET reference = $1 WHERE id = $2', [
+            elsewhere,
+            ITEM_ID,
+          ]);
+          tablesAsked = allTables(repo);
+          return true;
+        });
+
+        const article = await manager.import(
+          vault.files.get(PATH)!,
+          DEFAULT_PRIORITY,
+          null,
+          false
+        );
+
+        expect(article).toBeNull();
+        expect(vault.frontmatterOf(PATH)).toEqual(before[PATH]);
+        expect(tablesAsked).not.toBeNull();
+        expect(allTables(repo)).toEqual(tablesAsked);
+        expect(notify).toHaveBeenCalledOnce();
+        repo.dispose();
+      }
+    });
+
+    it('writes nothing when saving is paused by the time the user confirms', async () => {
+      const { vault, repo, notify, manager, before } = await wireArticles(
+        { [PATH]: { tags: ['kept'] } },
+        null
+      );
+      insertItemRow(repo, 'srs_card', ITEM_ID, PATH, true);
+      const tablesBefore = allTables(repo);
+      spyPrompt(async () => {
+        repo.refuseWrites();
+        return true;
+      });
+
+      const article = await manager.import(
+        vault.files.get(PATH)!,
+        DEFAULT_PRIORITY,
+        null,
+        false
+      );
+
+      expect(article).toBeNull();
+      expect(vault.frontmatterOf(PATH)).toEqual(before[PATH]);
+      expect(allTables(repo)).toEqual(tablesBefore);
+      expect(notify).toHaveBeenCalledExactlyOnceWith(refusal(), {
+        kind: 'error',
+      });
+      repo.dispose();
+    });
+
+    it("puts the note's id and tags back when the item's row can't be saved", async () => {
+      for (const table of ['snippet', 'srs_card'] as const) {
+        vi.restoreAllMocks();
+        const { vault, repo, notify, manager, before } = await wireArticles(
+          {
+            [PATH]: { 'ir-id': 'z', tags: ['kept', ARTICLE_TAG, SNIPPET_TAG] },
+          },
+          null
+        );
+        insertItemRow(repo, table, ITEM_ID, PATH, true);
+        const tablesBefore = allTables(repo);
+        repo.failWrite((query) => query.startsWith(`UPDATE ${table}`));
+        spyPrompt(true);
+
+        const article = await manager.import(
+          vault.files.get(PATH)!,
+          DEFAULT_PRIORITY,
+          null,
+          false
+        );
+
+        expect(article).toBeNull();
+        expect(vault.frontmatterOf(PATH)).toEqual(before[PATH]);
+        expect(allTables(repo)).toEqual(tablesBefore);
+        expect(notify).toHaveBeenCalledExactlyOnceWith(expect.any(String), {
+          kind: 'error',
+        });
+        repo.dispose();
+      }
+    });
   });
 });

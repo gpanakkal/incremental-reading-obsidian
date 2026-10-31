@@ -13,7 +13,9 @@ import {
   SOURCE_PROPERTY_NAME,
   SOURCE_TAG,
 } from '#/lib/constants';
+import { hasTag } from '#/lib/item-tags';
 import { ObsidianHelpers } from '#/lib/ObsidianHelpers';
+import { stripFrontmatterTags } from '#/lib/tags';
 import type { NoteType } from '#/lib/types';
 import { Notice } from '#/test/__mocks__/obsidian';
 import { makeWindow } from '#/test/fake-window';
@@ -6014,6 +6016,52 @@ describe('updateFrontMatterUndoably', () => {
           expect(vault.frontmatterOf(path)).toEqual(plain.frontmatterOf(path));
           await undo();
           expect(vault.frontmatterOf(path) ?? {}).toEqual(frontmatter ?? {});
+        }
+      )
+    );
+  });
+
+  it('runs the edit in the same write, and its undo puts back every key the edit changed too', async () => {
+    /** A tag key's value: item tags among others, as a list or a lone string. */
+    const tagValueArb = fc.oneof(
+      fc.subarray([ARTICLE_TAG, SNIPPET_TAG, CARD_TAG, 'kept', 'other']),
+      fc.constantFrom(ARTICLE_TAG, `kept ${CARD_TAG}`, 'kept')
+    );
+    await fc.assert(
+      fc.asyncProperty(
+        fc.record(
+          {
+            title: fc.string(),
+            tags: tagValueArb,
+            tag: tagValueArb,
+            Tags: tagValueArb,
+          },
+          { requiredKeys: [] }
+        ),
+        async (frontmatter) => {
+          const path = 'notes/a.md';
+          const vault = makeItemVault({ [path]: structuredClone(frontmatter) });
+          const file = vault.files.get(path)!;
+          const dropped = [ARTICLE_TAG, CARD_TAG];
+
+          const undo = await ObsidianHelpers.updateFrontMatterUndoably(
+            file,
+            { 'ir-id': 'i', tags: SNIPPET_TAG },
+            vault.app as never,
+            (written) => stripFrontmatterTags(written, dropped)
+          );
+
+          expect(vault.processFrontMatter).toHaveBeenCalledOnce();
+          const after = vault.frontmatterOf(path)!;
+          expect(after['ir-id']).toBe('i');
+          expect(hasTag(after.tags, SNIPPET_TAG)).toBe(true);
+          for (const key of ['tags', 'tag', 'Tags']) {
+            for (const tag of dropped)
+              expect(hasTag(after[key], tag)).toBe(false);
+          }
+          expect(after.title).toEqual(frontmatter.title);
+          await undo();
+          expect(vault.frontmatterOf(path) ?? {}).toEqual(frontmatter);
         }
       )
     );

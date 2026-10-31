@@ -22,6 +22,7 @@ import {
   refusedCharsIn,
   refusedPathWarning,
 } from '#/lib/item-path-guard';
+import { TAG_BY_TABLE } from '#/lib/item-tags';
 import {
   isCopyImportable,
   isImportable,
@@ -37,6 +38,7 @@ import {
   outlastMerge,
   refusalReason,
 } from '#/lib/readiness';
+import { askToReassociate, type PathHolder } from '#/lib/reassociate-prompt';
 import {
   applyFrontmatterLinkEdits,
   rebaseLinks,
@@ -116,6 +118,13 @@ interface ImportReport {
    * file is: a copy's notice opens the copy instead (see `openAction`).
    */
   undo?: NoticeAction;
+  /**
+   * Ask whether `file`, at the path of the snippet or card `holder` but no
+   * note of its, is to become that item's note. Only an import of one file
+   * asks; a batch has no one to ask, and refuses the file as it refuses any
+   * snippet's or card's note.
+   */
+  reassociate?: (file: TFile, holder: PathHolder) => Promise<boolean>;
 }
 
 /** What an import of one file did, and the article it made or brought back. */
@@ -144,11 +153,14 @@ function errorReason(error: unknown): string {
 const inDataDirectory = (file: TFile) =>
   file.path.startsWith(`${DATA_DIRECTORY}/`);
 
-/** A snippet's or card's note is no article to be. */
-function blockedTag(): Refusal {
+/**
+ * A snippet's or card's note is no article to be, whether its tag or its row
+ * says so: one that lost its tag is the item's still (see `snippetOrCardHolders`).
+ */
+function snippetOrCardNote(): Refusal {
   return {
-    notice: `Note contains a snippet or card tag; canceling import`,
-    reason: 'has a snippet or card tag',
+    notice: `Note is a snippet or card; canceling import`,
+    reason: 'is a snippet or card',
   };
 }
 
@@ -515,6 +527,7 @@ export class ArticleManager extends ItemManager {
         label: 'Undo',
         onClick: () => void this.plugin.actions.undoImport(result),
       },
+      reassociate: (given, holder) => askToReassociate(this.app, given, holder),
     };
     try {
       const made = await this.importFile(
@@ -900,13 +913,18 @@ export class ArticleManager extends ItemManager {
     }
 
     const frontmatter = Obsidian.getFrontMatter(file, this.app);
-    if (frontmatter?.tags?.some((tag) => IMPORT_BLOCKED_TAGS.has(tag))) {
-      report.refuse(blockedTag());
-      return null;
-    }
-
     // Re-associate if the file already carries an ir-id
     const existingId = frontmatter?.['ir-id'];
+    // The rows first: a note with a snippet's or card's tag at the path of
+    // one, though not claiming its id, is offered to it as an untagged one is
+    const holders = await this.snippetOrCardHolders(file, existingId);
+    if (holders.length > 0) {
+      return this.reassociateOrRefuse(file, holders, report);
+    }
+    if (frontmatter?.tags?.some((tag) => IMPORT_BLOCKED_TAGS.has(tag))) {
+      report.refuse(snippetOrCardNote());
+      return null;
+    }
 
     const byRef = (await this.repo.query(
       'SELECT id, deleted FROM article WHERE reference = $1',
@@ -1026,6 +1044,131 @@ export class ArticleManager extends ItemManager {
       report.undo
     );
     return imported(id, 'created');
+  }
+
+  /**
+   * The snippet and card rows at `file`'s path or holding `id`, the `ir-id`
+   * its note claims, live or deleted short of for good: any one makes the
+   * note that item's, with its type tag or without it, and making it an
+   * article would leave the row a note claiming another id and a second row
+   * at its path. A deleted row's note is refused as one that kept its tag is,
+   * which a restore of the note would bring the item back to. Each says
+   * whether it is `stray`: at the note's path, though the note doesn't claim
+   * its id; and when it was last reviewed, for {@link reassociateOrRefuse}
+   * to ask with.
+   */
+  private async snippetOrCardHolders(
+    file: TFile,
+    id: string | undefined
+  ): Promise<(PathHolder & { stray: boolean })[]> {
+    // A row deleted for good holds no path (see `purgedReference`), and
+    // reads as no row by its id. SQLite numbers `$n` parameters in the order
+    // they first appear, so `$1` must come before `$2`
+    const rows = (await this.repo.query(
+      `SELECT 'snippet' AS item_table, id, deleted, (reference = $1 AND id IS NOT $2) AS stray,
+         (SELECT MAX(review_time) FROM snippet_review
+          WHERE snippet_id = snippet.id AND deleted = FALSE) AS last_review
+       FROM snippet WHERE reference = $1 OR (id = $2 AND ${NOT_PURGED})
+       UNION ALL SELECT 'srs_card', id, deleted, (reference = $1 AND id IS NOT $2), last_review
+       FROM srs_card WHERE reference = $1 OR (id = $2 AND ${NOT_PURGED})`,
+      [file.path, id ?? null]
+    )) as unknown as {
+      item_table: PathHolder['table'];
+      id: string;
+      deleted: unknown;
+      stray: unknown;
+      last_review: number | null;
+    }[];
+    return rows.map((row) => ({
+      table: row.item_table,
+      id: row.id,
+      deleted: Boolean(row.deleted),
+      stray: Boolean(row.stray),
+      lastReview: row.last_review,
+    }));
+  }
+
+  /**
+   * Refuse `file`, a snippet's or card's note by `holders` (see
+   * {@link snippetOrCardHolders}), unless it is at the path of the one item
+   * there and claims no snippet's or card's id: its own note deleted or
+   * renamed away, another note took its place. An import of one file asks
+   * the user then whether to make the note that item's note (see
+   * {@link reassociate}); a batch refuses it as it refuses any.
+   * @returns null: nothing is imported as an article either way
+   */
+  private async reassociateOrRefuse(
+    file: TFile,
+    holders: readonly (PathHolder & { stray: boolean })[],
+    report: ImportReport
+  ): Promise<null> {
+    const [holder] = holders;
+    // A stray row was found by its path, not by an id the note claims
+    if (holders.length !== 1 || !holder.stray || !report.reassociate) {
+      report.refuse(snippetOrCardNote());
+      return null;
+    }
+    if (await report.reassociate(file, holder)) {
+      await this.reassociate(file, holder, report);
+    } else {
+      report.refuse({
+        notice: `Canceled import of "${file.basename}"`,
+        reason: 'is at the path of a snippet or card',
+      });
+    }
+    return null;
+  }
+
+  /**
+   * Make `file` the note of the snippet or card `holder`, whose path it is at:
+   * write the row's `ir-id` and type tag into it, as the item's creation
+   * does, taking off any other item type's tag, which would read the note as
+   * that type instead (see `typeOfTags`), and bring the row back if it is
+   * deleted. Nothing else changes: the row already holds the path, and every
+   * other tag and property stays. A row that can't be saved puts the note's
+   * id and tags back as they were. Asked for by the user, so first checks that
+   * saving is still allowed and that the row is still at the note's path.
+   */
+  private async reassociate(
+    file: TFile,
+    { table, id }: PathHolder,
+    report: ImportReport
+  ): Promise<void> {
+    const kind = table === 'snippet' ? 'snippet' : 'card';
+    if (await refusedWrite(this.repo, `re-associate "${file.name}"`)) return;
+    const [still] = await this.repo.query(
+      `SELECT 1 FROM ${table} WHERE id = $1 AND reference = $2`,
+      [id, file.path]
+    );
+    if (!still) {
+      report.refuse({
+        notice: `The ${kind} is no longer at "${file.path}"; canceling import`,
+        reason: `the ${kind} left its path`,
+      });
+      return;
+    }
+    const tag = TAG_BY_TABLE[table];
+    const otherTypeTags = Object.values(TAG_BY_TABLE).filter(
+      (typeTag) => typeTag !== tag
+    );
+    await withCompensation(async (step) => {
+      await step(
+        () =>
+          Obsidian.updateFrontMatterUndoably(
+            file,
+            { 'ir-id': id, tags: tag },
+            this.app,
+            (frontmatter) => stripFrontmatterTags(frontmatter, otherTypeTags)
+          ),
+        (undo) => undo()
+      );
+      // Built once the note is written, so the fingerprint is the one it left
+      await this.repo.mutate(
+        `UPDATE ${table} SET deleted = FALSE, note_mtime = $1 WHERE id = $2 AND reference = $3`,
+        [noteFingerprint(file), id, file.path]
+      );
+    });
+    report.confirm(`"${file.basename}" is the ${kind}'s note again`);
   }
 
   /**
@@ -1533,7 +1676,7 @@ export class ArticleManager extends ItemManager {
 
     const frontmatter = Obsidian.getFrontMatter(file, this.app);
     if (frontmatter?.tags?.some((tag) => IMPORT_BLOCKED_TAGS.has(tag))) {
-      report.refuse(blockedTag());
+      report.refuse(snippetOrCardNote());
       return null;
     }
 

@@ -774,11 +774,15 @@ export class ObsidianHelpers {
    * {@link updateFrontMatter} with `updates`, answering how to take it back:
    * each key it wrote put back as it was then, or removed when it wasn't
    * there. The undo does nothing when the update never ran.
+   * @param edit run on the frontmatter ahead of `updates`, in the same write,
+   *   answering what each key it changed held before (as
+   *   `stripFrontmatterTags` does), for the undo to put back too
    */
   static async updateFrontMatterUndoably(
     file: TFile,
     updates: FrontMatterUpdates,
-    app: App
+    app: App,
+    edit?: (frontmatter: Record<string, unknown>) => Record<string, unknown>
   ): Promise<() => Promise<void>> {
     // What each key held, once the update has read the note
     const before: { keys?: [string, { value: unknown } | null][] } = {};
@@ -789,6 +793,12 @@ export class ObsidianHelpers {
           ? { value: structuredClone(frontmatter[key]) }
           : null,
       ]);
+      // Read before the edit, so a key both change is put back as it was
+      // either way
+      const edited = edit?.(frontmatter) ?? {};
+      for (const [key, value] of Object.entries(edited)) {
+        before.keys.push([key, { value: structuredClone(value) }]);
+      }
     });
     return async () => {
       const written = before.keys;
