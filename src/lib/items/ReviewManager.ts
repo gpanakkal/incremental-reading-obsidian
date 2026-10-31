@@ -1085,6 +1085,9 @@ export default class ReviewManager {
 
     // Read only: a write here would rewrite the note's frontmatter
     const frontmatter = await Obsidian.readFrontMatter(concreteFile, this.app);
+    // Tag-only by design: the item resolver needs the row's reference to be
+    // the note's path, which is what a move changes; an untagged note follows
+    // only from its own reference (see `#followUntagged`)
     const type = Obsidian.typeOfTags(frontmatter.tags);
     let rowId = irIdOf(frontmatter);
     this.snippets.offsetTracker.renameFile(oldPath, file.path);
@@ -1367,6 +1370,9 @@ export default class ReviewManager {
     // deleted again between the write's read and its write
     const frontmatter = await Obsidian.readFrontMatter(concreteFile, this.app);
     const id = irIdOf(frontmatter);
+    // Tag-only by design: a note at a new path claims a row elsewhere by its
+    // tag alone, as no row has its path yet; an untagged one brings back only
+    // its own tombstone (see `#restoreOwnTombstone`)
     const type = Obsidian.typeOfTags(frontmatter.tags);
 
     if (!id) return null;

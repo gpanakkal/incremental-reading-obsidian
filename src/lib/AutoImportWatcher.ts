@@ -100,8 +100,8 @@ interface AutoImportWatcherOptions {
   /**
    * Whether `file`, whose `ir-id` `id` a row holds, is the note of the live
    * article at its path but lacks the article tag (see
-   * `ArticleManager.lostArticleTag`): no item to review, which the import
-   * command repairs rather than refusing, so a trigger tag asks for that too.
+   * `ArticleManager.lostArticleTag`): the import command puts the tag back
+   * rather than refusing, so a trigger tag asks for that too.
    * Without it, no note is.
    */
   needsRepair?: (id: string, file: TFile) => Promise<boolean>;

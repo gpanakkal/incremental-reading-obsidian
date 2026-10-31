@@ -840,9 +840,13 @@ export class CardManager extends ItemManager {
     return { ref: row.reference, kind: 'card', ...range };
   }
 
-  /** The id of the row of the article or snippet note `file`, if it is one. */
+  /**
+   * The id of the row of the article or snippet note `file`, if it is one: by
+   * its tags, or, carrying none, by the live row holding it (see
+   * `getItemType`), as a snippet's parent is found.
+   */
   private async findParentId(file: TFile) {
-    const parentType = await Obsidian.getNoteType(file, this.app);
+    const parentType = await this.getItemType(file);
     let entry;
     if (parentType === 'article') {
       entry = await this.findArticle(file);

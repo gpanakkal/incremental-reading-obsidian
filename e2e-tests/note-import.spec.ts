@@ -20,6 +20,7 @@ import {
   selectParagraph,
   setNativeMenus,
   setNewLinkFormat,
+  setPluginSetting,
   watchNotices,
 } from './helpers';
 import {
@@ -504,4 +505,82 @@ test.describe("Importing a note at a deleted snippet's path", () => {
       window.locator('.ir-queue-row[data-type="article"]')
     ).toHaveCount(0);
   });
+});
+
+test.describe("Importing a copy of a snippet's or card's note that lost its type tag", () => {
+  const kinds = [
+    { kind: 'snippet', table: 'snippet', command: 'extract-selection' },
+    { kind: 'card', table: 'srs_card', command: 'create-card' },
+  ];
+  /** Where the user moves the item's note: outside the data folder. */
+  const MOVED = 'Moved item.md';
+
+  for (const { kind, table, command } of kinds) {
+    test(`refuses a ${kind} note moved out of the data folder, as a tagged one is, and makes no copy`, async () => {
+      await openNote(window, 'sources/Security Principles');
+      await selectParagraph(window, BULLET_TEXT);
+      await executeCommandById(window, `incremental-reading:${command}`);
+      // Unofficial: `app.plugins.plugins`, `reviewManager.repo`
+      const reference = async () =>
+        (
+          await window.evaluate((table) => {
+            const { app } = window as unknown as { app: PageApp };
+            const { repo } =
+              app.plugins.plugins['incremental-reading'].reviewManager;
+            return repo
+              .query(`SELECT reference FROM ${table}`)
+              .map((row) => row.reference as string);
+          }, table)
+        )[0];
+      await expect.poll(reference).toBeTruthy();
+      const itemPath = await reference();
+
+      // The user takes the type tag off, then moves the note out of the data
+      // folder; its row follows it there
+      await window.evaluate(
+        async ([itemPath, moved]) => {
+          const { app } = window as unknown as {
+            app: PageApp & {
+              fileManager: {
+                renameFile(file: unknown, path: string): Promise<void>;
+              };
+            };
+          };
+          const file = app.vault.getFileByPath(itemPath);
+          await app.fileManager.processFrontMatter(file, (frontmatter) => {
+            frontmatter.tags = ['mine'];
+          });
+          await app.fileManager.renameFile(file, moved);
+        },
+        [itemPath, MOVED] as const
+      );
+      await expect.poll(reference).toBe(MOVED);
+      await expect
+        .poll(() =>
+          window.evaluate((moved) => {
+            const { app } = window as unknown as { app: PageApp };
+            return app.metadataCache.getFileCache(
+              app.vault.getFileByPath(moved)
+            )?.frontmatter?.tags;
+          }, MOVED)
+        )
+        .toEqual(['mine']);
+
+      await setPluginSetting(window, 'copyOnImport', true);
+      await openFileInActiveLeaf(window, MOVED);
+      const notices = await watchNotices(window);
+      await executeCommandById(window, 'incremental-reading:import-article');
+      await finalizeArticleImport(window);
+
+      // Told why, once
+      await expect.poll(async () => (await notices()).length).toBe(1);
+      await executeCommandById(window, 'incremental-reading:learn');
+      await expect(
+        window.locator(`.ir-queue-row[data-type="${kind}"]`)
+      ).toHaveCount(1);
+      await expect(
+        window.locator('.ir-queue-row[data-type="article"]')
+      ).toHaveCount(0);
+    });
+  }
 });

@@ -105,7 +105,8 @@ const TAG_OF: Readonly<Record<NoteType, string>> = {
 
 /**
  * The `ir-id` the cache has for `file`, if any, and the item type its tags
- * name, if they name one.
+ * name, if they name one. Tag-only by design: a leftover is a note no row
+ * holds, so its tags are the only type it claims.
  */
 function claimOf(
   app: Pick<App, 'metadataCache'>,
@@ -297,9 +298,11 @@ export function leftoversMessage(leftovers: readonly Leftover[]): string {
 
 /**
  * Give the note `file` a row as an item of `type` with `id`. The note gets the
- * type's tag first, in place of any other item type's: one typed by its folder
- * alone, or of no type, has none, and without it doesn't read as an item
- * (`ObsidianHelpers.getNoteType`), and one the user chose to keep as another
+ * type's tag first, in place of any other item type's. One typed by its folder
+ * alone, or of no type, has none, and the tag is what Obsidian's tag search
+ * shows an item's note by and what lets the note take its row along when it
+ * turns up at a path the row doesn't name (see `ReviewManager.handleCreation`
+ * and its rename handling). One the user chose to keep as another
  * type than its tag names (a card kept as a snippet, say) would read as the old
  * type. The row comes last, as it commits the adoption, and a note left tagged
  * by a failed one is still a leftover.

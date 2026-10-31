@@ -412,9 +412,12 @@ function relinkRow(file: TFile, id: string): MutationStatement {
 
 /**
  * Whether the frontmatter `frontmatter` types its note as an article, by the
- * tags review reads a note's type from (`ObsidianHelpers.typeOfTags`). A note
- * an article row answers to but that lacks the tag is no item to review: it
- * can't be opened in review, and the reading-mode bar treats it as plain.
+ * tags review reads a note's type from (`ObsidianHelpers.typeOfTags`).
+ *
+ * Tag-only by design: the tag is what this check is about. A note its live
+ * article row holds is an article without it (`ItemManager.getItemType`); an
+ * import of one only puts the tag back, which Obsidian's tag search and
+ * Properties show the item by.
  */
 function typedAsArticle(frontmatter: { tags?: unknown } | undefined): boolean {
   return Obsidian.typeOfTags(frontmatter?.tags) === 'article';
@@ -932,9 +935,9 @@ export class ArticleManager extends ItemManager {
     )) as (Pick<ArticleRow, 'id' | 'deleted'> | undefined)[];
     const refMatch = byRef[0];
 
-    // The note's own row, by its id. An article only while that row is live
-    // and the note carries the tag review types it by; short of either, the
-    // note is in no queue and can't be reviewed, and importing it repairs it
+    // The note's own row, by its id. A deleted one is brought back; a live
+    // one whose note lacks the article tag gets it back (see
+    // `typedAsArticle`): the note is the article already, tag or no tag
     if (
       refMatch &&
       refMatch.id === existingId &&
@@ -1174,7 +1177,7 @@ export class ArticleManager extends ItemManager {
   /**
    * Make the article `id`, `deleted` or not, the live article at `file`, which
    * claims its id, adopting what was taken from it, and give the note the
-   * article tag when it lacks it, so review types it as one (see
+   * article tag when it lacks it, which marks it as one (see
    * {@link typedAsArticle}). A row that can't be saved puts the tag back as it
    * was. Says `message` once done, with an undo for a deleted row brought
    * back, which an undo deletes again.
@@ -1216,8 +1219,10 @@ export class ArticleManager extends ItemManager {
 
   /**
    * Whether `file`, whose `ir-id` is `id`, is the note of the live article at
-   * its path but lacks the article tag: no item to review, which an import of
-   * it where it is repairs (see {@link importInPlace}). The auto-import
+   * its path but lacks the article tag, which an import of it where it is puts
+   * back (see {@link importInPlace}). Tag-only by design: the row already types
+   * the note (`ItemManager.getItemType`); the tag keeps Obsidian's tag search,
+   * and the readers that go by tags alone, in step with it. The auto-import
    * watcher asks this of a note whose id a row holds, so it takes for an
    * article just what an import refuses as one. A deleted row's note is not
    * asked for: an automatic import leaves a deleted article deleted.
@@ -1675,13 +1680,19 @@ export class ArticleManager extends ItemManager {
     }
 
     const frontmatter = Obsidian.getFrontMatter(file, this.app);
-    if (frontmatter?.tags?.some((tag) => IMPORT_BLOCKED_TAGS.has(tag))) {
+    // Re-associate if the source already carries an ir-id with a matching DB row
+    const existingId = frontmatter?.['ir-id'];
+    // A copy of a snippet's or card's note is no article either, as the
+    // import in place refuses one; only that import offers to make a stray
+    // note the item's note again (see `reassociateOrRefuse`)
+    if (
+      frontmatter?.tags?.some((tag) => IMPORT_BLOCKED_TAGS.has(tag)) ||
+      (await this.snippetOrCardHolders(file, existingId)).length > 0
+    ) {
       report.refuse(snippetOrCardNote());
       return null;
     }
 
-    // Re-associate if the source already carries an ir-id with a matching DB row
-    const existingId = frontmatter?.['ir-id'];
     if (existingId) {
       const rows = (await this.repo.query(
         `SELECT id, deleted, reference FROM article WHERE id = $1 AND ${NOT_PURGED}`,

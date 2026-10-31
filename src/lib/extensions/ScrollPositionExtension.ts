@@ -15,7 +15,7 @@ import { irPluginFacet } from './irPluginFacet';
  * - On scroll: Hands the position to the store, once per frame (browsers fire
  *   `scroll` at most once per frame). The store keeps it in localStorage and
  *   writes the database only once the last tab on the item closes
- * - Only activates for articles and snippets
+ * - Only activates for articles and snippets, tagged or known by their row
  *
  * The position is stored as a **document character offset** (the top-visible
  * position), not a pixel offset: a logical anchor survives viewport-width
@@ -53,10 +53,9 @@ export const scrollPositionExtension = ViewPlugin.define(
 
     // keep track of if the ViewPlugin was destroyed
     let destroyed = false;
-    // Kick off async noteType check; initialise listeners only when confirmed IR note.
-    void Obsidian.getNoteType(file, app).then(async (noteType) => {
-      if (destroyed || !noteType) return;
-
+    // Listen only once the note is known for an article or snippet: by its
+    // tags or by the row holding it, as `positionIdOf` asks the item layer
+    void (async () => {
       const { reviewManager, positions } = plugin;
       if (!reviewManager || !positions) return;
       // A card has no reading position, nor does a note without a row
@@ -214,7 +213,7 @@ export const scrollPositionExtension = ViewPlugin.define(
             .catch(() => {});
         });
       });
-    });
+    })();
 
     return {
       destroy() {

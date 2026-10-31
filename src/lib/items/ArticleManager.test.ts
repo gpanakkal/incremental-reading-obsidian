@@ -6419,9 +6419,10 @@ describe('import', () => {
         const EXISTING_ID = 'existing-article-id';
         const snippets = makeSnippetsStub([makeAdoptedRow(0)]);
         const repo = makeSimpleRepo();
-        (repo.query as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
-          { id: EXISTING_ID },
-        ]);
+        // No snippet or card holds the note; its id names an article
+        (repo.query as ReturnType<typeof vi.fn>)
+          .mockResolvedValueOnce([])
+          .mockResolvedValueOnce([{ id: EXISTING_ID }]);
         const manager = new ArticleManager(
           makeImportPluginWithSnippets(true, snippets),
           repo
@@ -11480,6 +11481,116 @@ describe("importing a snippet's or card's note that lost its type tag (0237)", (
         });
         repo.dispose();
       }
+    });
+  });
+
+  describe('as a copy, from outside the data folder', () => {
+    const OUTSIDE = 'notes/N.md';
+    const OUTSIDE_ELSEWHERE = 'notes/gone.md';
+    const TAGGED = 'notes/tagged.md';
+
+    /** How a copy-import of a note tagged as a snippet ends: the refusal. */
+    async function taggedOutcome() {
+      const { vault, manager, repo } = await wireArticles(
+        { [TAGGED]: { tags: [SNIPPET_TAG] } },
+        null
+      );
+      const [outcome] = await manager.importMany(
+        [{ file: vault.files.get(TAGGED)! }],
+        { priority: DEFAULT_PRIORITY, fixedIntervalDays: null, makeCopy: true }
+      );
+      repo.dispose();
+      return outcome;
+    }
+
+    it("refuses a note a snippet or card row not deleted for good holds by path or id as one tagged a snippet's is, tag or no tag, making no copy and changing nothing", async () => {
+      vi.restoreAllMocks();
+      const refusal = await taggedOutcome();
+      expect(refusal.status).toBe('failed');
+      await fc.assert(
+        fc.asyncProperty(
+          fc.option(
+            fc.record({
+              table: fc.constantFrom('snippet' as const, 'srs_card' as const),
+              spec: rowSpecArb,
+            }),
+            { nil: undefined }
+          ),
+          fc.option(rowSpecArb, { nil: undefined }),
+          fc.oneof(
+            { weight: 2, arbitrary: fc.constant('x') },
+            fc.constant('z'),
+            fc.constant(undefined)
+          ),
+          fc.subarray([ARTICLE_TAG, SNIPPET_TAG, CARD_TAG, 'kept']),
+          async (itemRow, articleRow, noteId, tags) => {
+            vi.restoreAllMocks();
+            const frontmatter: Record<string, unknown> = { tags };
+            if (noteId !== undefined) frontmatter['ir-id'] = noteId;
+            const { vault, repo, manager, before } = await wireArticles(
+              { [OUTSIDE]: frontmatter },
+              null
+            );
+            const at = (spec: { where: string }, id: string) =>
+              ({
+                here: OUTSIDE,
+                elsewhere: OUTSIDE_ELSEWHERE,
+                purged: purgedReference(id),
+              })[spec.where]!;
+            if (itemRow) {
+              const { spec, table } = itemRow;
+              const id = spec.idMatches && noteId === 'x' ? 'x' : 'i';
+              insertItemRow(repo, table, id, at(spec, id), spec.deleted);
+            }
+            if (articleRow) {
+              const id = articleRow.idMatches && noteId === 'x' ? 'x' : 'a';
+              insertItemRow(
+                repo,
+                'article',
+                id,
+                at(articleRow, id),
+                articleRow.deleted
+              );
+            }
+            const tablesBefore = itemTables(repo);
+
+            const [outcome] = await manager.importMany(
+              [{ file: vault.files.get(OUTSIDE)! }],
+              {
+                priority: DEFAULT_PRIORITY,
+                fixedIntervalDays: null,
+                makeCopy: true,
+              }
+            );
+
+            const tablesAfter = itemTables(repo);
+            const holds =
+              itemRow !== undefined &&
+              (itemRow.spec.here ||
+                (itemRow.spec.idMatches &&
+                  !itemRow.spec.purged &&
+                  noteId === 'x'));
+            if (
+              tags.includes(SNIPPET_TAG) ||
+              tags.includes(CARD_TAG) ||
+              holds
+            ) {
+              expect(outcome).toEqual({ ...refusal, file: outcome.file });
+              expect(tablesAfter).toEqual(tablesBefore);
+              expect(vault.paths()).toEqual([OUTSIDE]);
+              expect(vault.frontmatterOf(OUTSIDE)).toEqual(before[OUTSIDE]);
+            } else {
+              expect(outcome.reason).not.toBe(refusal.reason);
+            }
+            // Never a second row for a snippet's or card's note, nor any
+            // change to the snippet or card
+            expect(tablesAfter.snippet).toEqual(tablesBefore.snippet);
+            expect(tablesAfter.srs_card).toEqual(tablesBefore.srs_card);
+            repo.dispose();
+          }
+        ),
+        { numRuns: 120 }
+      );
     });
   });
 });

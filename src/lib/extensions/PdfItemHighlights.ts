@@ -188,7 +188,12 @@ export function showPdfItemHighlights(
     isStopped
   );
 
-  /** Whether `note` is a card note whose `source` link resolves to `file`. */
+  /**
+   * Whether `note` is a card note whose `source` link resolves to `file`.
+   * Tag-only by design: a cheap, synchronous filter on every change the vault
+   * reports; cards with rows are matched by path below, and their row writes
+   * re-read through `onDataChange`.
+   */
   const linksHere = (note: TFile) =>
     Obsidian.getFrontMatter(note, plugin.app)?.tags?.includes(CARD_TAG) &&
     Obsidian.sourceIs(note, file, plugin.app);

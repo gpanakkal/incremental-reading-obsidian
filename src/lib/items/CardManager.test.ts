@@ -1,4 +1,5 @@
 import {
+  ARTICLE_TAG,
   CARD_ANSWER_REPLACEMENT,
   CARD_ANSWER_REPLACEMENT_IN_CODE,
   CARD_ANSWER_REPLACEMENT_IN_MATH,
@@ -8,6 +9,7 @@ import {
   MAX_SQL_QUERY_PARAMS,
   MS_PER_DAY,
   MS_PER_YEAR,
+  SNIPPET_TAG,
   SOURCE_INDEX_TIMEOUT_MS,
   VALID_DELIMITER_PATTERN,
 } from '#/lib/constants';
@@ -30,6 +32,7 @@ import type {
 import { excludedIdsOf, seenElsewhereArb } from '#/test/due-query';
 import { makeWindow } from '#/test/fake-window';
 import {
+  insertItemAt,
   makeItemVault,
   runOutMergeWait,
   TestRepository,
@@ -6175,6 +6178,142 @@ describe('adoptLeftover', () => {
     await manager.adoptLeftover(vault.files.get('cards/left.md')!, 'left-1');
 
     expect(repo.rows('srs_card')[0]).toMatchObject({ parent: null });
+  });
+
+  it("gives one whose source is a PDF the PDF's article as its parent while that article is live", async () => {
+    for (const deleted of [false, true]) {
+      vi.restoreAllMocks();
+      const vault = makeItemVault({
+        'cards/left.md': { 'ir-id': 'left-1', tags: [CARD_TAG] },
+        'docs/paper.pdf': null,
+      });
+      const repo = await TestRepository.create();
+      insertItemAt(repo, 'article', {
+        id: 'pdf-1',
+        reference: 'docs/paper.pdf',
+        deleted,
+      });
+      vi.spyOn(Obsidian, 'getSourceFile').mockReturnValue(
+        vault.files.get('docs/paper.pdf')!
+      );
+      const manager = new CardManager(
+        { app: vault.app, settings: {} } as never,
+        repo
+      );
+
+      await manager.adoptLeftover(vault.files.get('cards/left.md')!, 'left-1');
+
+      expect(repo.rows('srs_card')[0]).toMatchObject({
+        parent: deleted ? null : 'pdf-1',
+      });
+      repo.dispose();
+    }
+  });
+});
+
+describe('the parent of a card made from a note', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const SOURCE = 'notes/source.md';
+  type ItemTable = 'article' | 'snippet' | 'srs_card';
+  const TABLES: readonly ItemTable[] = ['article', 'snippet', 'srs_card'];
+  const TYPE_OF_TABLE = {
+    article: 'article',
+    snippet: 'snippet',
+    srs_card: 'card',
+  } as const;
+  /** The item type tags, in the order a note carrying several is typed by. */
+  const TYPE_TAGS = [
+    [ARTICLE_TAG, 'article'],
+    [SNIPPET_TAG, 'snippet'],
+    [CARD_TAG, 'card'],
+  ] as const;
+
+  /**
+   * A row of one item table, or none: whether it is at the note's path, a
+   * tombstone, and whether it holds the id the note claims.
+   */
+  const rowSpecArb = fc.option(
+    fc.record({
+      here: fc.boolean(),
+      deleted: fc.boolean(),
+      holds: fc.boolean(),
+    }),
+    { nil: undefined }
+  );
+
+  it('is the row of the article or snippet the note is, typed by its tags or, carrying none, by the live row at its path that holds its ir-id', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        // A note with no type tag is the case the rows decide: half the runs
+        fc.oneof(
+          fc.subarray([ARTICLE_TAG, SNIPPET_TAG, CARD_TAG, 'other']),
+          fc.subarray(['other'])
+        ),
+        fc.boolean(),
+        fc.tuple(rowSpecArb, rowSpecArb, rowSpecArb),
+        async (tags, claimsId, specs) => {
+          vi.restoreAllMocks();
+          // Ids are UUIDs: at most one row, of one table, holds the note's
+          let held = false;
+          const rows = TABLES.flatMap((table, i) => {
+            const spec = specs[i];
+            if (!spec) return [];
+            const holds = spec.holds && claimsId && !held;
+            held ||= holds;
+            return [{ table, ...spec, holds, id: holds ? 'note-id' : table }];
+          });
+          const frontmatter: Record<string, unknown> = { tags };
+          if (claimsId) frontmatter['ir-id'] = 'note-id';
+          const vault = makeItemVault({ [SOURCE]: frontmatter });
+          const repo = await TestRepository.create();
+          for (const row of rows) {
+            insertItemAt(repo, row.table, {
+              id: row.id,
+              reference: row.here ? SOURCE : `elsewhere/${row.table}.md`,
+              deleted: row.deleted,
+            });
+          }
+          const manager = new CardManager(
+            { app: vault.app, settings: {} } as never,
+            repo
+          );
+
+          const card = await (
+            manager as unknown as {
+              createFileAndEntry(
+                text: string,
+                source: TFile
+              ): Promise<{ data: { id: string } } | null>;
+            }
+          ).createFileAndEntry(
+            `${LEFT} answer ${RIGHT}`,
+            vault.files.get(SOURCE)!
+          );
+
+          const holder = rows.find(
+            (row) => row.holds && row.here && !row.deleted
+          );
+          const type =
+            TYPE_TAGS.find(([tag]) => tags.includes(tag))?.[1] ??
+            (holder ? TYPE_OF_TABLE[holder.table] : null);
+          // The row of that type at the note's path, a tagged note's
+          // tombstone there included; a card's note is no parent
+          const parent =
+            type === 'article' || type === 'snippet'
+              ? rows.find((row) => row.table === type && row.here)
+              : undefined;
+          expect(card).not.toBeNull();
+          expect(
+            repo.rows('srs_card').find(({ id }) => id === card!.data.id)
+          ).toMatchObject({ parent: parent?.id ?? null });
+          repo.dispose();
+        }
+      ),
+      { numRuns: 150 }
+    );
   });
 });
 

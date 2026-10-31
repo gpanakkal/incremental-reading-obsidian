@@ -157,6 +157,8 @@ function makePlugin(
  * @param topOffset         - document character offset that posAtCoords resolves the
  *                            top-visible point to (drives what handleScroll saves).
  * @param docLength         - document length, used to exercise restore clamping.
+ * @param noteType          - the type the note's tags name (`getNoteType`), which
+ *                            says nothing the review manager's item id doesn't.
  */
 function makeView(
   opts: {
@@ -371,21 +373,28 @@ describe('early return — plugin is null', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Early-return guard: note has no IR type
+// A note its tags don't type: its row decides
 // ---------------------------------------------------------------------------
-describe('early return — not an IR note', () => {
-  it('returns a no-op destroy when getNoteType returns null', () => {
-    const view = makeView({ noteType: null });
-    const instance = factory(view as never);
-    expect(instance).toHaveProperty('destroy');
-    expect(() => instance.destroy()).not.toThrow();
-  });
-
-  it('does not register a scroll listener when getNoteType returns null', async () => {
-    const view = makeView({ noteType: null });
+describe('a note carrying no type tag', () => {
+  it('opens the position of the item whose row holds it, restores it, and saves on scroll', async () => {
+    const reviewManager = makeReviewManager(200);
+    const plugin = makePlugin(reviewManager);
+    const view = makeView({
+      plugin,
+      noteType: null,
+      propertiesWidget: makeWidgetElement(),
+    });
+    spyScrollIntoView();
     factory(view as never);
     await vi.runAllTimersAsync();
-    expect(view.scrollDOM.addEventListener).not.toHaveBeenCalled();
+
+    expect(plugin.positions.open.mock.calls).toEqual([[ITEM_ID]]);
+    expect(view.dispatch).toHaveBeenCalled();
+    expect(view.scrollDOM.addEventListener).toHaveBeenCalledWith(
+      'scroll',
+      expect.any(Function),
+      expect.anything()
+    );
   });
 });
 
@@ -1234,7 +1243,6 @@ describe('destroy()', () => {
       makeView({ info: null }),
       makeView({ file: null }),
       makeView({ plugin: null }),
-      makeView({ noteType: null }),
       makeView({ plugin: makePlugin(null) as never }),
     ];
     for (const view of cases) {
