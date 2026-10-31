@@ -140,13 +140,20 @@ export class ItemManager {
   }
 
   /**
-   * The type of item `file` is, if any. A note is typed by its tags, as
-   * `getNoteType` reads them, and, carrying no type tag, by the live row its
-   * `ir-id` names while that row's `reference` is the note's own path: the
-   * note at a row's reference is that row's note iff it carries its id, tag or
-   * no tag. A copy of the note elsewhere, or a tombstone's, has none. The id
-   * comes from the metadata cache, which has long parsed a note that lost its
-   * tag; a note just made carries its tag.
+   * The type of item `file` is, if any. The note at a row's reference is that
+   * row's note iff it carries its id, tag or no tag. So a note carrying no type
+   * tag is typed by the live row its `ir-id` names while that row's
+   * `reference` is the note's own path. A tagged note is typed by its tag, as
+   * `getNoteType` reads it, unless it is a copy: its `ir-id` names a live row
+   * whose `reference` is another path, where the row's own note is, claiming
+   * the same id. A copy of the note elsewhere, tagged or not, or a tombstone's
+   * untagged note, has none. The id comes from the metadata cache, which has
+   * long parsed a note that lost its tag.
+   *
+   * A tagged note claiming no live row, or one whose row's reference holds no
+   * note claiming its id, keeps its tag's type: a note just made is written
+   * before its row is stored, and a note moved while no rename handler was
+   * listening is the row's until `followMovedNotes` points the row at it.
    *
    * A file with no frontmatter, a PDF say, has neither. It is known by its
    * path alone, so it is whatever the row at its path is: none, when that row
@@ -154,9 +161,11 @@ export class ItemManager {
    */
   async getItemType(file: TFile): Promise<NoteType | null> {
     if (supportsFrontmatter(file)) {
-      return (
-        (await Obsidian.getNoteType(file, this.app)) ??
-        this.#heldType(file, this.app.metadataCache.getFileCache(file))
+      const tagged = await Obsidian.getNoteType(file, this.app);
+      return this.#heldType(
+        file,
+        this.app.metadataCache.getFileCache(file),
+        tagged
       );
     }
 
@@ -170,45 +179,63 @@ export class ItemManager {
    * cache's parse of it, as its `changed` event hands it over (see
    * `ObsidianHelpers.noteTypeFromCache`, which answers for the tags).
    *
-   * Answers at once, not with a promise, when the tags settle it, when the
-   * note claims no id, and when the repository answers at once, as sql.js
-   * does: a tag added or an id taken off then shows with no wait. Only a
-   * repository that answers later is waited on.
+   * Answers at once, not with a promise, when the note claims no id, and when
+   * the repository answers at once, as sql.js does: a tag added or an id taken
+   * off then shows with no wait. Only a repository that answers later is
+   * waited on.
    */
   itemTypeFromCache(
     file: TFile,
     cache: CachedMetadata | null
   ): NoteType | null | Promise<NoteType | null> {
-    return (
-      Obsidian.noteTypeFromCache(file, cache, this.app) ??
-      this.#heldType(file, cache)
+    return this.#heldType(
+      file,
+      cache,
+      Obsidian.noteTypeFromCache(file, cache, this.app)
     );
   }
 
   /**
-   * The type of the live row whose id is the `ir-id` in `cache` and whose
-   * `reference` is `file`'s path, or `null` for none: a note claiming no id,
-   * one the vault no longer holds, a copy, a tombstone's note. At once when
-   * the repository answers at once (see {@link itemTypeFromCache}).
+   * The type of note `file`, whose parse is `cache`, given `tagged`, the type
+   * its tags name (see {@link getItemType}): the live row's whose id is the
+   * `ir-id` in `cache` and whose `reference` is `file`'s path, `tagged` before
+   * it; else `tagged`, unless the note is a copy of that id's live note
+   * elsewhere; else `null`. `null` too for a note the vault no longer holds.
+   * At once when the note claims no id or the repository answers at once (see
+   * {@link itemTypeFromCache}).
    */
   #heldType(
     file: TFile,
-    cache: CachedMetadata | null
+    cache: CachedMetadata | null,
+    tagged: NoteType | null
   ): NoteType | null | Promise<NoteType | null> {
     const id: unknown = cache?.frontmatter?.['ir-id'];
-    if (typeof id !== 'string') return null;
+    if (typeof id !== 'string') return tagged;
     if (this.app.vault.getFileByPath(file.path) !== file) return null;
-    // One lookup by primary key per table; `reference` is unique, so at most
-    // one row answers
+    // One lookup by primary key per table
     const rows = this.repo.query(
-      `SELECT 'article' AS type FROM article WHERE id = $1 AND reference = $2 AND deleted = FALSE
-       UNION ALL SELECT 'snippet' FROM snippet WHERE id = $1 AND reference = $2 AND deleted = FALSE
-       UNION ALL SELECT 'card' FROM srs_card WHERE id = $1 AND reference = $2 AND deleted = FALSE`,
-      [id, file.path]
+      `SELECT 'article' AS type, reference FROM article WHERE id = $1 AND deleted = FALSE
+       UNION ALL SELECT 'snippet', reference FROM snippet WHERE id = $1 AND deleted = FALSE
+       UNION ALL SELECT 'card', reference FROM srs_card WHERE id = $1 AND deleted = FALSE`,
+      [id]
     );
-    const typeOf = (held: RowTypes[]) =>
-      (held as unknown as { type: NoteType }[])[0]?.type ?? null;
+    const typeOf = (found: RowTypes[]): NoteType | null => {
+      const live = found as unknown as { type: NoteType; reference: string }[];
+      const held = live.find(({ reference }) => reference === file.path);
+      if (held) return tagged ?? held.type;
+      const copy = live.some(({ reference }) => this.#claimsAt(reference, id));
+      return copy ? null : tagged;
+    };
     return Array.isArray(rows) ? typeOf(rows) : rows.then(typeOf);
+  }
+
+  /** Whether the vault holds a note at `path` whose `ir-id` is `id`. */
+  #claimsAt(path: string, id: string): boolean {
+    const note = this.app.vault.getFileByPath(path);
+    if (!note) return false;
+    const claimed: unknown =
+      this.app.metadataCache.getFileCache(note)?.frontmatter?.['ir-id'];
+    return claimed === id;
   }
 
   async findById(id: string): Promise<{

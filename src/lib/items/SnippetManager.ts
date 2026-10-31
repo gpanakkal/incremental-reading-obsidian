@@ -814,9 +814,9 @@ export class SnippetManager extends ItemManager {
    */
   async getHighlights(parentFile: TFile) {
     // First find the parent's ID. A note is typed as the item layer types it:
-    // by its tags, or, having lost them, by the live row its `ir-id` names at
-    // its path, which a snippet taken from it is parented on. A file with no
-    // frontmatter is looked up by its path below as it always was
+    // by the live row its `ir-id` names at its path, which a snippet taken
+    // from it is parented on, or else by its tags unless it is a copy. A file
+    // with no frontmatter is looked up by its path below as it always was
     const parentType = supportsFrontmatter(parentFile)
       ? await this.getItemType(parentFile)
       : null;

@@ -14,6 +14,7 @@ import {
   openMenuWith,
   pendingSaves,
   readSnippetState,
+  setDefaultEditingMode,
   setNativeMenus,
   setPluginSetting,
 } from './helpers';
@@ -35,6 +36,8 @@ const NOTE_PATH = `${NOTE}.md`;
 /** Where Make a copy puts its copy, and where the copy is renamed to. */
 const COPY_PATH = `${NOTE} 1.md`;
 const RENAMED_PATH = 'Renamed copy.md';
+/** Where a second copy is made, once the first was. */
+const SECOND_COPY_PATH = `${NOTE} 2.md`;
 
 const SNIPPET_TEXT = 'the passage a snippet is taken from';
 const NOTE_TEXT = `# ${NOTE}\n\nA paragraph holding ${SNIPPET_TEXT}, and more.\n`;
@@ -236,4 +239,142 @@ test('a note its article moved away from loses its snippet highlights at once, a
     path.posix.basename(RENAMED_PATH, '.md')
   );
   await expect(painted().first()).toBeVisible();
+});
+
+test("an article note keeps its ir-id line in source mode, tagged or not, while a copy's can be deleted, tagged or not", async () => {
+  await setDefaultEditingMode(window, 'source');
+  await importArticle(window, NOTE);
+  const actionBar = window.locator(
+    '.workspace-leaf.mod-active .ir-action-bar-panel'
+  );
+  await expect(actionBar).toBeVisible();
+  // Live preview hides the frontmatter behind Properties, whose own filter
+  // drops a keyboard edit there before this plugin's guard is asked
+  await expect
+    .poll(() =>
+      window.evaluate(() => {
+        const leaf = (
+          window as unknown as { app: App }
+        ).app.workspace.getMostRecentLeaf();
+        return (leaf?.view.getState() as { source?: unknown }).source;
+      })
+    )
+    .toBe(true);
+
+  /** Whether the active editor's text still holds an `ir-id` line. */
+  const editorHoldsId = () =>
+    window.evaluate(() => {
+      const editor = (window as unknown as { app: App }).app.workspace
+        .activeEditor?.editor;
+      if (!editor) throw new Error('No active editor');
+      return /^ir-id:/m.test(editor.getValue());
+    });
+
+  /** Select the active editor's whole `ir-id` line and delete it from the keyboard. */
+  async function deleteIdLine() {
+    await window.evaluate(() => {
+      const editor = (window as unknown as { app: App }).app.workspace
+        .activeEditor?.editor;
+      if (!editor) throw new Error('No active editor');
+      const match = /^ir-id:.*\n/m.exec(editor.getValue());
+      if (!match) throw new Error('No ir-id line in the note');
+      editor.focus();
+      editor.setSelection(
+        editor.offsetToPos(match.index),
+        editor.offsetToPos(match.index + match[0].length)
+      );
+    });
+    await window.keyboard.press('Backspace');
+  }
+
+  /**
+   * Copy the original note, `ir-id` and all, as Make a copy does, to `copyAt`,
+   * open the copy, and let the plugin settle its type. A note just opened is
+   * editable until its type lands, so a deletion straight after opening would
+   * pass whatever the type: the heading appended here is parsed, and the
+   * plugin types the note from that parse, in the same task.
+   */
+  async function openSettledCopy(copyAt: string) {
+    await window.evaluate(
+      async ([from, to]) => {
+        const { app } = window as unknown as { app: App };
+        const original = app.vault.getFileByPath(from);
+        if (!original) throw new Error(`No file at ${from}`);
+        await app.vault.copy(original, to);
+      },
+      [NOTE_PATH, copyAt] as const
+    );
+    await openFileInActiveLeaf(window, copyAt);
+    await expect(activeTabTitle()).toHaveText(
+      path.posix.basename(copyAt, '.md')
+    );
+    await expect.poll(editorHoldsId).toBe(true);
+    await window.evaluate(async (at) => {
+      const { app } = window as unknown as { app: App };
+      const copy = app.vault.getFileByPath(at);
+      if (!copy) throw new Error(`No file at ${at}`);
+      await app.vault.append(copy, '\n## Settled\n');
+    }, copyAt);
+    await expect
+      .poll(() =>
+        window.evaluate((at) => {
+          const { app } = window as unknown as { app: App };
+          const copy = app.vault.getFileByPath(at);
+          return (
+            (copy &&
+              app.metadataCache
+                .getFileCache(copy)
+                ?.headings?.some(({ heading }) => heading === 'Settled')) ??
+            false
+          );
+        }, copyAt)
+      )
+      .toBe(true);
+  }
+
+  // Tagged, as the import left it
+  await deleteIdLine();
+  expect(await editorHoldsId()).toBe(true);
+
+  // A copy of the tagged note: no item, so no bar and its id is the user's
+  await openSettledCopy(COPY_PATH);
+  await expect(actionBar).toBeHidden();
+  await deleteIdLine();
+  await expect.poll(editorHoldsId).toBe(false);
+
+  // The type tag taken off the original: the article's row still holds it at
+  // its path
+  await openFileInActiveLeaf(window, NOTE_PATH);
+  await expect(activeTabTitle()).toHaveText(NOTE);
+  await window.evaluate(async (at) => {
+    const { app } = window as unknown as { app: App };
+    const note = app.vault.getFileByPath(at);
+    if (!note) throw new Error(`No file at ${at}`);
+    await app.fileManager.processFrontMatter(
+      note,
+      (frontmatter: Record<string, unknown>) => {
+        delete frontmatter.tags;
+      }
+    );
+  }, NOTE_PATH);
+  // Settled from the cache's parse, as a guard reading the tags would be too
+  await expect
+    .poll(() =>
+      window.evaluate((at) => {
+        const { app } = window as unknown as { app: App };
+        const note = app.vault.getFileByPath(at);
+        const cache = note && app.metadataCache.getFileCache(note);
+        return cache?.frontmatter !== undefined && !cache.frontmatter.tags;
+      }, NOTE_PATH)
+    )
+    .toBe(true);
+  await expect(actionBar).toBeVisible();
+  await deleteIdLine();
+  expect(await editorHoldsId()).toBe(true);
+
+  // A copy of the untagged note
+  await openSettledCopy(SECOND_COPY_PATH);
+  await expect(actionBar).toBeHidden();
+  await deleteIdLine();
+  await expect.poll(editorHoldsId).toBe(false);
 });

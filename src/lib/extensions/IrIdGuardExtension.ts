@@ -1,5 +1,3 @@
-import { ARTICLE_TAG, CARD_TAG, SNIPPET_TAG } from '#/lib/constants';
-import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import {
   EditorState,
   type Extension,
@@ -8,6 +6,7 @@ import {
   type Transaction,
 } from '@codemirror/state';
 import { getFrontMatterInfo } from 'obsidian';
+import { actionBarStateField } from './ActionBarExtension';
 import { irPluginFacet } from './irPluginFacet';
 import { isExternalSync } from './SnippetHighlightExtension';
 
@@ -46,9 +45,6 @@ const FENCE_LENGTH = 3;
  * leaving a live pointer editable.
  */
 const ID_ENTRY = /^[ \t]*(?:ir-id|'ir-id'|"ir-id")[ \t]*:/;
-
-/** Tags that mark a note as one of this plugin's items. */
-const ITEM_TAGS: readonly string[] = [ARTICLE_TAG, SNIPPET_TAG, CARD_TAG];
 
 /**
  * Shown when an edit to `ir-id` is refused, by the plugin's
@@ -148,23 +144,25 @@ export function irIdProtectedRange(
 }
 
 /**
- * Whether the editor's file is one of this plugin's item notes.
+ * Whether the editor's file is one of this plugin's item notes: whether the
+ * item layer typed it as an item, as the action bar's state field holds that
+ * type (see `ItemManager.getItemType`). That is the live row its `ir-id` names
+ * whose `reference` is the note's own path, or else its type tag unless it is
+ * a copy of that row's note, so a note that lost its tag stays guarded while
+ * its row holds it, and a copy of an item's note elsewhere, tagged or not,
+ * whose `ir-id` the user may well want to change, does not.
  *
- * Same criterion as `ObsidianHelpers.getNoteType` — an `ir-article`,
- * `ir-text-snippet` or `ir-card` tag — but read off the metadata cache, because
- * a change filter has to answer synchronously and `getNoteType` reads the note
- * itself, asynchronously (`readFrontMatter`, over `vault.cachedRead`). A cache
- * that has not caught up with a tag written moments ago only leaves the guard
- * off for that moment, and the write that put the tag there is exempt anyway.
+ * The field is read rather than the type worked out here because a change
+ * filter has to answer synchronously, on every transaction, and the row lookup
+ * is a database query the repository may answer only later. The field is
+ * settled when the note opens and on each metadata-cache `changed` event,
+ * keeping its type until a new answer lands, so the guard costs nothing per
+ * keystroke. Until the first answer for a note just opened lands, the field
+ * says none and the entry is editable for that moment; the ir-id watch still
+ * reports damage done then.
  */
 function isItemNote(state: EditorState): boolean {
-  const { info } = Obsidian.getFileInfoFromState(state);
-  if (!info?.file || !info.app) return false;
-  const cached: unknown = Obsidian.getFrontMatter(info.file, info.app)?.tags;
-  // `getFrontMatter` hands back an array, but a lone tag sits in the cache as a
-  // bare string, and a YAML tag need not be a string at all.
-  const tags: unknown[] = Array.isArray(cached) ? cached : [cached];
-  return tags.some((tag) => typeof tag === 'string' && ITEM_TAGS.includes(tag));
+  return state.field(actionBarStateField, false)?.noteType != null;
 }
 
 /**

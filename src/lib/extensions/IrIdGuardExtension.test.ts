@@ -1,6 +1,7 @@
 import { ARTICLE_TAG, CARD_TAG, SNIPPET_TAG } from '#/lib/constants';
 import type { IrIdWarning } from '#/lib/ir-id-warning-notice';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
+import type { NoteType } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';
 import {
   EditorSelection,
@@ -10,15 +11,8 @@ import {
 } from '@codemirror/state';
 import fc from 'fast-check';
 import type { App, MarkdownFileInfo, TFile } from 'obsidian';
-import {
-  afterEach,
-  describe,
-  expect,
-  it,
-  vi,
-  type Mock,
-  type MockInstance,
-} from 'vitest';
+import { afterEach, describe, expect, it, vi, type Mock } from 'vitest';
+import { actionBarStateField } from './ActionBarExtension';
 import {
   IR_ID_LOCKED_NOTICE,
   irIdGuardExtension,
@@ -197,11 +191,29 @@ const GUARD_FROM = NOTE.indexOf(ID_LINE) - 1;
 /** Offset just past the line break after the entry. */
 const GUARD_TO = NOTE.indexOf(ID_LINE) + ID_LINE.length + 1;
 
+/** {@link NOTE} after its type tag was taken off. */
+const UNTAGGED_NOTE = NOTE.replace('tags: ir-text-snippet\n', '');
+
+/** A replacement strictly inside the `ir-id` entry of `text`. */
+function editInsideId(text: string): {
+  from: number;
+  to: number;
+  insert: string;
+} {
+  const start = text.indexOf(ID_LINE);
+  return { from: start + 2, to: start + ID_LINE.length - 1, insert: 'x' };
+}
+
 interface WireOptions {
+  /**
+   * The type the item layer settled the note as, in the action bar's state
+   * field (a snippet by default); null for none yet or none at all — a plain
+   * note, a copy of an item's note, a note whose first answer has yet to land —
+   * and `'absent'` for an editor without the field.
+   */
+  noteType?: NoteType | null | 'absent';
+  /** The note's tags as the metadata cache holds them. */
   tags?: unknown;
-  hasFrontMatter?: boolean;
-  hasFile?: boolean;
-  hasApp?: boolean;
   /**
    * What the editor knows of the plugin: the whole of it (the default), a
    * plugin with no refusal warning on it yet, or no plugin at all, as in an
@@ -213,8 +225,26 @@ interface WireOptions {
 const file = { path: 'Snippets/note.md' } as TFile;
 const app = {} as App;
 
-/** The stubbed frontmatter read, so a test can assert what it was asked for. */
-let frontMatterSpy: MockInstance;
+/** Every type the item layer can settle a note as. */
+const NOTE_TYPES: readonly NoteType[] = ['article', 'snippet', 'card'];
+
+/**
+ * Tags the metadata cache can hold for a note: none, a lone tag as the bare
+ * string the cache keeps it as, a list with or without an item tag among
+ * others, and values that are not strings at all.
+ */
+function tagsArb(): fc.Arbitrary<unknown> {
+  const tag = fc.oneof(
+    fc.constantFrom<string>(...IR_TAGS),
+    fc.string({ maxLength: 12 })
+  );
+  return fc.oneof(
+    fc.constant(undefined),
+    tag,
+    fc.array(tag, { maxLength: 3 }),
+    fc.constant([1, true, null])
+  );
+}
 
 /** The refusal warning's `warn`, as the last {@link wire} installed it. */
 let warn: Mock<IrIdWarning['warn']>;
@@ -230,47 +260,59 @@ function pluginExtension(
 }
 
 /**
- * Stubs the metadata-cache reads the guard makes, and returns a state carrying
- * it and a plugin whose refusal warning is a fresh spy.
+ * The action bar's state field as the item layer last left it, typing the note
+ * `noteType`, or nothing for `'absent'`: an editor built without the field.
+ */
+function noteTypeExtension(noteType: WireOptions['noteType']): Extension {
+  if (noteType === 'absent') return [];
+  return actionBarStateField.init(() => ({
+    isReviewMode: false,
+    showAnswer: false,
+    callbacks: {},
+    noteType: noteType ?? null,
+  }));
+}
+
+/**
+ * Returns a state over `text` whose note the item layer typed as
+ * `options.noteType`, with a plugin whose refusal warning is a fresh spy.
+ *
+ * The metadata cache is stubbed to hold `options.tags` for the editor's file,
+ * so a guard that went back to reading tags would answer from them and not
+ * from the type.
  *
  * Spies are re-installed and the warning replaced on every call rather than in
  * `afterEach`, which runs once per `it` and not once per generated fast-check
  * case — call counts would otherwise pile up across a property's runs.
  */
 function wire(text: string, options: WireOptions = {}): EditorState {
-  const {
-    hasFrontMatter = true,
-    hasFile = true,
-    hasApp = true,
-    plugin = 'full',
-  } = options;
-  // Not a destructuring default: `{ tags: undefined }` is a case in its own
-  // right — a cached frontmatter block with no tags property.
-  const tags = 'tags' in options ? options.tags : [ARTICLE_TAG];
+  const { plugin = 'full' } = options;
+  // Not destructuring defaults: `{ tags: undefined }` is a case in its own
+  // right — a cached frontmatter block with no tags property — and so is
+  // `{ noteType: null }`, a note the item layer typed as none.
+  const tags = 'tags' in options ? options.tags : [SNIPPET_TAG];
+  const noteType = 'noteType' in options ? options.noteType : 'snippet';
 
   vi.restoreAllMocks();
   warn = vi.fn<IrIdWarning['warn']>();
   const warning: IrIdWarning = { warn, dispose: vi.fn() };
 
-  const info = {
-    file: hasFile ? file : null,
-    app: hasApp ? app : undefined,
-  } as unknown as MarkdownFileInfo;
+  const info = { file, app } as unknown as MarkdownFileInfo;
   vi.spyOn(Obsidian, 'getFileInfoFromState').mockReturnValue({
-    info: hasFile || hasApp ? info : null,
+    info,
     editorView: null,
   });
-  frontMatterSpy = vi
-    .spyOn(Obsidian, 'getFrontMatter')
-    .mockReturnValue(
-      hasFrontMatter
-        ? ({ tags } as unknown as ReturnType<typeof Obsidian.getFrontMatter>)
-        : undefined
-    );
+  vi.spyOn(Obsidian, 'getFrontMatter').mockReturnValue({
+    tags,
+  } as unknown as ReturnType<typeof Obsidian.getFrontMatter>);
 
   return EditorState.create({
     doc: text,
-    extensions: [pluginExtension(plugin, warning), irIdGuardExtension],
+    extensions: [
+      pluginExtension(plugin, warning),
+      noteTypeExtension(noteType),
+      irIdGuardExtension,
+    ],
   });
 }
 
@@ -595,78 +637,50 @@ describe('irIdGuardExtension', () => {
     );
   });
 
-  it('guards a note carrying any of the item tags, alone or among others', () => {
+  it('guards every note the item layer typed as an item, type tag or not', () => {
+    // Tagged notes, and notes that lost their tag while a live row still holds
+    // them at their path: the item layer types both, and the tags are no part
+    // of the guard's answer
     fc.assert(
       fc.property(
-        fc.constantFrom(...IR_TAGS),
-        // A lone tag sits in the metadata cache as a bare string.
-        fc.oneof(
-          fc.array(fc.string({ maxLength: 8 }), { maxLength: 3 }),
-          fc.constant(null)
-        ),
-        (itemTag, extraTags) => {
-          const state = wire(NOTE, {
-            tags: extraTags === null ? itemTag : [...extraTags, itemTag],
-          });
+        fc.constantFrom(...NOTE_TYPES),
+        fc.constantFrom(NOTE, UNTAGGED_NOTE),
+        tagsArb(),
+        (noteType, text, tags) => {
+          const state = wire(text, { noteType, tags });
+          const changes = editInsideId(text);
 
-          const next = state.update({
-            changes: { from: GUARD_FROM + 3, to: GUARD_TO - 2, insert: 'x' },
-            userEvent: 'input.type',
-          }).state;
+          const next = state.update({ changes, userEvent: 'input.type' }).state;
 
-          expect(next.doc.toString()).toBe(NOTE);
+          expect(next.doc.toString()).toBe(text);
           expect(warn).toHaveBeenCalledOnce();
         }
       )
     );
   });
 
-  it('leaves a note that is not one of the plugin’s items editable', () => {
+  it('leaves the entry editable on a note the item layer has not typed as an item, type tag or not', () => {
+    // A plain note, an untagged copy of an item's note (the row is the
+    // original's), and any note before its first type lands, or in an editor
+    // without the action bar's field
     fc.assert(
       fc.property(
-        fc.oneof(
-          fc
-            .array(
-              fc
-                .string({ maxLength: 12 })
-                .filter((tag) => !IR_TAGS.includes(tag as never)),
-              { maxLength: 3 }
-            )
-            .map((tags) => ({ tags })),
-          // Tags absent, not strings at all, and no frontmatter cached at all.
-          fc.constant({ tags: undefined }),
-          fc.constant({ tags: [1, true, null] }),
-          fc.constant({ hasFrontMatter: false }),
-          // No file open, and a file with no app on its info.
-          fc.constant({ hasFile: false }),
-          fc.constant({ hasApp: false })
-        ),
-        (options: WireOptions) => {
-          const state = wire(NOTE, options);
+        fc.constantFrom<WireOptions['noteType']>(null, 'absent'),
+        fc.constantFrom(NOTE, UNTAGGED_NOTE),
+        tagsArb(),
+        (noteType, text, tags) => {
+          const state = wire(text, { noteType, tags });
+          const changes = editInsideId(text);
 
-          const next = state.update({
-            changes: { from: GUARD_FROM + 3, to: GUARD_TO - 2, insert: 'x' },
-            userEvent: 'input.type',
-          }).state;
+          const next = state.update({ changes, userEvent: 'input.type' }).state;
 
           expect(next.doc.toString()).toBe(
-            splice(NOTE, GUARD_FROM + 3, GUARD_TO - 2, 'x')
+            splice(text, changes.from, changes.to, changes.insert)
           );
           expect(warn).not.toHaveBeenCalled();
         }
       )
     );
-  });
-
-  it('reads the tags of the file the editor holds', () => {
-    const state = wire(NOTE);
-
-    state.update({
-      changes: { from: GUARD_FROM + 3, to: GUARD_TO - 2, insert: 'x' },
-      userEvent: 'input.type',
-    });
-
-    expect(frontMatterSpy).toHaveBeenCalledWith(file, app);
   });
 
   it('leaves an item note without an ir-id entry fully editable', () => {

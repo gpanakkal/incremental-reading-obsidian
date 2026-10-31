@@ -90,8 +90,9 @@ class LeafActionBarController {
     }
     let type: NoteType | null;
     try {
-      // The item layer types a note by its tags or, lacking them, by the row
-      // its `ir-id` names, and a PDF by the row at its path
+      // The item layer types a note by the row its `ir-id` names at its path
+      // or else by its tags, a copy of an item's note as none, and a PDF by
+      // the row at its path
       type = await this.plugin.reviewManager.articles.getItemType(target.file);
     } catch (error) {
       // A note whose frontmatter won't parse, say: no type, so no bar

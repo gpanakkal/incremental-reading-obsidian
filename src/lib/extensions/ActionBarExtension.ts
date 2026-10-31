@@ -61,6 +61,11 @@ interface ActionBarState {
   isReviewMode: boolean;
   showAnswer: boolean;
   callbacks: ReviewCallbacks;
+  /**
+   * The editor's note's type as the item layer last settled it (see
+   * `noteTypePlugin`), or null for none. The `ir-id` guard reads it too, so
+   * every note the item layer types as an item has its id locked.
+   */
   noteType: NoteType | null;
 }
 

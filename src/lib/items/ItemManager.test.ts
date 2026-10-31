@@ -209,27 +209,41 @@ const ROW_REFERENCE = 'items/note.md';
  * A note and the row `x` of `table` it might be the note of: live, a
  * tombstone, or none at all; the note at the row's reference or a copy of it
  * elsewhere; tagged with a type's tag (any type's), or not; claiming `x`,
- * another id, something that is no id, or nothing.
+ * another id, something that is no id, or nothing. Beside a copy, the note at
+ * the row's reference, the copy's original, is there claiming `x`, is there
+ * claiming another id, or isn't there: gone, or moved while no rename handler
+ * listened, so the row is yet to follow it.
  */
 const noteCaseArb = fc.record({
   table: fc.constantFrom('article', 'snippet', 'srs_card' as const),
   row: fc.constantFrom('live', 'deleted', 'absent' as const),
   atReference: fc.boolean(),
   tag: fc.option(typeArb, { nil: null }),
-  irId: fc.constantFrom<unknown>('x', 'y', undefined, 7, null),
+  // Weighted toward the row's id, so copies of a live row's note come up often
+  irId: fc.oneof(
+    { arbitrary: fc.constant<unknown>('x'), weight: 3 },
+    { arbitrary: fc.constantFrom<unknown>('y', undefined, 7, null), weight: 4 }
+  ),
+  original: fc.constantFrom('claims', 'other', 'none' as const),
 });
 type NoteCase = typeof noteCaseArb extends fc.Arbitrary<infer T> ? T : never;
 
 /**
  * The type a note in `note`'s case is, worked out apart from the code: its
- * tag's, or else its row's when that row is live, at the note's path, and the
- * one its `ir-id` names.
+ * tag's, unless it is a copy, claiming the id of a live row whose own note is
+ * there at the row's reference, which makes it no item at all; and, with no
+ * tag, its row's when that row is live, at the note's path, and the one its
+ * `ir-id` names.
  */
-const expectedType = (note: NoteCase): NoteType | null =>
-  note.tag ??
-  (note.row === 'live' && note.atReference && note.irId === 'x'
-    ? TABLE_TYPE[note.table]
-    : null);
+const expectedType = (note: NoteCase): NoteType | null => {
+  const claimsLiveRow = note.row === 'live' && note.irId === 'x';
+  if (note.tag) {
+    const copy =
+      claimsLiveRow && !note.atReference && note.original === 'claims';
+    return copy ? null : note.tag;
+  }
+  return claimsLiveRow && note.atReference ? TABLE_TYPE[note.table] : null;
+};
 
 /** The note and row of `note`'s case, and a manager over them. */
 async function wireNote(note: NoteCase) {
@@ -237,7 +251,13 @@ async function wireNote(note: NoteCase) {
   const frontmatter: Record<string, unknown> = { other: 1 };
   if (note.tag) frontmatter.tags = ['keep', TYPE_TAG[note.tag]];
   if (note.irId !== undefined) frontmatter['ir-id'] = note.irId;
-  const vault = makeItemVault({ [path]: frontmatter });
+  const notes: Record<string, Record<string, unknown>> = {
+    [path]: frontmatter,
+  };
+  if (!note.atReference && note.original !== 'none') {
+    notes[ROW_REFERENCE] = { 'ir-id': note.original === 'claims' ? 'x' : 'z' };
+  }
+  const vault = makeItemVault(notes);
   const repo = await TestRepository.create();
   if (note.row !== 'absent') {
     insertItemAt(repo, note.table, {
@@ -591,7 +611,7 @@ describe('getItemType', () => {
     );
   });
 
-  it("types a note by its tag, or else by the live row its ir-id names at the note's own path", async () => {
+  it("types a note by its tag unless it is a copy of a live row's note, or else by the live row its ir-id names at the note's own path", async () => {
     await fc.assert(
       fc.asyncProperty(noteCaseArb, async (note) => {
         const { manager, file } = await wireNote(note);
@@ -600,7 +620,7 @@ describe('getItemType', () => {
           expectedType(note)
         );
       }),
-      { numRuns: 60 }
+      { numRuns: 150 }
     );
   });
 
@@ -618,7 +638,7 @@ describe('getItemType', () => {
         expect(type).not.toBeInstanceOf(Promise);
         expect(type).toBe(expectedType(note));
       }),
-      { numRuns: 60 }
+      { numRuns: 150 }
     );
   });
 
@@ -635,12 +655,12 @@ describe('getItemType', () => {
     );
   });
 
-  it('asks the database only for an untagged note claiming an id, once per lookup', async () => {
+  it('asks the database only for a note claiming an id, once per lookup', async () => {
     await fc.assert(
       fc.asyncProperty(noteCaseArb, async (note) => {
         const { manager, file, app, repo } = await wireNote(note);
         const query = vi.spyOn(repo, 'query');
-        const asks = note.tag === null && typeof note.irId === 'string' ? 1 : 0;
+        const asks = typeof note.irId === 'string' ? 1 : 0;
 
         await manager.getItemType(file);
         expect(query).toHaveBeenCalledTimes(asks);
@@ -668,7 +688,7 @@ describe('getItemType', () => {
         answer();
         await expect(Promise.resolve(type)).resolves.toBe(expectedType(note));
       }),
-      { numRuns: 30 }
+      { numRuns: 100 }
     );
   });
 });
