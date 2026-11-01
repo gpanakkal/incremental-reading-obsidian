@@ -34,6 +34,7 @@ import {
   type ReviewSnippet,
   type ReviewText,
 } from '#/lib/types';
+import { adoptWindow } from '#/lib/ui-window';
 import {
   ArchiveRestore,
   ArrowLeft,
@@ -332,13 +333,13 @@ function HomeActions() {
  * button keeps the bar's midpoint to itself.
  */
 function BulkImportAction() {
-  const { plugin } = useReviewContext();
+  const { plugin, reviewView } = useReviewContext();
   return (
     <ButtonWithIcon
       tooltip="Bulk import from vault"
       id="bulk-import-button"
       handleClick={() => {
-        plugin.openBulkImport();
+        plugin.openBulkImport(reviewView.containerEl);
       }}
     >
       <FilesPlus />
@@ -455,7 +456,7 @@ function GlobalActions() {
  * state — creating a snippet, notably.
  */
 function UndoAction() {
-  const { actions } = useReviewContext();
+  const { actions, plugin, reviewView } = useReviewContext();
   // The top entry, not the stack: `push`/`pop` mutate the array in place, so
   // its reference never changes and every snapshot would compare equal. The
   // entry is a fresh object per action and is all this button renders, so its
@@ -474,6 +475,9 @@ function UndoAction() {
       className={COOLDOWN_GUARD_CLASS}
       disabled={lastAction === undefined}
       handleClick={async () => {
+        // Undoing a snippet or card deletes its note through Obsidian's own
+        // prompt, which opens wherever Obsidian's `activeWindow` is
+        adoptWindow(plugin.app, reviewView.containerEl);
         await actions.undo();
       }}
     >

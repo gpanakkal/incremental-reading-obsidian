@@ -8,6 +8,7 @@ import {
   isMissingItem,
   isReviewCard,
 } from '#/lib/types';
+import { adoptWindow } from '#/lib/ui-window';
 import { openRelinkPicker } from '#/views/RelinkModal';
 import type { EditorView } from '@codemirror/view';
 import { CardViewer } from './CardViewer';
@@ -53,9 +54,14 @@ function MissingItem({ item }: { item: TMissingItem }) {
       <p className="ir-missing-item-reference">No file at "{reference}"</p>
       <button
         className="mod-cta"
-        onClick={() =>
-          void openRelinkPicker(plugin, { table: tableOf(type), id, reference })
-        }
+        onClick={(evt) => {
+          adoptWindow(plugin.app, evt.currentTarget);
+          void openRelinkPicker(plugin, {
+            table: tableOf(type),
+            id,
+            reference,
+          });
+        }}
       >
         Relink file…
       </button>

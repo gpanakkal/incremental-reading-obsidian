@@ -1,6 +1,7 @@
 import { DATA_DIRECTORY } from '#/lib/constants';
 import { notify } from '#/lib/notices';
 import type { BackupFailurePrompt } from '#/lib/repository/SQLJSRepository';
+import { openModal } from '#/lib/ui-window';
 import type { App, Notice } from 'obsidian';
 import { ConfirmModal } from './ConfirmModal';
 
@@ -158,7 +159,7 @@ export function createBackupFailurePrompt(app: App): BackupFailurePrompt {
         if (confirmed) choose('proceed');
       }
     );
-    modal.open();
+    openModal(modal);
   };
 
   return {

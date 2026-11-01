@@ -1,3 +1,4 @@
+import { openModal } from '#/lib/ui-window';
 import { type App, ButtonComponent, Modal, Platform } from 'obsidian';
 
 export interface ConfirmOptions {
@@ -20,7 +21,7 @@ export function promptForConfirmation(
   options: ConfirmOptions
 ): Promise<boolean> {
   return new Promise((resolve) => {
-    new ConfirmModal(app, options, resolve).open();
+    openModal(new ConfirmModal(app, options, resolve));
   });
 }
 

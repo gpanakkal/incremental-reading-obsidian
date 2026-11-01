@@ -667,7 +667,11 @@ export class Actions {
     if (!read) return null;
     const { origin, selection } = read;
 
-    const answer = await promptForCardAnswer(this.plugin.app, selection.text);
+    const answer = await promptForCardAnswer(
+      this.plugin.app,
+      selection.text,
+      host.pdfViewer?.containerEl
+    );
     if (answer === null) return null;
     const card = await this.plugin.reviewManager.cards.createFromPdf({
       ...origin,
@@ -1026,7 +1030,11 @@ export class Actions {
         to,
         text: cm.state.sliceDoc(from, to),
       };
-      const answer = await promptForCardAnswer(this.plugin.app, selection.text);
+      const answer = await promptForCardAnswer(
+        this.plugin.app,
+        selection.text,
+        reviewView.containerEl
+      );
       if (answer !== null) await this.createCard({ selection, answer });
     }
     this._dropSelection(cm);

@@ -26,6 +26,7 @@ import {
   type ReviewPage,
 } from '#/lib/store';
 import type { MaybeMissingItem, NoteType, ReviewItem } from '#/lib/types';
+import { adoptWindow, showMenu } from '#/lib/ui-window';
 import type IncrementalReadingPlugin from '#/main';
 import {
   FileView,
@@ -1053,7 +1054,7 @@ export default class ReviewView extends FileView {
           .setIcon('lucide-file-x')
           .setSection('pane')
           .onClick(() => {
-            this.plugin.openBulkUnimport();
+            this.plugin.openBulkUnimport(this.containerEl);
           })
       );
     }
@@ -1140,6 +1141,7 @@ export default class ReviewView extends FileView {
           .setIcon('lucide-edit-3')
           .setSection('action')
           .onClick(() => {
+            adoptWindow(this.app, this.containerEl);
             void this.app.fileManager.promptForFileRename(file);
           })
       );
@@ -1151,6 +1153,7 @@ export default class ReviewView extends FileView {
         .setSection('danger')
         .setWarning(true)
         .onClick(() => {
+          adoptWindow(this.app, this.containerEl);
           void this.app.fileManager.promptForDeletion(file);
         })
     );
@@ -1183,13 +1186,18 @@ export default class ReviewView extends FileView {
     this.app.workspace.trigger('leaf-menu', menu, this.leaf);
 
     const rect = anchorEl.getBoundingClientRect();
-    menu.setParentElement(anchorEl).showAtPosition({
-      x: rect.x,
-      y: rect.bottom,
-      width: rect.width,
-      overlap: true,
-      left: true,
-    });
+    showMenu(
+      this.app,
+      menu.setParentElement(anchorEl),
+      {
+        x: rect.x,
+        y: rect.bottom,
+        width: rect.width,
+        overlap: true,
+        left: true,
+      },
+      anchorEl
+    );
   }
 
   /**

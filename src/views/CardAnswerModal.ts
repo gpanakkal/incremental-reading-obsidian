@@ -1,19 +1,22 @@
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import { type TextBounds, trackSelection } from '#/lib/text-selection';
+import { openModal, type UiOrigin } from '#/lib/ui-window';
 import { type App, Modal } from 'obsidian';
 
 /**
  * Ask which part of a card's text is its answer: the second step of making a
  * card in selection mode, once the card's text has been chosen in the note.
  *
+ * @param origin what it was asked for from (see `uiWindow`)
  * @returns offsets of the answer within `text`, or `null` if the user cancelled
  */
 export function promptForCardAnswer(
   app: App,
-  text: string
+  text: string,
+  origin?: UiOrigin
 ): Promise<TextBounds | null> {
   return new Promise((resolve) => {
-    new CardAnswerModal(app, text, resolve).open();
+    openModal(new CardAnswerModal(app, text, resolve), origin);
   });
 }
 

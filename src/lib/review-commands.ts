@@ -7,6 +7,7 @@ import { getCurrentItemSync } from './query-client';
 import { tableOf } from './relink';
 import { cardsOnly, setShowAnswer, store } from './store';
 import { isMissingItem, isReviewCard, isReviewText } from './types';
+import { adoptWindow, openModal } from './ui-window';
 
 /**
  * Whether the double-click guard of the review tab `view`, armed by its action
@@ -104,7 +105,7 @@ export function initReviewCommands(plugin: IncrementalReadingPlugin) {
       const item = getCurrentItemSync();
       if (!item || isMissingItem(item) || !isReviewText(item)) return false;
       if (checking) return true;
-      new SchedulingModal(plugin, item, view).open();
+      openModal(new SchedulingModal(plugin, item, view), view.containerEl);
     },
   });
 
@@ -112,10 +113,12 @@ export function initReviewCommands(plugin: IncrementalReadingPlugin) {
     id: 'relink-file',
     name: 'Relink file…',
     checkCallback: (checking) => {
-      if (!plugin.getActiveReviewView()) return false;
+      const view = plugin.getActiveReviewView();
+      if (!view) return false;
       const item = getCurrentItemSync();
       if (!item || !isMissingItem(item)) return false;
       if (checking) return true;
+      adoptWindow(plugin.app, view.containerEl);
       void openRelinkPicker(plugin, {
         table: tableOf(item.data.type),
         id: item.data.id,

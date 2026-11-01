@@ -429,6 +429,7 @@ function makeSelectingView(
     contentDOM,
   };
   const reviewView = {
+    containerEl: {},
     reviewEditor: () => (cm ? { cm } : null),
     currentItemFile: () => itemFile,
   } as unknown as ReviewView;
@@ -2877,7 +2878,11 @@ describe('Actions.confirmSelection', () => {
           await actions.confirmSelection(reviewView);
 
           expect(dispatched(plugin)).toEqual([setSelectionMode(null)]);
-          expect(prompt).toHaveBeenCalledExactlyOnceWith(plugin.app, text);
+          expect(prompt).toHaveBeenCalledExactlyOnceWith(
+            plugin.app,
+            text,
+            reviewView.containerEl
+          );
           expect(createCard).toHaveBeenCalledExactlyOnceWith({
             selection: { from, to, text },
             answer,
@@ -3597,7 +3602,8 @@ describe('Actions.createPdfCard', () => {
           );
           expect(wired.prompt).toHaveBeenCalledExactlyOnceWith(
             wired.plugin.app,
-            read.text
+            read.text,
+            wired.viewer!.containerEl
           );
           expect(wired.createFromPdf).toHaveBeenCalledExactlyOnceWith({
             article: wired.article,

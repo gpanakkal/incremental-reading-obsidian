@@ -6,6 +6,7 @@ import { useQueue } from '#/hooks/useReactQuery';
 import { QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE } from '#/lib/constants';
 import { goToReviewPlace } from '#/lib/review-history';
 import type { IRPluginState } from '#/lib/store';
+import { showMenu } from '#/lib/ui-window';
 import { currentReviewDay, reviewDayOf } from '#/lib/utils';
 import { useEffect, useRef, useState } from 'react';
 import { useStore } from 'react-redux';
@@ -58,6 +59,8 @@ export function ReviewQueue() {
    * once, which is what keeps the opening load from animating.
    */
   const renderedPage = useRef<number | null>(null);
+  /** The panel, whose window a row's menu opens in (see `showMenu`). */
+  const panelRef = useRef<HTMLDivElement>(null);
 
   const { data, isLoading, isError } = useQueue({
     slice: {
@@ -216,7 +219,7 @@ export function ReviewQueue() {
   // than in QueueTable because it must sit outside the table's scroll region
   // and stay put while the table reloads.
   return (
-    <div className="ir-queue-panel">
+    <div className="ir-queue-panel" ref={panelRef}>
       <div className="ir-queue-title">{QUEUE_TABLE_TITLE}</div>
       <div className="ir-queue-controls">
         {/* The date controls share the left flank; the right one is left empty
@@ -272,7 +275,12 @@ export function ReviewQueue() {
           isMobile={plugin.app.isMobile}
           onRowClick={handleRowClick}
           onRowMenu={(row, position) => {
-            queueRowMenu(plugin, row).showAtPosition(position);
+            showMenu(
+              plugin.app,
+              queueRowMenu(plugin, row),
+              position,
+              panelRef.current
+            );
           }}
         />
       )}

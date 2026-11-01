@@ -1,5 +1,6 @@
 import { SCHEDULING_BUTTON_LABEL } from '#/lib/constants';
 import type { ReviewArticle, ReviewText } from '#/lib/types';
+import { openModal } from '#/lib/ui-window';
 import { SchedulingModal } from '#/views/SchedulingModal';
 import { CalendarSync, Flag } from 'lucide-react';
 import type { ComponentChildren } from 'preact';
@@ -26,7 +27,10 @@ export function TextScheduler({ text }: { text: ReviewText }) {
       className={SCHEDULING_BUTTON_CLASS}
       tooltip={SCHEDULING_BUTTON_LABEL}
       handleClick={() => {
-        new SchedulingModal(plugin, text, reviewView).open();
+        openModal(
+          new SchedulingModal(plugin, text, reviewView),
+          reviewView.containerEl
+        );
       }}
     >
       {icon}

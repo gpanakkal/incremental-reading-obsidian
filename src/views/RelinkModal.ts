@@ -8,6 +8,7 @@ import {
   unavailability,
   vaultReader,
 } from '#/lib/relink';
+import { openModal } from '#/lib/ui-window';
 import type IncrementalReadingPlugin from '#/main';
 import { type App, FuzzySuggestModal, type TFile } from 'obsidian';
 
@@ -81,6 +82,6 @@ export async function openRelinkPicker(
       }
     }
   );
-  modal.open();
+  openModal(modal);
   return modal;
 }

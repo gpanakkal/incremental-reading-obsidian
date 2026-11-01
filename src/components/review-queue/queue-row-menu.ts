@@ -6,6 +6,7 @@ import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import { tableOf } from '#/lib/relink';
 import { addRevealInNavigationItem } from '#/lib/reveal-in-navigation';
 import { isReviewArticle, isReviewText, type ReviewItem } from '#/lib/types';
+import { openModal } from '#/lib/ui-window';
 import { unimportArticle } from '#/lib/unimport-article';
 import { getContentSlice } from '#/lib/utils';
 import type IncrementalReadingPlugin from '#/main';
@@ -223,7 +224,7 @@ async function openOrigin(plugin: IncrementalReadingPlugin, row: QueueRow) {
 async function openScheduling(plugin: IncrementalReadingPlugin, row: QueueRow) {
   const item = await plugin.reviewManager.getReviewItemFromId(row.id);
   if (!item) notifyGone(row);
-  else if (isReviewText(item)) new SchedulingModal(plugin, item).open();
+  else if (isReviewText(item)) openModal(new SchedulingModal(plugin, item));
 }
 
 async function dismiss(plugin: IncrementalReadingPlugin, row: QueueRow) {

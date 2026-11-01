@@ -1250,10 +1250,26 @@ const storedDeviceStateArb = fc.record(
   { requiredKeys: [] }
 );
 
+/**
+ * One window, the main one and Obsidian's `activeWindow`, for the plugin's
+ * modals to open in (see `openModal`): this suite runs without a DOM.
+ */
+function stubMainWindow() {
+  const main = { closed: false, document: {} };
+  vi.stubGlobal('window', main);
+  vi.stubGlobal('activeWindow', main);
+  vi.stubGlobal('activeDocument', main.document);
+}
+
 // #endregion
+
+beforeEach(() => {
+  stubMainWindow();
+});
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe('IncrementalReadingPlugin.addIRMenuItems', () => {

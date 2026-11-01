@@ -145,6 +145,7 @@ import { type IRPluginSettings, IRSettingTab } from './lib/settings';
 import { setCurrentItemId, setPage, store } from './lib/store';
 import { SyncWaitNotice } from './lib/sync-wait-notice';
 import type { ReviewItem, SQLiteRepository } from './lib/types';
+import { type UiOrigin, adoptWindow, openModal } from './lib/ui-window';
 import { unimportArticle } from './lib/unimport-article';
 import {
   type WebPage,
@@ -1274,6 +1275,11 @@ export default class IncrementalReadingPlugin extends Plugin {
    * offer to import what the user is in the middle of reviewing. Keyed on the
    * leaf's view rather than on the menu's `source`, because a plain note's own
    * ⋮ and tab-header menus report those same sources and do want the entries.
+   *
+   * Obsidian shows the menu; each entry that can open a dialog first makes
+   * the window it was clicked in Obsidian's active one (see `adoptWindow`),
+   * so the dialog opens there and not in a Settings window left open. The
+   * selection and web viewer menus do the same.
    */
   addIRMenuItems(
     menu: Menu,
@@ -1290,7 +1296,8 @@ export default class IncrementalReadingPlugin extends Plugin {
           .setTitle('Import from folder…')
           .setIcon(PLUGIN_ICON)
           .setSection('incremental-reading')
-          .onClick(() => {
+          .onClick((evt) => {
+            adoptWindow(this.app, evt);
             this.importFromFolder(abstractFile);
           });
       });
@@ -1302,7 +1309,8 @@ export default class IncrementalReadingPlugin extends Plugin {
             .setTitle('Un-import from folder…')
             .setIcon('lucide-folder-x')
             .setSection('incremental-reading')
-            .onClick(() => {
+            .onClick((evt) => {
+              adoptWindow(this.app, evt);
               this.unimportFromFolder(abstractFile);
             });
         });
@@ -1323,7 +1331,8 @@ export default class IncrementalReadingPlugin extends Plugin {
           .setTitle('Import article')
           .setIcon(PLUGIN_ICON)
           .setSection('incremental-reading')
-          .onClick(async () => {
+          .onClick(async (evt) => {
+            adoptWindow(this.app, evt);
             await this.importArticle(file);
           });
       });
@@ -1356,7 +1365,8 @@ export default class IncrementalReadingPlugin extends Plugin {
           .setTitle('Un-import article')
           .setIcon('lucide-file-x')
           .setSection('incremental-reading')
-          .onClick(() => {
+          .onClick((evt) => {
+            adoptWindow(this.app, evt);
             void unimportArticle(this, file);
           });
       });
@@ -1398,7 +1408,8 @@ export default class IncrementalReadingPlugin extends Plugin {
         .setTitle('Open import dialog...')
         .setIcon(PLUGIN_ICON)
         .setSection('incremental-reading')
-        .onClick(async () => {
+        .onClick(async (evt) => {
+          adoptWindow(this.app, evt);
           await this.importArticle(file, { showImportDialog: true });
         });
     });
@@ -1429,7 +1440,8 @@ export default class IncrementalReadingPlugin extends Plugin {
         .setTitle('Import article')
         .setIcon(PLUGIN_ICON)
         .setSection('incremental-reading')
-        .onClick(async () => {
+        .onClick(async (evt) => {
+          adoptWindow(this.app, evt);
           await this.importWebPage(viewer);
         });
     });
@@ -1466,7 +1478,8 @@ export default class IncrementalReadingPlugin extends Plugin {
           .setTitle(`Import ${itemCount(roots.length)}…`)
           .setIcon(PLUGIN_ICON)
           .setSection('incremental-reading')
-          .onClick(() => {
+          .onClick((evt) => {
+            adoptWindow(this.app, evt);
             this.importSelection(files);
           });
       });
@@ -1477,7 +1490,8 @@ export default class IncrementalReadingPlugin extends Plugin {
           .setTitle(`Un-import ${itemCount(roots.length)}…`)
           .setIcon('lucide-file-x')
           .setSection('incremental-reading')
-          .onClick(() => {
+          .onClick((evt) => {
+            adoptWindow(this.app, evt);
             this.unimportSelection(files);
           });
       });
@@ -1503,7 +1517,7 @@ export default class IncrementalReadingPlugin extends Plugin {
       ),
       mode: 'import',
     });
-    modal.open();
+    openModal(modal);
     return modal;
   }
 
@@ -1527,7 +1541,7 @@ export default class IncrementalReadingPlugin extends Plugin {
       ),
       mode: 'import',
     });
-    modal.open();
+    openModal(modal);
     return modal;
   }
 
@@ -1535,13 +1549,14 @@ export default class IncrementalReadingPlugin extends Plugin {
    * The bulk import dialog with the filter bar, from the review home or the
    * palette: the user picks the folder there. It always opens, whatever
    * `showImportDialog` says.
+   * @param origin what it was asked for from (see `uiWindow`)
    */
-  openBulkImport(): BulkImportModal {
+  openBulkImport(origin?: UiOrigin): BulkImportModal {
     const modal = new BulkImportModal(this, {
       mode: 'import',
       filterBar: true,
     });
-    modal.open();
+    openModal(modal, origin);
     return modal;
   }
 
@@ -1560,7 +1575,7 @@ export default class IncrementalReadingPlugin extends Plugin {
       source: { ...source, heading: `Un-importing ${source.title}` },
       mode: 'unimport',
     });
-    modal.open();
+    openModal(modal);
     return modal;
   }
 
@@ -1578,20 +1593,21 @@ export default class IncrementalReadingPlugin extends Plugin {
       ),
       mode: 'unimport',
     });
-    modal.open();
+    openModal(modal);
     return modal;
   }
 
   /**
    * The bulk dialog with the filter bar, un-importing what the user picks
    * there, from the review home's ⋮ menu.
+   * @param origin what it was asked for from (see `uiWindow`)
    */
-  openBulkUnimport(): BulkImportModal {
+  openBulkUnimport(origin?: UiOrigin): BulkImportModal {
     const modal = new BulkImportModal(this, {
       mode: 'unimport',
       filterBar: true,
     });
-    modal.open();
+    openModal(modal, origin);
     return modal;
   }
 
@@ -1636,11 +1652,13 @@ export default class IncrementalReadingPlugin extends Plugin {
 
     const merged = { ...this.settings, ...(opts ?? {}) };
     if (merged.showImportDialog) {
-      new ImportModal(this, {
-        kind: 'file',
-        file,
-        defaultCopyOnImport: merged.copyOnImport,
-      }).open();
+      openModal(
+        new ImportModal(this, {
+          kind: 'file',
+          file,
+          defaultCopyOnImport: merged.copyOnImport,
+        })
+      );
     } else {
       const result = await this.reviewManager.importArticle(
         file,
@@ -1843,7 +1861,7 @@ export default class IncrementalReadingPlugin extends Plugin {
       if (!page) return;
       if (this.settings.showImportDialog) {
         const dialog = new ImportModal(this, { kind: 'web', page });
-        dialog.open();
+        openModal(dialog);
         await dialog.closed;
       } else {
         const result = await this.reviewManager.importWebPage(

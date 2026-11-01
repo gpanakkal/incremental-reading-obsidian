@@ -12,6 +12,7 @@ import {
 } from '#/lib/crash-leftovers';
 import { notify } from '#/lib/notices';
 import type { NoteType, SQLiteRepository } from '#/lib/types';
+import { openModal } from '#/lib/ui-window';
 import {
   type App,
   ButtonComponent,
@@ -639,18 +640,23 @@ export class LeftoverWatch {
       return;
     }
     const { app, repo, managers, onResolved } = this.deps;
-    new LeftoverModal(app, this.#current, async (leftover, choice) => {
-      const outcome = await resolveLeftover(
-        { app, repo, ...managers() },
-        leftover,
-        choice.action,
-        choice.action === 'adopt' ? choice.as : undefined
-      );
-      if (!outcome.done) return outcome.failure ?? false;
-      this.#set(this.#current.filter((left) => left !== leftover));
-      await onResolved();
-      return true;
-    }).open();
+    const modal = new LeftoverModal(
+      app,
+      this.#current,
+      async (leftover, choice) => {
+        const outcome = await resolveLeftover(
+          { app, repo, ...managers() },
+          leftover,
+          choice.action,
+          choice.action === 'adopt' ? choice.as : undefined
+        );
+        if (!outcome.done) return outcome.failure ?? false;
+        this.#set(this.#current.filter((left) => left !== leftover));
+        await onResolved();
+        return true;
+      }
+    );
+    openModal(modal);
   }
 
   /**

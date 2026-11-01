@@ -136,14 +136,23 @@ function installObsidianDomGlobals(): void {
   };
 
   // Getters, not values: Obsidian resolves these per popout window, and each
-  // jsdom test file gets a fresh document.
+  // jsdom test file gets a fresh document. Settable, as Obsidian's are: code
+  // that moves plugin UI to another window assigns them (see `adoptWindow`).
+  let assignedDocument: Document | null = null;
+  let assignedWindow: Window | null = null;
   Object.defineProperty(globalThis, 'activeDocument', {
     configurable: true,
-    get: () => document,
+    get: () => assignedDocument ?? document,
+    set: (doc: Document) => {
+      assignedDocument = doc;
+    },
   });
   Object.defineProperty(globalThis, 'activeWindow', {
     configurable: true,
-    get: () => window,
+    get: () => assignedWindow ?? window,
+    set: (win: Window) => {
+      assignedWindow = win;
+    },
   });
 }
 
