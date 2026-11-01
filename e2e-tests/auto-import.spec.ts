@@ -123,6 +123,63 @@ async function writeVaultFile(at: string, content: string) {
 }
 
 /**
+ * Whether Obsidian's vault has picked up the note at `notePath`, written from
+ * outside, polled until it has or `timeoutMs` passes, and attached to the test
+ * as `vault-saw-external-write`. It never fails the test: it is there so a
+ * failure says whether Obsidian's file watcher missed the write, or the plugin
+ * missed a note the vault had.
+ *
+ * Unofficial: `app.vault.adapter.watchers`, the desktop adapter's map of
+ * watched folder paths ("/" for the vault root) to their `fs.watch` handles.
+ * Shape-checked, and reported as "unknown" when missing or shaped otherwise.
+ */
+async function probeVaultSaw(notePath: string, timeoutMs = 10_000) {
+  const read = () =>
+    window
+      .evaluate((at) => {
+        const { vault } = (window as unknown as { app: PageApp }).app;
+        const watchers = (
+          vault as unknown as { adapter?: { watchers?: unknown } }
+        ).adapter?.watchers;
+        const watched =
+          watchers !== null &&
+          typeof watchers === 'object' &&
+          !Array.isArray(watchers)
+            ? Object.keys(watchers)
+            : null;
+        const slash = at.lastIndexOf('/');
+        const folder = slash < 0 ? '/' : at.slice(0, slash);
+        return {
+          // A boolean only: a TFile does not survive the trip out of the page
+          seen: vault.getFileByPath(at) !== null,
+          rootWatched: watched ? watched.includes('/') : 'unknown',
+          // Desktop watches the root recursively on macOS and Windows, so a
+          // folder of its own is only expected on Linux
+          folderWatched: watched ? watched.includes(folder) : 'unknown',
+          watched: watched ?? 'unknown',
+        };
+      }, notePath)
+      .catch((error: unknown) => ({ error: String(error) }));
+  const started = Date.now();
+  let state = await read();
+  while (!('seen' in state && state.seen) && Date.now() - started < timeoutMs) {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    state = await read();
+  }
+  await test
+    .info()
+    .attach('vault-saw-external-write', {
+      body: JSON.stringify(
+        { notePath, afterMs: Date.now() - started, ...state },
+        null,
+        2
+      ),
+      contentType: 'application/json',
+    })
+    .catch(() => {});
+}
+
+/**
  * What the app knows of the note at `notePath`: its `ir-id` and tags as the
  * metadata cache has them, the headings in it, and the ids of the articles
  * whose rows point at it.
@@ -297,6 +354,7 @@ test('imports a note written into the vault with a trigger tag, once, however of
     `---\ntags: [${AUTO_IMPORT_TAG}]\n---\nA clipped page.\n`
   );
 
+  await probeVaultSaw(notePath);
   const id = await expectImported(notePath);
   expect(await articleCount()).toBe(before + 1);
 
