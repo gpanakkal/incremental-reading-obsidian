@@ -2784,12 +2784,21 @@ test.describe('Making a card', () => {
   }
 
   test('leaves the text after a card where it was on screen, though the card started above the view', async () => {
+    // As small as CI's windows, where the embed's narrower text wraps onto
+    // rows more than the paragraph's, and pinned so the text after the card
+    // stays within the rows the editor renders
+    await window.setViewportSize({ width: 1024, height: 720 });
     await openScrolledIntoParagraph(400);
     const follower = window
       .locator('.workspace-leaf.mod-active .cm-line')
       .filter({ hasText: FOLLOWER });
     const top = () => follower.evaluate((el) => el.getBoundingClientRect().top);
+    const height = (el: Element) => el.getBoundingClientRect().height;
     const before = await top();
+    const replaced = await window
+      .locator('.workspace-leaf.mod-active .cm-line')
+      .filter({ hasText: '40 This sentence' })
+      .evaluate(height);
 
     await executeCommandById(window, 'incremental-reading:create-card');
 
@@ -2806,7 +2815,11 @@ test.describe('Making a card', () => {
           requestAnimationFrame(() => requestAnimationFrame(resolve))
         )
     );
-    // Within what the embed's height differs from the text it replaced by
-    expect(Math.abs((await top()) - before)).toBeLessThan(100);
+    // The card's first line is held where it was, so the text after it moves
+    // by just what the embed's height differs from the paragraph's: a few
+    // pixels of padding at a wide line, but whole rows more where the embed's
+    // narrower text wraps onto extra lines, as in a small window
+    const grown = (await embed.evaluate(height)) - replaced;
+    expect(Math.abs((await top()) - before - grown)).toBeLessThan(2);
   });
 });

@@ -398,10 +398,30 @@ export async function expectCompactIconBar(bar: Locator) {
  * @param text a sequence uniquely identifying the target paragraph
  */
 export async function selectParagraph(window: Page, text: string) {
-  await window
-    .getByText(text)
-    .filter({ visible: true })
-    .click({ clickCount: 3 });
+  const paragraph = window.getByText(text).filter({ visible: true });
+  // On the paragraph's own text rather than its middle, which may fall on a
+  // link, depending on where the window's width wraps it: a click there opens
+  // the link instead of selecting anything
+  const position = await paragraph.evaluate((el) => {
+    const links = 'a, .cm-link, .cm-url, .cm-hmd-internal-link';
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const start = node.textContent?.search(/\S/) ?? -1;
+      if (start < 0 || node.parentElement?.closest(links)) continue;
+      const range = document.createRange();
+      range.setStart(node, start);
+      range.setEnd(node, start + 1);
+      const glyph = range.getBoundingClientRect();
+      if (!glyph.width || !glyph.height) continue;
+      const box = el.getBoundingClientRect();
+      return {
+        x: glyph.left + glyph.width / 2 - box.left,
+        y: glyph.top + glyph.height / 2 - box.top,
+      };
+    }
+    return undefined;
+  });
+  await paragraph.click({ clickCount: 3, position });
   // Whitespace squashed on both sides, as `getByText` matches it
   await expect
     .poll(() =>
