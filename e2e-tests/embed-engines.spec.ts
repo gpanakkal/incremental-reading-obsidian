@@ -229,3 +229,88 @@ test('a card embed of two paragraphs in the phone review tab hugs its text', asy
 
   expect(slack).toBeLessThan(10);
 });
+
+/**
+ * Reading view of a note whose code block a card was made from: the embed's
+ * host paragraph between the two halves of the block, as the card's fences
+ * leave it.
+ */
+const SPLIT_CODE = `
+  <div class="markdown-reading-view">
+    <div class="markdown-preview-view markdown-rendered">
+      <div class="markdown-preview-sizer markdown-preview-section">
+        <div class="el-pre"><pre id="above"><code>above</code></pre></div>
+        <div class="el-p"><p class="ir-transclusion-host ir-transclusion-rule"></p></div>
+        <div class="el-pre"><pre id="below"><code>below</code></pre></div>
+      </div>
+    </div>
+  </div>`;
+
+test('the code of a card embed between two halves of a code block leaves no blank row on either side', async ({
+  page,
+}) => {
+  await mount(page, SPLIT_CODE);
+  // Obsidian's app CSS for a reading-view code block and its copy button, the
+  // parts that place them, and the spacing token the plugin's paddings read,
+  // which Obsidian declares on `body`: undeclared, every one of them computes
+  // to zero
+  await page.addStyleTag({
+    content: `
+      body { --size-4-2: 8px; }
+      .markdown-rendered pre {
+        position: relative; margin: 1em 0; padding: 12px 16px; overflow-x: auto;
+      }
+      .markdown-rendered button.copy-code-button {
+        position: absolute; top: 0; inset-inline-end: 0;
+        margin: 6px; padding: 6px 8px; border: 0;
+      }
+      .copy-code-button svg { display: block; width: 16px; height: 16px; }`,
+  });
+
+  const offsets = await page.evaluate((embed) => {
+    // Through the fragment parser, so the embed's blocks stay inside the `<p>`
+    // as Obsidian's DOM calls put them, where markup would close it.
+    const host = document.querySelector<HTMLElement>('.ir-transclusion-host')!;
+    host.innerHTML = embed;
+    const sizer = host.querySelector<HTMLElement>('.markdown-preview-sizer')!;
+    // After the first pass, as a code card renders: its frontmatter as a
+    // chrome section holding a `<pre>` of its own, then the code
+    sizer.style.minHeight = '48px';
+    sizer.innerHTML =
+      '<div class="markdown-preview-pusher" style="width: 1px; height: 0.1px"></div>' +
+      '<div class="mod-header mod-ui"><div class="inline-title">Card</div></div>' +
+      '<div class="el-pre mod-frontmatter mod-ui"><pre class="frontmatter"><code>a: 1</code></pre></div>' +
+      '<div class="el-pre"><pre id="card"><code>card</code>' +
+      // Shown on hover, and always on mobile
+      '<button class="copy-code-button"><svg></svg></button></pre></div>';
+
+    const rect = (selector: string) =>
+      document.querySelector(selector)!.getBoundingClientRect();
+    const [above, card, below] = ['#above', '#card', '#below'].map(rect);
+    const box = host.getBoundingClientRect();
+    // Whole pixels: a blank row is a line's height, subpixel layout is not one
+    return {
+      left: Math.round(card.left - above.left),
+      // A row the embed holds open above or below its code, inside the host
+      top: Math.round(card.top - box.top),
+      bottom: Math.round(box.bottom - card.bottom),
+      // And the margins around it those of any code block in the note
+      gaps: Math.round(card.top - above.bottom - (below.top - card.bottom)),
+      // How far the copy button scrolls the card's code block: a code block
+      // scrolls on overflow, so anything it holds that is taller than it puts
+      // a scroll bar on it
+      scroll: Math.round(
+        document.querySelector('#card')!.scrollHeight -
+          document.querySelector('#card')!.clientHeight
+      ),
+    };
+  }, EMBED);
+
+  expect(offsets).toEqual({
+    left: 0,
+    top: 0,
+    bottom: 0,
+    gaps: 0,
+    scroll: 0,
+  });
+});

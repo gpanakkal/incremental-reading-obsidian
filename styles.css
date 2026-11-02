@@ -255,6 +255,646 @@ body {
   margin-block-start: var(--p-spacing, 1rem);
 }
 
+/* A code block in a card lines up with the code around it, with no blank rows
+   above or below it.
+
+   The usual home of a code card is the middle of a fenced block: making a card
+   of a line of code closes the fence above the embed and reopens it below, so
+   the note reads code, embed, code. Everything above spaces text off the
+   accent rule at inline scale, and a `<pre>` took all of it: the wrapper's
+   `padding-inline-start` set its left edge in from the note's own code, and in
+   Live Preview, where the standalone embed is a block, the embed's paddings
+   added to it on every side.
+
+   The blank row above it in Reading view (and in Live Preview, inside a
+   `.cm-line`) is the embed's own `padding-inline-start`. A block child splits
+   the inline embed around it, and with `box-decoration-break: clone` every
+   piece takes that padding, the empty one in front of the block too; a line
+   holding an inline box with non-zero inline padding is not empty, so it keeps
+   a full line's height with nothing on it. The piece after the block does the
+   same below it in WebKit and Firefox, so on iOS too; Chromium drops that line
+   (e2e-tests/embed-engines.spec.ts covers it).
+
+   So in a card holding a top-level code block the padding moves off the embed
+   and onto the text that needs it, its top-level paragraphs, which take it per
+   row the same way (`clone` again). Their look is unchanged: the paragraph's
+   padding sits inside the embed's tinted run, so the gap beside the rule is
+   still tinted. Blocks other than code keep the wrapper rule's own padding.
+
+   The same goes for any inline padding a theme puts on the rest of the chain
+   the block splits: Minimal gives the sizer and the pusher its reading-view
+   folding gutter (`padding-left: var(--folding-offset)`, meant for the note's
+   own sections and reaching every embed's too) and the embed an end padding,
+   each of which holds a blank row open above or below the code on its own.
+   Text cards keep whatever their theme gives them.
+
+   The code wrapper sheds its padding and its tint: the tint would only show at
+   the rounded corners of a code background that is opaque in the default
+   theme and Minimal alike, and doubled over the embed's own where they meet.
+
+   A card of several paragraphs is left out (`:not(:has(…))`): it renders as one
+   block with the embed's padding around everything, a box rather than a run,
+   and its code sits inside that box like the rest of it. */
+.internal-embed[alt*='ir-hide-title']
+  .markdown-preview-section
+  > div:not(.mod-ui):has(> pre) {
+  padding-inline-start: 0;
+  background-color: transparent;
+}
+
+.internal-embed[alt*='ir-hide-title']:has(
+    .markdown-preview-section > div:not(.mod-ui) > pre
+  ):not(
+    :has(
+      .markdown-preview-section > .el-p ~ .el-p,
+      .markdown-preview-section > div:not(.mod-ui) p ~ p
+    )
+  ),
+.internal-embed[alt*='ir-hide-title']:has(
+    .markdown-preview-section > div:not(.mod-ui) > pre
+  ):not(
+    :has(
+      .markdown-preview-section > .el-p ~ .el-p,
+      .markdown-preview-section > div:not(.mod-ui) p ~ p
+    )
+  )
+  :is(.markdown-preview-sizer, .markdown-preview-pusher) {
+  padding-inline: 0;
+}
+
+.internal-embed[alt*='ir-hide-title']:has(
+    .markdown-preview-section > div:not(.mod-ui) > pre
+  ):not(
+    :has(
+      .markdown-preview-section > .el-p ~ .el-p,
+      .markdown-preview-section > div:not(.mod-ui) p ~ p
+    )
+  )
+  .markdown-preview-section
+  > div:not(.mod-ui)
+  > p {
+  padding-inline-start: var(--size-4-2);
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+
+/* Flush with the host's content edge, the code background now covers the
+   accent rule wherever it is painted beneath the embed: on the host block in
+   Reading view, as the `::before` in a Live Preview line. So the code block
+   carries the rule itself, as a background image over its own background
+   color, 2px like the host's. */
+.internal-embed[alt*='ir-hide-title']:has(
+    .markdown-preview-section > div:not(.mod-ui) > pre
+  ):not(
+    :has(
+      .markdown-preview-section > .el-p ~ .el-p,
+      .markdown-preview-section > div:not(.mod-ui) p ~ p
+    )
+  )
+  .markdown-preview-section
+  > div:not(.mod-ui)
+  > pre {
+  /* The linter substitutes the hue alone for this variable (it reads only the
+     first token of the hsl() it is set to), the false positive the host rule
+     below hits too. */
+  /* eslint-disable css/no-invalid-properties */
+  background-image: linear-gradient(
+    var(--ir-transclusion-rule-color),
+    var(--ir-transclusion-rule-color)
+  );
+  /* eslint-enable css/no-invalid-properties */
+  background-repeat: no-repeat;
+  background-size: 2px 100%;
+}
+
+/* A standalone embed in Live Preview is a block widget whose own border is the
+   rule, and a border sits outside the content: the code would start its width
+   in from the code rows around it. Paint the rule as a background image
+   instead, the way the host block does in Reading view: it marks the rows of
+   text the code block does not cover, and the code block's own rule above
+   takes over where it does.
+
+   The embed's `padding-block` is layout here, not just paint as it is on an
+   inline box, so it is dropped on whichever side the code block reaches: the
+   code meets the fence rows Obsidian draws for the halves of the note's code
+   above and below it. */
+.markdown-source-view.mod-cm6
+  .cm-content
+  > .internal-embed[alt*='ir-hide-title']:has(
+    .markdown-preview-section > div:not(.mod-ui) > pre
+  ):not(
+    :has(
+      .markdown-preview-section > .el-p ~ .el-p,
+      .markdown-preview-section > div:not(.mod-ui) p ~ p
+    )
+  ) {
+  border-inline-start: none;
+  /* The linter substitutes the hue alone for this variable (it reads only the
+     first token of the hsl() it is set to), the false positive the host rule
+     below hits too. */
+  /* eslint-disable css/no-invalid-properties */
+  background-image: linear-gradient(
+    var(--ir-transclusion-rule-color),
+    var(--ir-transclusion-rule-color)
+  );
+  /* eslint-enable css/no-invalid-properties */
+  background-repeat: no-repeat;
+  background-size: 2px 100%;
+}
+
+/* Live Preview draws the note's code one CodeMirror line per row, each set at
+   `--code-size` in the editor's line height (`.cm-s-obsidian
+   .HyperMD-codeblock`). The card's code is rendered markdown instead: its
+   `<code>` is at `--code-size` too, but its rows take the line height of the
+   `<pre>` around it, which stays at text size, so each row of the card stood
+   taller than a row of the note's code (24px against 21px by default). The
+   `<pre>` takes the code size here and the `<code>` inherits it; `--code-size`
+   is relative (`0.875em`), so setting it on both would shrink the code twice.
+   Reading view sets the note's code the same way as the card's, so it needs
+   nothing. */
+.markdown-source-view.mod-cm6
+  .cm-content
+  > .internal-embed[alt*='ir-hide-title']:not(
+    :has(
+      .markdown-preview-section > .el-p ~ .el-p,
+      .markdown-preview-section > div:not(.mod-ui) p ~ p
+    )
+  )
+  .markdown-preview-section
+  > div:not(.mod-ui)
+  > pre {
+  font-size: var(--code-size);
+}
+.markdown-source-view.mod-cm6
+  .cm-content
+  > .internal-embed[alt*='ir-hide-title']:not(
+    :has(
+      .markdown-preview-section > .el-p ~ .el-p,
+      .markdown-preview-section > div:not(.mod-ui) p ~ p
+    )
+  )
+  .markdown-preview-section
+  > div:not(.mod-ui)
+  > pre
+  > code {
+  font-size: inherit;
+}
+/* The first content section follows the pusher or the chrome; the last is the
+   last that is not chrome. */
+.markdown-source-view.mod-cm6
+  .cm-content
+  > .internal-embed[alt*='ir-hide-title']:has(
+    .markdown-preview-section
+      > :is(.markdown-preview-pusher, .mod-ui)
+      + div:not(.mod-ui)
+      > pre
+  ):not(
+    :has(
+      .markdown-preview-section > .el-p ~ .el-p,
+      .markdown-preview-section > div:not(.mod-ui) p ~ p
+    )
+  ) {
+  padding-block-start: 0;
+}
+
+.markdown-source-view.mod-cm6
+  .cm-content
+  > .internal-embed[alt*='ir-hide-title']:has(
+    .markdown-preview-section
+      > div:not(.mod-ui):nth-last-child(1 of :not(.mod-ui))
+      > pre
+  ):not(
+    :has(
+      .markdown-preview-section > .el-p ~ .el-p,
+      .markdown-preview-section > div:not(.mod-ui) p ~ p
+    )
+  ) {
+  padding-block-end: 0;
+}
+
+/* With the code flush against the top of the box the open-in-tab button is
+   placed in (the host block in Reading view, the embed's own block widget in
+   Live Preview), the button's corner is the code block's corner, which is
+   where Obsidian shows the copy button when the code is hovered (always, on
+   mobile). The open-in-tab button comes later in the tree, so it paints over
+   the copy button and takes most of its clicks. Lift it out of the code
+   block's box instead: the same 4px off the code as it was off the box, on
+   the side facing away from it. Above a card made inside a code block that is
+   the empty closing-fence row in Live Preview and the gap between the two code
+   blocks in Reading view.
+
+   Only where the code opens the card. Text cards and cards whose code comes
+   after their text keep the button where it was, and so does a Reading-view
+   card a `<br>` puts on its own line (its host withholds
+   `.ir-transclusion-rule`): the host's text row above the code holds the
+   button there. Live Preview places the button of an embed inside a
+   `.cm-line` by its measured first row, which is already the row of text
+   before the code. A code card after text on the same line in Reading view
+   cannot be told apart from one that opens its host, so its button goes
+   above that row of text.
+
+   `width: auto` undoes themes that stretch the button across the embed's top
+   (Minimal does, for every embed of a whole note), which out here would lay a
+   click target over the end of whatever is above. */
+.markdown-rendered
+  .ir-transclusion-rule
+  > .internal-embed[alt*='ir-hide-title']:has(
+    .markdown-preview-section
+      > :is(.markdown-preview-pusher, .mod-ui)
+      + div:not(.mod-ui)
+      > pre
+  ):not(
+    :has(
+      .markdown-preview-section > .el-p ~ .el-p,
+      .markdown-preview-section > div:not(.mod-ui) p ~ p
+    )
+  )
+  > .markdown-embed-link,
+.markdown-source-view.mod-cm6
+  .cm-content
+  > .internal-embed[alt*='ir-hide-title']:has(
+    .markdown-preview-section
+      > :is(.markdown-preview-pusher, .mod-ui)
+      + div:not(.mod-ui)
+      > pre
+  ):not(
+    :has(
+      .markdown-preview-section > .el-p ~ .el-p,
+      .markdown-preview-section > div:not(.mod-ui) p ~ p
+    )
+  )
+  > .markdown-embed-link {
+  top: auto;
+  bottom: calc(100% + 4px);
+  width: auto;
+}
+
+/* Live Preview clips that: Obsidian gives every block widget
+   `contain: paint !important` (`.cm-content > [contenteditable=false]`), and
+   paint containment clips descendants to the widget's box, so the lifted
+   button would not paint at all. Layout containment keeps the rest of what
+   paint containment gives the widget (its own formatting context, so nothing
+   inside collapses margins through it; the containing block the button is
+   placed in; a stacking context) without the clip. Only `!important`
+   outranks Obsidian's `!important`, and only on these widgets. */
+.markdown-source-view.mod-cm6
+  .cm-content
+  > .internal-embed[alt*='ir-hide-title']:has(
+    .markdown-preview-section
+      > :is(.markdown-preview-pusher, .mod-ui)
+      + div:not(.mod-ui)
+      > pre
+  ):not(
+    :has(
+      .markdown-preview-section > .el-p ~ .el-p,
+      .markdown-preview-section > div:not(.mod-ui) p ~ p
+    )
+  ) {
+  /* eslint-disable-next-line css/no-important -- outranks Obsidian's own !important, see above */
+  contain: layout !important;
+}
+
+/* A code card between two halves of the note's code block reads as one block
+   with them: no rows of padding, fence or margin between their code.
+
+   Lined up and unpadded, the card's code still sat apart from the code around
+   it, by a row's height or more on each side. In Live Preview that is the
+   rows Obsidian draws for the fences the card leaves behind (the closing
+   fence of the half above, empty, and the opening fence of the half below,
+   holding only the language flair) plus the card's own `<pre>` padding. In
+   Reading view it is three code blocks' worth of padding and margins: the
+   half above's bottom padding and margin, the host paragraph's margins, the
+   card's own padding, and the same again below.
+
+   So where a card's code meets a half of the note's code, the two give up
+   what lies between them: the fence row collapses (Live Preview, unless
+   Obsidian is showing the fence's backticks for editing), the margins
+   and the facing paddings go, and the facing corners square off. Where the
+   neighbour is anything else, nothing changes. The card keeps its accent rule,
+   painted on its own code, as the one mark of where it starts and ends.
+
+   The fence rows are found from the embed beside them: `:has(+ …)` on the
+   closing fence line, a plain `+` for the opening one. Both are CodeMirror's
+   lines straight inside `.cm-content`, next to the embed's block widget.
+   A fence row shows its backticks, as a `.cm-formatting-code-block` span,
+   while the cursor is in that half of the block, and holds nothing but a
+   widget otherwise; only the empty one collapses. A collapsed line keeps its
+   place in the document and in CodeMirror's height map; it only measures
+   zero, so the cursor moving down by rows passes over it. With the cursor on
+   the card's own line, Obsidian shows that line's source above the widget, as
+   the active line (`.cm-active`); the opening fence stays open then, so the
+   next row down from the card's line is that fence, as it is without the card.
+   The closing fence above needs no such guard: the source line comes between
+   it and the widget, which ends the `:has(+ …)` match.
+
+   Reading view finds the neighbours by section: the half above is the `.el-pre`
+   just before the card's host paragraph's section, the half below the one
+   just after it. `.ir-transclusion-rule` limits it to a host the card opens,
+   which is every host a fence line leaves the card alone on. The `:has()` on
+   `.el-pre` and `.el-p` makes Obsidian's own sections the subjects, which the
+   rules above avoid; here it is the only way to reach the block before or
+   after a card, and it is scoped by the arguments to sections that sit next to
+   a card embed. */
+.markdown-source-view.mod-cm6
+  .cm-content
+  > .cm-line.HyperMD-codeblock-end:not(:has(.cm-formatting-code-block)):has(
+    + .internal-embed[alt*='ir-hide-title']
+      .markdown-preview-section
+      > :is(.markdown-preview-pusher, .mod-ui)
+      + div:not(.mod-ui)
+      > pre
+  ):not(
+    :has(
+      + .internal-embed .markdown-preview-section > .el-p ~ .el-p,
+      + .internal-embed .markdown-preview-section > div:not(.mod-ui) p ~ p
+    )
+  ),
+.markdown-source-view.mod-cm6
+  .cm-content
+  > :not(.cm-active)
+  + .internal-embed[alt*='ir-hide-title']:has(
+    .markdown-preview-section
+      > div:not(.mod-ui):nth-last-child(1 of :not(.mod-ui))
+      > pre
+  ):not(
+    :has(
+      .markdown-preview-section > .el-p ~ .el-p,
+      .markdown-preview-section > div:not(.mod-ui) p ~ p
+    )
+  )
+  + .cm-line.HyperMD-codeblock-begin:not(:has(.cm-formatting-code-block)) {
+  height: 0;
+  min-height: 0;
+  padding-block: 0;
+  border-block-width: 0;
+  overflow: hidden;
+}
+
+/* The card's code where the note's code is right above it */
+.markdown-source-view.mod-cm6
+  .cm-content
+  > .cm-line.HyperMD-codeblock-end
+  + .internal-embed[alt*='ir-hide-title']:not(
+    :has(
+      .markdown-preview-section > .el-p ~ .el-p,
+      .markdown-preview-section > div:not(.mod-ui) p ~ p
+    )
+  )
+  .markdown-preview-section
+  > :is(.markdown-preview-pusher, .mod-ui)
+  + div:not(.mod-ui)
+  > pre,
+.markdown-rendered
+  .el-pre
+  + .el-p
+  > .ir-transclusion-rule
+  > .internal-embed[alt*='ir-hide-title']:not(
+    :has(
+      .markdown-preview-section > .el-p ~ .el-p,
+      .markdown-preview-section > div:not(.mod-ui) p ~ p
+    )
+  )
+  .markdown-preview-section
+  > :is(.markdown-preview-pusher, .mod-ui)
+  + div:not(.mod-ui)
+  > pre {
+  padding-block-start: 0;
+  min-height: 0;
+  border-start-start-radius: 0;
+  border-start-end-radius: 0;
+}
+
+/* … and right below it */
+.markdown-source-view.mod-cm6
+  .cm-content
+  > .internal-embed[alt*='ir-hide-title']:has(
+    + .cm-line.HyperMD-codeblock-begin
+  ):not(
+    :has(
+      .markdown-preview-section > .el-p ~ .el-p,
+      .markdown-preview-section > div:not(.mod-ui) p ~ p
+    )
+  )
+  .markdown-preview-section
+  > div:not(.mod-ui):nth-last-child(1 of :not(.mod-ui))
+  > pre,
+.markdown-rendered
+  .el-p:has(+ .el-pre)
+  > .ir-transclusion-rule
+  > .internal-embed[alt*='ir-hide-title']:not(
+    :has(
+      .markdown-preview-section > .el-p ~ .el-p,
+      .markdown-preview-section > div:not(.mod-ui) p ~ p
+    )
+  )
+  .markdown-preview-section
+  > div:not(.mod-ui):nth-last-child(1 of :not(.mod-ui))
+  > pre {
+  padding-block-end: 0;
+  min-height: 0;
+  border-end-start-radius: 0;
+  border-end-end-radius: 0;
+}
+
+/* The copy button Obsidian pins inside a code block (6px margin, 6px padding,
+   the icon, 6px padding) is taller than one row of code, and a card's code
+   block that gave up both paddings above can be just one row tall. A code
+   block scrolls on overflow (`overflow-x: auto`, which turns the other axis
+   to `auto` too), so the button's last few pixels gave the block a vertical
+   scroll bar whenever it showed: on hover, and always on mobile. The button
+   gives up its vertical spacing where the block gave up its own: the padding
+   under the icon wherever either side went, the margin and padding above it
+   too where the top went, so the icon still starts on the first row's top as
+   it does in a padded block, and the button fits inside the row. */
+.markdown-source-view.mod-cm6
+  .cm-content
+  > .cm-line.HyperMD-codeblock-end
+  + .internal-embed[alt*='ir-hide-title']:not(
+    :has(
+      .markdown-preview-section > .el-p ~ .el-p,
+      .markdown-preview-section > div:not(.mod-ui) p ~ p
+    )
+  )
+  .markdown-preview-section
+  > :is(.markdown-preview-pusher, .mod-ui)
+  + div:not(.mod-ui)
+  > pre
+  > button.copy-code-button,
+.markdown-rendered
+  .el-pre
+  + .el-p
+  > .ir-transclusion-rule
+  > .internal-embed[alt*='ir-hide-title']:not(
+    :has(
+      .markdown-preview-section > .el-p ~ .el-p,
+      .markdown-preview-section > div:not(.mod-ui) p ~ p
+    )
+  )
+  .markdown-preview-section
+  > :is(.markdown-preview-pusher, .mod-ui)
+  + div:not(.mod-ui)
+  > pre
+  > button.copy-code-button {
+  margin-block-start: 0;
+  padding-block-start: 0;
+}
+.markdown-source-view.mod-cm6
+  .cm-content
+  > .cm-line.HyperMD-codeblock-end
+  + .internal-embed[alt*='ir-hide-title']:not(
+    :has(
+      .markdown-preview-section > .el-p ~ .el-p,
+      .markdown-preview-section > div:not(.mod-ui) p ~ p
+    )
+  )
+  .markdown-preview-section
+  > :is(.markdown-preview-pusher, .mod-ui)
+  + div:not(.mod-ui)
+  > pre
+  > button.copy-code-button,
+.markdown-rendered
+  .el-pre
+  + .el-p
+  > .ir-transclusion-rule
+  > .internal-embed[alt*='ir-hide-title']:not(
+    :has(
+      .markdown-preview-section > .el-p ~ .el-p,
+      .markdown-preview-section > div:not(.mod-ui) p ~ p
+    )
+  )
+  .markdown-preview-section
+  > :is(.markdown-preview-pusher, .mod-ui)
+  + div:not(.mod-ui)
+  > pre
+  > button.copy-code-button,
+.markdown-source-view.mod-cm6
+  .cm-content
+  > .internal-embed[alt*='ir-hide-title']:has(
+    + .cm-line.HyperMD-codeblock-begin
+  ):not(
+    :has(
+      .markdown-preview-section > .el-p ~ .el-p,
+      .markdown-preview-section > div:not(.mod-ui) p ~ p
+    )
+  )
+  .markdown-preview-section
+  > div:not(.mod-ui):nth-last-child(1 of :not(.mod-ui))
+  > pre
+  > button.copy-code-button,
+.markdown-rendered
+  .el-p:has(+ .el-pre)
+  > .ir-transclusion-rule
+  > .internal-embed[alt*='ir-hide-title']:not(
+    :has(
+      .markdown-preview-section > .el-p ~ .el-p,
+      .markdown-preview-section > div:not(.mod-ui) p ~ p
+    )
+  )
+  .markdown-preview-section
+  > div:not(.mod-ui):nth-last-child(1 of :not(.mod-ui))
+  > pre
+  > button.copy-code-button {
+  padding-block-end: 0;
+}
+/* Reading view: the host paragraph's margins, toward a half of code */
+.markdown-rendered
+  .el-pre
+  + .el-p
+  > .ir-transclusion-rule:has(
+    > .internal-embed[alt*='ir-hide-title']
+      .markdown-preview-section
+      > :is(.markdown-preview-pusher, .mod-ui)
+      + div:not(.mod-ui)
+      > pre
+  ):not(
+    :has(
+      > .internal-embed .markdown-preview-section > .el-p ~ .el-p,
+      > .internal-embed .markdown-preview-section > div:not(.mod-ui) p ~ p
+    )
+  ) {
+  margin-block-start: 0;
+}
+
+.markdown-rendered
+  .el-p:has(+ .el-pre)
+  > .ir-transclusion-rule:has(
+    > .internal-embed[alt*='ir-hide-title']
+      .markdown-preview-section
+      > div:not(.mod-ui):nth-last-child(1 of :not(.mod-ui))
+      > pre
+  ):not(
+    :has(
+      > .internal-embed .markdown-preview-section > .el-p ~ .el-p,
+      > .internal-embed .markdown-preview-section > div:not(.mod-ui) p ~ p
+    )
+  ) {
+  margin-block-end: 0;
+}
+
+/* … and the half of code above it and the one below it */
+.markdown-rendered
+  .el-pre:has(
+    + .el-p
+      > .ir-transclusion-rule
+      > .internal-embed[alt*='ir-hide-title']
+      .markdown-preview-section
+      > :is(.markdown-preview-pusher, .mod-ui)
+      + div:not(.mod-ui)
+      > pre
+  ):not(
+    :has(
+      + .el-p
+        > .ir-transclusion-rule
+        > .internal-embed
+        .markdown-preview-section
+        > .el-p
+        ~ .el-p,
+      + .el-p
+        > .ir-transclusion-rule
+        > .internal-embed
+        .markdown-preview-section
+        > div:not(.mod-ui)
+        p
+        ~ p
+    )
+  )
+  > pre {
+  margin-block-end: 0;
+  padding-block-end: 0;
+  border-end-start-radius: 0;
+  border-end-end-radius: 0;
+}
+
+.markdown-rendered
+  .el-p:has(
+    > .ir-transclusion-rule
+      > .internal-embed[alt*='ir-hide-title']
+      .markdown-preview-section
+      > div:not(.mod-ui):nth-last-child(1 of :not(.mod-ui))
+      > pre
+  ):not(
+    :has(
+      > .ir-transclusion-rule
+        > .internal-embed
+        .markdown-preview-section
+        > .el-p
+        ~ .el-p,
+      > .ir-transclusion-rule
+        > .internal-embed
+        .markdown-preview-section
+        > div:not(.mod-ui)
+        p
+        ~ p
+    )
+  )
+  + .el-pre
+  > pre {
+  margin-block-start: 0;
+  padding-block-start: 0;
+  border-start-start-radius: 0;
+  border-start-end-radius: 0;
+}
+
 /* `.cm-line` is already relative in Live Preview. The reading-view hosts are
    not, so promote them — but only the ones holding a transclusion, since this
    changes what every absolutely positioned descendant resolves against.

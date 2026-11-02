@@ -1556,6 +1556,562 @@ test.describe('Card embeds', () => {
       )
       .toBeGreaterThan(0);
   });
+
+  /**
+   * Makes a card of the cursor line of the code block in
+   * `testing/block-examples.md` section 3, in Live Preview at a pinned
+   * viewport, and leaves the cursor on the section's heading: off the embed's
+   * line, which would otherwise show its source, and a few lines above it,
+   * which keeps the embed on screen and so rendered.
+   */
+  async function makeCodeCard() {
+    // Pinned: CI runs headed at a smaller window than local headless runs
+    await window.setViewportSize({ width: 1024, height: 800 });
+    await setDefaultEditingMode(window, 'live-preview');
+    const LINE = '  return area;';
+    // The cursor line of a code block made into a card, the way the fixture's
+    // own instructions make it: the embed lands between the two halves of the
+    // block, each fenced on its own.
+    await window.evaluate(async (line) => {
+      const { app } = window as unknown as {
+        app: App & {
+          workspace: {
+            activeEditor: {
+              editor: {
+                getValue(): string;
+                cm: {
+                  dispatch(spec: {
+                    selection: { anchor: number; head?: number };
+                  }): void;
+                };
+              };
+            };
+          };
+        };
+      };
+      const leaf = app.workspace.getLeaf('tab');
+      await leaf.openFile(
+        app.vault.getFileByPath('testing/block-examples.md')!,
+        { active: true, state: { mode: 'source' } }
+      );
+      app.workspace.setActiveLeaf(leaf, { focus: true });
+      const { editor } = app.workspace.activeEditor;
+      const at = editor.getValue().indexOf(line) + line.indexOf('area');
+      editor.cm.dispatch({ selection: { anchor: at, head: at + 4 } });
+    }, LINE);
+    await executeCommandById(window, 'incremental-reading:create-card');
+    // The embed in the note before the cursor moves: placed any earlier, the
+    // edit that puts the embed in takes the view back to where it was made
+    await expect
+      .poll(() =>
+        window.evaluate(() =>
+          (
+            window as unknown as {
+              app: {
+                workspace: {
+                  activeEditor: { editor: { getValue(): string } };
+                };
+              };
+            }
+          ).app.workspace.activeEditor.editor
+            .getValue()
+            .includes('|ir-hide-title]]')
+        )
+      )
+      .toBe(true);
+    // Making a card holds the view in place for a moment (scroll-hold.ts), which
+    // would put it back over the move below; scrolling, as a user moving on
+    // would, lets go of it
+    await window.mouse.wheel(0, 1);
+    await window.evaluate(() => {
+      const { app } = window as unknown as {
+        app: {
+          workspace: {
+            activeEditor: {
+              editor: {
+                getValue(): string;
+                setCursor(line: number, ch: number): void;
+                scrollIntoView(
+                  range: {
+                    from: { line: number; ch: number };
+                    to: { line: number; ch: number };
+                  },
+                  center?: boolean
+                ): void;
+              };
+            };
+          };
+        };
+      };
+      const { editor } = app.workspace.activeEditor;
+      const line = editor
+        .getValue()
+        .split('\n')
+        .findIndex((text) => text.startsWith('## 3.'));
+      editor.setCursor(line, 0);
+      const at = { line, ch: 0 };
+      editor.scrollIntoView({ from: at, to: at }, true);
+    });
+  }
+
+  /**
+   * Scrolls the active note's view, in either mode, to the heading of the
+   * section holding the card's embed: both modes only render the embed once it
+   * is near the screen, and on the embed's own line Live Preview would show its
+   * source. Live Preview by its scroller, which needs no cursor move.
+   *
+   * Unofficial: `window.app`, `editor.cm` (the CodeMirror view), and the
+   * `line` ephemeral state, which is how Obsidian's own outline jumps Reading
+   * view to a line.
+   */
+  const revealCard = () =>
+    window.evaluate(() => {
+      type EditorView = {
+        state: { doc: { line(n: number): { from: number } } };
+        lineBlockAt(pos: number): { top: number };
+        scrollDOM: HTMLElement;
+      };
+      const { app } = window as unknown as {
+        app: {
+          workspace: {
+            getMostRecentLeaf(): {
+              view: {
+                getMode(): 'source' | 'preview';
+                getViewData(): string;
+                editor: { cm: EditorView };
+                setEphemeralState(state: { line: number }): void;
+              };
+            };
+          };
+        };
+      };
+      const { view } = app.workspace.getMostRecentLeaf();
+      const line = view
+        .getViewData()
+        .split('\n')
+        .findIndex((text) => text.startsWith('## 3.'));
+      if (view.getMode() === 'preview') {
+        view.setEphemeralState({ line });
+        return;
+      }
+      const { cm } = view.editor;
+      cm.scrollDOM.scrollTop = cm.lineBlockAt(
+        cm.state.doc.line(line + 1).from
+      ).top;
+    });
+
+  test('line the code of a card made inside a code block up with the code around it', async () => {
+    await makeCodeCard();
+
+    /**
+     * Where the embed's code sits against the note's own code on either side
+     * of it, in pixels: how far its text starts from theirs, how far its box
+     * ends from theirs, and the blank space between the text rows, which has
+     * to stay under one row of the note's code (else a blank row hides in it)
+     * and under the note's own gap between two paragraphs.
+     */
+    const offsets = (root: string) =>
+      window.locator(root).evaluate((view) => {
+        const pre = Array.from(
+          view.querySelectorAll<HTMLElement>(
+            '.internal-embed[alt*="ir-hide-title"].is-loaded pre:not(.frontmatter)'
+          )
+        ).find((candidate) => candidate.getBoundingClientRect().height > 0);
+        if (!pre) return null;
+        pre.scrollIntoView({ block: 'center' });
+
+        /** The rects of `el`'s text, one per row of it. */
+        const rows = (el: Element) => {
+          const range = document.createRange();
+          range.selectNodeContents(el);
+          return Array.from(range.getClientRects()).filter(
+            (rect) => rect.width > 0 && rect.height > 0
+          );
+        };
+        const code = rows(pre.querySelector('code')!);
+
+        // Reading view: the note's own <pre> in the sections around the
+        // embed's host paragraph. Live preview: the nearest rows of code
+        // around the embed's block widget, past the fence lines that close
+        // and reopen the note's block, which hold no code.
+        const host = pre.closest('.cm-content > .internal-embed, .el-p');
+        if (!host) return null;
+        const reading = host.classList.contains('el-p');
+        const isCode = (el: Element | null) =>
+          !!el?.matches(
+            '.cm-line.HyperMD-codeblock:not(.HyperMD-codeblock-begin, .HyperMD-codeblock-end)'
+          ) && !!el.textContent?.trim();
+        const nearest = (step: (el: Element) => Element | null) => {
+          let el = step(host);
+          while (el && !isCode(el)) el = step(el);
+          return el;
+        };
+        const [above, below] = reading
+          ? [
+              host.previousElementSibling?.querySelector('pre code'),
+              host.nextElementSibling?.querySelector('pre code'),
+            ]
+          : [
+              nearest((el) => el.previousElementSibling),
+              nearest((el) => el.nextElementSibling),
+            ];
+        if (!above || !below || code.length === 0) return null;
+        const aboveRows = rows(above);
+        const belowRows = rows(below);
+        if (aboveRows.length === 0 || belowRows.length === 0) return null;
+
+        // One row of the note's code (in Reading view, the step from one of
+        // its rows to the next), and the gap between two of the note's
+        // paragraphs: a margin in Reading view, a blank line in Live Preview
+        const tops = [
+          ...new Set(aboveRows.map((rect) => Math.round(rect.top))),
+        ].sort((a, b) => a - b);
+        const row = reading
+          ? Math.min(...tops.slice(1).map((top, k) => top - tops[k]))
+          : above.getBoundingClientRect().height;
+        const paragraph = reading
+          ? Number.parseFloat(
+              getComputedStyle(
+                view.querySelector('.el-p > p:not(.ir-transclusion-host)')!
+              ).marginBottom
+            )
+          : Number.parseFloat(
+              getComputedStyle(view.querySelector('.cm-content')!).lineHeight
+            );
+        const blankAbove = code[0].top - aboveRows.at(-1)!.bottom;
+        const blankBelow = belowRows[0].top - code.at(-1)!.bottom;
+        const slack = (px: number) => (Math.abs(px) <= 1 ? 0 : Math.round(px));
+        const fits = (blank: number) =>
+          blank < row && blank <= paragraph ? 'fits' : Math.round(blank);
+        return {
+          // Both rows start indented the same in the fixture
+          text: slack(code[0].left - belowRows[0].left),
+          right: slack(
+            pre.getBoundingClientRect().right -
+              (reading ? above.closest('pre')! : above).getBoundingClientRect()
+                .right
+          ),
+          above: fits(blankAbove),
+          below: fits(blankBelow),
+        };
+      });
+
+    const live = '.workspace-leaf.mod-active .markdown-source-view';
+    let livePreview: Awaited<ReturnType<typeof offsets>> = null;
+    await expect(async () => {
+      await revealCard();
+      livePreview = await offsets(live);
+      expect(livePreview).not.toBeNull();
+    }).toPass({ timeout: 30_000 });
+
+    await executeCommandById(window, 'markdown:toggle-preview');
+    let reading: Awaited<ReturnType<typeof offsets>> = null;
+    await expect(async () => {
+      await revealCard();
+      reading = await offsets(
+        '.workspace-leaf.mod-active .markdown-reading-view'
+      );
+      expect(reading).not.toBeNull();
+    }).toPass({ timeout: 30_000 });
+
+    expect({ livePreview, reading }).toEqual({
+      livePreview: { text: 0, right: 0, above: 'fits', below: 'fits' },
+      reading: { text: 0, right: 0, above: 'fits', below: 'fits' },
+    });
+  });
+
+  test('show a one-row code card without a scroll bar while its copy button shows', async () => {
+    await makeCodeCard();
+
+    /**
+     * Hovers the card's code block, which shows Obsidian's copy button inside
+     * it, and lists every box in the embed that would scroll, with how many
+     * pixels its content overflows it by: a box scrolls on an axis where its
+     * `overflow` is `auto` or `scroll` and its content is larger than it.
+     */
+    const scrollers = async (root: string) => {
+      const pre = window
+        .locator(
+          `${root} .internal-embed[alt*="ir-hide-title"].is-loaded pre:not(.frontmatter)`
+        )
+        .first();
+      await pre.scrollIntoViewIfNeeded();
+      await pre.hover({ position: { x: 40, y: 5 } });
+      await expect(pre.locator('.copy-code-button')).toBeVisible();
+      return pre.evaluate((code) => {
+        const embed = code.closest('.internal-embed')!;
+        const scrolls = (overflow: string) => /auto|scroll/.test(overflow);
+        return [embed, ...Array.from(embed.querySelectorAll('*'))].flatMap(
+          (el) => {
+            const style = getComputedStyle(el);
+            const down = el.scrollHeight - el.clientHeight;
+            const across = el.scrollWidth - el.clientWidth;
+            return (scrolls(style.overflowY) && down > 0) ||
+              (scrolls(style.overflowX) && across > 0)
+              ? [{ el: `${el.tagName}.${el.className}`, down, across }]
+              : [];
+          }
+        );
+      });
+    };
+
+    let livePreview: Awaited<ReturnType<typeof scrollers>> | null = null;
+    await expect(async () => {
+      await revealCard();
+      livePreview = await scrollers(
+        '.workspace-leaf.mod-active .markdown-source-view'
+      );
+    }).toPass({ timeout: 30_000 });
+
+    await executeCommandById(window, 'markdown:toggle-preview');
+    let reading: Awaited<ReturnType<typeof scrollers>> | null = null;
+    await expect(async () => {
+      await revealCard();
+      reading = await scrollers(
+        '.workspace-leaf.mod-active .markdown-reading-view'
+      );
+    }).toPass({ timeout: 30_000 });
+
+    expect({ livePreview, reading }).toEqual({ livePreview: [], reading: [] });
+  });
+
+  test('set the code of a code card in the type and rows of the note’s own code', async () => {
+    await makeCodeCard();
+
+    /**
+     * The type of the code in a view and the height of its rows: the card
+     * embed's code block, or the note's own code, which Reading view renders
+     * as a `<pre>` and Live Preview as a CodeMirror line per row.
+     */
+    const codeLook = (root: string, of: 'embed' | 'note') =>
+      window.locator(root).evaluate((view, of) => {
+        const shown = (el: Element) => el.getBoundingClientRect().height > 0;
+        const type = (el: Element) => {
+          const style = getComputedStyle(el);
+          return {
+            font: style.fontFamily,
+            size: style.fontSize,
+            tab: style.tabSize,
+          };
+        };
+        const pre = Array.from(
+          view.querySelectorAll<HTMLElement>('pre:not(.frontmatter)')
+        ).find(
+          (candidate) =>
+            shown(candidate) &&
+            !!candidate.querySelector('code') &&
+            (of === 'embed') === !!candidate.closest('.internal-embed')
+        );
+        if (pre) {
+          const code = pre.querySelector('code')!;
+          // The step from one row of text to the next; a block of one row
+          // has none, so its height inside its paddings
+          const range = document.createRange();
+          range.selectNodeContents(code);
+          const tops = [
+            ...new Set(
+              Array.from(range.getClientRects())
+                .filter((rect) => rect.width > 0 && rect.height > 0)
+                .map((rect) => Math.round(rect.top))
+            ),
+          ].sort((a, b) => a - b);
+          const style = getComputedStyle(pre);
+          const row =
+            tops.length > 1
+              ? Math.min(...tops.slice(1).map((top, k) => top - tops[k]))
+              : pre.clientHeight -
+                Number.parseFloat(style.paddingTop) -
+                Number.parseFloat(style.paddingBottom);
+          return { ...type(code), row: Math.round(row * 10) / 10 };
+        }
+        if (of === 'embed') return null;
+        const line = Array.from(
+          view.querySelectorAll(
+            '.cm-content > .cm-line.HyperMD-codeblock:not(.HyperMD-codeblock-begin, .HyperMD-codeblock-end)'
+          )
+        ).find(
+          (candidate) => shown(candidate) && candidate.textContent?.trim()
+        );
+        if (!line) return null;
+        return {
+          ...type(line),
+          row: Math.round(line.getBoundingClientRect().height * 10) / 10,
+        };
+      }, of);
+    /** The card embed's look and the note's, once the view renders both. */
+    const looks = async (root: string) => {
+      let embed: Awaited<ReturnType<typeof codeLook>> = null;
+      let note: Awaited<ReturnType<typeof codeLook>> = null;
+      await expect(async () => {
+        await revealCard();
+        embed = await codeLook(root, 'embed');
+        note = await codeLook(root, 'note');
+        expect(embed && note).not.toBeNull();
+      }).toPass({ timeout: 30_000 });
+      return { embed, note };
+    };
+    const live = '.workspace-leaf.mod-active .markdown-source-view';
+    const read = '.workspace-leaf.mod-active .markdown-reading-view';
+
+    const livePreview = await looks(live);
+    await executeCommandById(window, 'markdown:toggle-preview');
+    const reading = await looks(read);
+
+    // The card's own note, where its code is a code block of the note's own.
+    // Unofficial: `window.app`; the embed's `src` is the card's link text.
+    await window.evaluate(async () => {
+      const { app } = window as unknown as { app: App };
+      const src = document
+        .querySelector('.internal-embed[alt*="ir-hide-title"].is-loaded')!
+        .getAttribute('src')!;
+      const card = app.metadataCache.getFirstLinkpathDest(
+        src.split('#')[0],
+        'testing/block-examples.md'
+      )!;
+      const leaf = app.workspace.getLeaf('tab');
+      await leaf.openFile(card, { active: true, state: { mode: 'source' } });
+      app.workspace.setActiveLeaf(leaf, { focus: true });
+    });
+    let cardLive: Awaited<ReturnType<typeof codeLook>> = null;
+    await expect(async () => {
+      cardLive = await codeLook(live, 'note');
+      expect(cardLive).not.toBeNull();
+    }).toPass({ timeout: 30_000 });
+    await executeCommandById(window, 'markdown:toggle-preview');
+    let cardReading: Awaited<ReturnType<typeof codeLook>> = null;
+    await expect(async () => {
+      cardReading = await codeLook(read, 'note');
+      expect(cardReading).not.toBeNull();
+    }).toPass({ timeout: 30_000 });
+
+    expect({
+      livePreview: [livePreview.embed, livePreview.embed],
+      reading: [reading.embed, reading.embed],
+    }).toEqual({
+      livePreview: [livePreview.note, cardLive],
+      reading: [reading.note, cardReading],
+    });
+  });
+
+  test('step the cursor down from a code card’s line onto the fence that reopens the code below it', async () => {
+    await makeCodeCard();
+    /** The text of the line the cursor is on. Unofficial: `window.app`. */
+    const cursorLine = () =>
+      window.evaluate(() => {
+        const { editor } = (
+          window as unknown as {
+            app: {
+              workspace: {
+                activeEditor: {
+                  editor: {
+                    getCursor(): { line: number };
+                    getLine(line: number): string;
+                  };
+                };
+              };
+            };
+          }
+        ).app.workspace.activeEditor;
+        return editor.getLine(editor.getCursor().line);
+      });
+    await window.evaluate(() => {
+      const { editor } = (
+        window as unknown as {
+          app: {
+            workspace: {
+              activeEditor: {
+                editor: {
+                  getValue(): string;
+                  focus(): void;
+                  setCursor(line: number, ch: number): void;
+                };
+              };
+            };
+          };
+        }
+      ).app.workspace.activeEditor;
+      editor.focus();
+      editor.setCursor(
+        editor
+          .getValue()
+          .split('\n')
+          .findIndex((text) => text.includes('|ir-hide-title]]')),
+        0
+      );
+    });
+    await expect.poll(cursorLine).toContain('|ir-hide-title]]');
+
+    await window.keyboard.press('ArrowDown');
+
+    // The fence line, not the first line of code after it
+    await expect.poll(cursorLine).toMatch(/^```/);
+  });
+
+  test('keep the open-in-tab button of a code card off the corner its copy button shows in', async () => {
+    await makeCodeCard();
+
+    /**
+     * Hovers the card's code block, which is what shows Obsidian's copy
+     * button on it, and reports how far the open-in-tab button's box reaches
+     * into the copy button's, in whole pixels (zero when the two are apart),
+     * and whether the open-in-tab button is the topmost element at its own
+     * center, so still there to click.
+     */
+    const buttons = async (root: string) => {
+      const pre = window
+        .locator(
+          `${root} .internal-embed[alt*="ir-hide-title"].is-loaded pre:not(.frontmatter)`
+        )
+        .first();
+      await pre.scrollIntoViewIfNeeded();
+      await pre.hover({ position: { x: 40, y: 5 } });
+      const copy = pre.locator('.copy-code-button');
+      await expect(copy).toBeVisible();
+      return pre.evaluate((code) => {
+        const link = code
+          .closest('.internal-embed')!
+          .querySelector<HTMLElement>(':scope > .markdown-embed-link')!;
+        const a = link.getBoundingClientRect();
+        const b = code
+          .querySelector('.copy-code-button')!
+          .getBoundingClientRect();
+        const overlap = (from: number, to: number) =>
+          Math.max(0, Math.round(to - from));
+        const hit = document.elementFromPoint(
+          a.left + a.width / 2,
+          a.top + a.height / 2
+        );
+        return {
+          overlap:
+            overlap(Math.max(a.left, b.left), Math.min(a.right, b.right)) *
+            overlap(Math.max(a.top, b.top), Math.min(a.bottom, b.bottom)),
+          linkOnTop: !!hit && link.contains(hit),
+        };
+      });
+    };
+
+    let livePreview: Awaited<ReturnType<typeof buttons>> | null = null;
+    await expect(async () => {
+      await revealCard();
+      livePreview = await buttons(
+        '.workspace-leaf.mod-active .markdown-source-view'
+      );
+    }).toPass({ timeout: 30_000 });
+
+    await executeCommandById(window, 'markdown:toggle-preview');
+    let reading: Awaited<ReturnType<typeof buttons>> | null = null;
+    await expect(async () => {
+      await revealCard();
+      reading = await buttons(
+        '.workspace-leaf.mod-active .markdown-reading-view'
+      );
+    }).toPass({ timeout: 30_000 });
+
+    expect({ livePreview, reading }).toEqual({
+      livePreview: { overlap: 0, linkOnTop: true },
+      reading: { overlap: 0, linkOnTop: true },
+    });
+  });
 });
 
 test.describe('Highlights past the note’s end', () => {
