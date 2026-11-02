@@ -2,8 +2,9 @@ import type { ArticleManager } from '#/lib/items/ArticleManager';
 import type { CardManager } from '#/lib/items/CardManager';
 import { NOT_PURGED } from '#/lib/items/row-delete';
 import type { SnippetManager } from '#/lib/items/SnippetManager';
+import type { ItemTable } from '#/lib/moved-note-scan';
 import type { App, TFile } from 'obsidian';
-import { refusedWrite } from './compensation';
+import { refusedWrite, withCompensation } from './compensation';
 import {
   ARTICLE_TAG,
   CARD_TAG,
@@ -13,6 +14,7 @@ import {
 } from './constants';
 import { hasTag, tagEntries, withTag } from './item-tags';
 import { ObsidianHelpers as Obsidian } from './ObsidianHelpers';
+import { stripFrontmatterTags } from './tags';
 import type { NoteType, SQLiteRepository } from './types';
 
 /**
@@ -53,13 +55,35 @@ export interface Leftover {
 
 /**
  * A row holding a note's path as its `reference`, deleted (a tombstone not
- * purged) or not: see {@link findPathHolder}.
+ * purged) or not, with what the user is shown of it to choose what to do
+ * about it: see {@link findPathHolder}.
  */
 export interface PathHolder {
   kind: NoteType;
   id: string;
   deleted: boolean;
+  dismissed: boolean;
+  /** When it is due, in ms; null for a dismissed row that has no due date. */
+  due: number | null;
+  /** When it was last reviewed, in ms; null when it never was. */
+  lastReview: number | null;
+  /** When it was last written, in ms (`updated_at`); 0 when never stamped. */
+  updatedAt: number;
+  /** The device that last wrote it (`updated_by`); `''` when unknown. */
+  updatedBy: string;
+  /**
+   * For a snippet or card taken from an item, that item: by id, with its
+   * note's path when a row of it holds one (not deleted for good).
+   */
+  parent: { id: string; path: string | null } | null;
 }
+
+/**
+ * What the user chose to do about a row holding a leftover's path: make the
+ * note that row's note (`reassociate`), erase the row and save the note as a
+ * new item (`erase`), or neither (`null`).
+ */
+export type HeldChoice = 'reassociate' | 'erase' | null;
 
 /**
  * Why a leftover's action was not done: another row holds its note's path,
@@ -72,11 +96,14 @@ export type LeftoverFailure =
 /**
  * What came of resolving a leftover: done, or not, with why when it failed.
  * One not done for no failure was left be: no longer a leftover, of no type to
- * adopt it as, or with writes refused (which says so itself).
+ * adopt it as, or with writes refused (which says so itself). One `canceled`
+ * is one the user backed out of when asked what to do about it, which is no
+ * failure.
  */
 export type LeftoverOutcome =
   | { done: true }
-  | { done: false; failure?: LeftoverFailure };
+  | { done: false; failure?: LeftoverFailure }
+  | { done: false; canceled: true };
 
 /** What can be done with a leftover: see {@link actionsFor}. */
 export type LeftoverAction = 'adopt' | 'trash' | 'strip';
@@ -85,18 +112,35 @@ export type LeftoverAction = 'adopt' | 'trash' | 'strip';
 export interface LeftoverDeps {
   app: Pick<App, 'vault' | 'metadataCache' | 'fileManager'>;
   repo: SQLiteRepository;
-  articles: Pick<ArticleManager, 'adoptLeftover'>;
+  articles: Pick<
+    ArticleManager,
+    'adoptLeftover' | 'reassociateNote' | 'claimInPlace'
+  >;
   snippets: Pick<SnippetManager, 'adoptLeftover'>;
   cards: Pick<CardManager, 'adoptLeftover'>;
+  /**
+   * What lets a leftover whose path another row holds be adopted anyway (see
+   * {@link resolveLeftover}); without it, adopting one fails.
+   */
+  conflicts?: {
+    /** Ask the user what to do about `holder`, at `file`'s path. */
+    ask: (file: TFile, holder: PathHolder) => Promise<HeldChoice>;
+    /** Erase the `table` row `id` for good (see `ReviewManager.deleteRow`). */
+    purge: (table: ItemTable, id: string) => Promise<void>;
+  };
 }
 
 const ITEM_TABLES = ['article', 'snippet', 'srs_card'] as const;
-const KIND_OF_TABLE: Readonly<Record<(typeof ITEM_TABLES)[number], NoteType>> =
-  {
-    article: 'article',
-    snippet: 'snippet',
-    srs_card: 'card',
-  };
+const KIND_OF_TABLE: Readonly<Record<ItemTable, NoteType>> = {
+  article: 'article',
+  snippet: 'snippet',
+  srs_card: 'card',
+};
+const TABLE_OF_KIND: Readonly<Record<NoteType, ItemTable>> = {
+  article: 'article',
+  snippet: 'snippet',
+  card: 'srs_card',
+};
 const TAG_OF: Readonly<Record<NoteType, string>> = {
   article: ARTICLE_TAG,
   snippet: SNIPPET_TAG,
@@ -187,28 +231,73 @@ async function heldIds(
 }
 
 /**
- * The row whose `reference` is `path`, of any item table, deleted or not: a
- * row for another note can't be added at `path` while it is there, as each
- * table's `reference` is unique, and one in another table would point a
- * second item at the same note. A purged row's reference is no path (see
- * `NOT_PURGED`), so never matches.
+ * The path of the item `<table>.parent` names, while a row of it holds one: an
+ * article's or a snippet's, deleted short of for good (see `NOT_PURGED`,
+ * which the subquery reads with its own `id` and `reference`).
+ */
+const parentPath = (table: ItemTable) =>
+  ['article', 'snippet']
+    .map(
+      (parent) =>
+        `(SELECT reference FROM ${parent} AS p WHERE p.id = ${table}.parent AND ${NOT_PURGED})`
+    )
+    .join(', ');
+
+/**
+ * The row whose `reference` is `path`, of any item table, deleted or not, with
+ * what the user is shown of it (see {@link PathHolder}): a row for another
+ * note can't be added at `path` while it is there, as each table's
+ * `reference` is unique, and one in another table would point a second item
+ * at the same note. A purged row's reference is no path (see `NOT_PURGED`),
+ * so never matches. Its last review is the latest not undone; a card keeps
+ * its own.
  * @throws if the item tables cannot be read
  */
 export async function findPathHolder(
   repo: SQLiteRepository,
   path: string
 ): Promise<PathHolder | null> {
-  for (const table of ITEM_TABLES) {
-    const [row] = (await repo.query(
-      `SELECT id, deleted FROM ${table} WHERE reference = $1 LIMIT 1`,
-      [path],
-      { throwOnError: true }
-    )) as unknown as { id: string; deleted: number | boolean }[];
-    if (row) {
-      return { kind: KIND_OF_TABLE[table], id: row.id, deleted: !!row.deleted };
-    }
-  }
-  return null;
+  const [row] = (await repo.query(
+    `SELECT 0 AS rank, 'article' AS item_table, id, deleted, dismissed, due, updated_at, updated_by,
+       NULL AS parent, NULL AS parent_path,
+       (SELECT MAX(review_time) FROM article_review
+        WHERE article_id = article.id AND deleted = FALSE) AS last_review
+     FROM article WHERE reference = $1
+     UNION ALL SELECT 1, 'snippet', id, deleted, dismissed, due, updated_at, updated_by,
+       parent, COALESCE(${parentPath('snippet')}),
+       (SELECT MAX(review_time) FROM snippet_review
+        WHERE snippet_id = snippet.id AND deleted = FALSE)
+     FROM snippet WHERE reference = $1
+     UNION ALL SELECT 2, 'srs_card', id, deleted, dismissed, due, updated_at, updated_by,
+       parent, COALESCE(${parentPath('srs_card')}), last_review
+     FROM srs_card WHERE reference = $1
+     ORDER BY rank LIMIT 1`,
+    [path],
+    { throwOnError: true }
+  )) as unknown as {
+    item_table: ItemTable;
+    id: string;
+    deleted: unknown;
+    dismissed: unknown;
+    due: number | null;
+    updated_at: number;
+    updated_by: string;
+    parent: string | null;
+    parent_path: string | null;
+    last_review: number | null;
+  }[];
+  if (!row) return null;
+  return {
+    kind: KIND_OF_TABLE[row.item_table],
+    id: row.id,
+    deleted: Boolean(row.deleted),
+    dismissed: Boolean(row.dismissed),
+    due: row.due,
+    lastReview: row.last_review,
+    updatedAt: row.updated_at,
+    updatedBy: row.updated_by,
+    parent: row.parent ? { id: row.parent, path: row.parent_path } : null,
+  };
 }
 
 /**
@@ -241,8 +330,8 @@ export function failureDetail(failure: LeftoverFailure): string {
   return (
     `Another item's record already points at this note's path: ` +
     `${deleted ? 'a deleted' : 'an existing'} ${kind}, id ${short}. ` +
-    `Move this note to save it as a new item, or set its ir-id to ${id} to make it that item. ` +
-    'A later version will offer to resolve this here.'
+    'Confirm again to re-associate this note with it or erase it, ' +
+    'or move this note to save it as a new item.'
   );
 }
 
@@ -332,9 +421,64 @@ async function adopt(
       deps.app as App
     );
   }
+  await adoptRow(deps, file, id, type);
+}
+
+/** Add the row of the note `file` as an item of `type` with `id`. */
+async function adoptRow(
+  deps: LeftoverDeps,
+  file: TFile,
+  id: string,
+  type: NoteType
+): Promise<void> {
   if (type === 'article') await deps.articles.adoptLeftover(file, id);
   else if (type === 'snippet') await deps.snippets.adoptLeftover(file, id);
   else await deps.cards.adoptLeftover(file, id);
+}
+
+/**
+ * Give the note `file` a row as a new item of `type` under a fresh id, written
+ * into it in place of its own with the type's tag in place of any other item
+ * type's, as a fresh import does: for a note whose path an erased row held,
+ * whose own id is no item's to keep, and may be one a row deleted for good
+ * keeps. A row that can't be saved puts the note's id and tags back as they
+ * were, so it is the same leftover still.
+ * @throws what the note's or the row's write threw, once undone
+ */
+async function adoptFresh(
+  deps: LeftoverDeps,
+  file: TFile,
+  type: NoteType
+): Promise<void> {
+  const id = crypto.randomUUID();
+  const tag = TAG_OF[type];
+  const others = Object.values(TAG_OF).filter((other) => other !== tag);
+  await withCompensation(async (step) => {
+    await step(
+      () =>
+        Obsidian.updateFrontMatterUndoably(
+          file,
+          { 'ir-id': id, tags: tag },
+          deps.app as App,
+          (frontmatter) => stripFrontmatterTags(frontmatter, others)
+        ),
+      (undo) => undo()
+    );
+    await adoptRow(deps, file, id, type);
+  });
+}
+
+/**
+ * Whether `leftover` is one still: its note where it was, holding the same id,
+ * which no row holds.
+ */
+async function isLeftover(
+  { app, repo }: Pick<LeftoverDeps, 'app' | 'repo'>,
+  { file, id }: Leftover
+): Promise<boolean> {
+  const claim =
+    app.vault.getFileByPath(file.path) === file ? claimOf(app, file) : null;
+  return claim?.id === id && (await heldIds(repo, [id])).size === 0;
 }
 
 /**
@@ -343,8 +487,10 @@ async function adopt(
  * database, say. Says so when it fails, or when writes are refused.
  * @param as for `adopt`, the type to keep it as, the user's choice: by
  *   default the one it was made as; with neither, it isn't adopted
- * Adopting a note whose path another row holds fails before anything is
- * written, saying which row (see {@link findPathHolder}).
+ * Adopting a note whose path another row holds asks the user what to do
+ * about that row, when `deps.conflicts` can (see {@link resolveHeld}); else it
+ * fails before anything is written, saying which row (see
+ * {@link findPathHolder}).
  * @returns whether it was done, and why not when it failed
  */
 export async function resolveLeftover(
@@ -360,20 +506,10 @@ export async function resolveLeftover(
   const what = DOING[action](`"${file.basename}"`);
   if (await refusedWrite(repo, what)) return { done: false };
   try {
-    const claim =
-      app.vault.getFileByPath(file.path) === file ? claimOf(app, file) : null;
-    if (claim?.id !== id || (await heldIds(repo, [id])).size > 0) {
-      return { done: false };
-    }
+    if (!(await isLeftover(deps, leftover))) return { done: false };
     const holder =
       action === 'adopt' ? await findPathHolder(repo, file.path) : null;
-    if (holder) {
-      console.warn(
-        `Incremental Reading - can't ${what}: another row holds its path`,
-        holder
-      );
-      return failed(what, { reason: 'held', holder });
-    }
+    if (holder && as) return await resolveHeld(deps, leftover, holder, as);
     if (action === 'trash') {
       await app.fileManager.trashFile(file);
     } else if (action === 'strip') {
@@ -400,6 +536,78 @@ export async function resolveLeftover(
     console.error(error);
     return failed(what, failureOf(error));
   }
+}
+
+/** Whether `a` and `b` are the same row as the user would be shown it. */
+const sameRow = (a: PathHolder, b: PathHolder) =>
+  JSON.stringify(a) === JSON.stringify(b);
+
+/**
+ * Adopt `leftover` as `as`, though `holder` holds its note's path, as the
+ * user chooses (see `conflicts.ask`): make the note that row's note, keeping
+ * its schedule and history (`reassociate`: see
+ * `ArticleManager.reassociateNote`), and hand it the parentless snippets and
+ * cards taken from the note, unless it is a card; or erase the row for good
+ * and save the note as a new item of `as`, under a fresh id (`erase`: see
+ * {@link adoptFresh}); or neither, which writes nothing and fails as held,
+ * saying nothing more.
+ *
+ * The user may take a while to choose, so before writing anything, checks
+ * again that saving is allowed, that the note is still a leftover, and that
+ * the row at its path is still `holder` as they were shown it; one changed
+ * meanwhile is refused, saying so.
+ */
+async function resolveHeld(
+  deps: LeftoverDeps,
+  leftover: Leftover,
+  holder: PathHolder,
+  as: NoteType
+): Promise<LeftoverOutcome> {
+  const { repo, conflicts } = deps;
+  const { file } = leftover;
+  const what = DOING.adopt(`"${file.basename}"`);
+  const held: LeftoverFailure = { reason: 'held', holder };
+  if (!conflicts) {
+    console.warn(
+      `Incremental Reading - can't ${what}: another row holds its path`,
+      holder
+    );
+    return failed(what, held);
+  }
+  const choice = await conflicts.ask(file, holder);
+  if (!choice) return { done: false, canceled: true };
+  if (await refusedWrite(repo, what)) return { done: false };
+  if (!(await isLeftover(deps, leftover))) return { done: false };
+  const now = await findPathHolder(repo, file.path);
+  if (!now || !sameRow(now, holder)) {
+    Obsidian.notify(
+      `Nothing was done to "${file.basename}": the ${holder.kind} at its path changed while you chose. Confirm again to see it as it is now.`,
+      { kind: 'error' }
+    );
+    return now
+      ? { done: false, failure: { reason: 'held', holder: now } }
+      : { done: false };
+  }
+  const table = TABLE_OF_KIND[holder.kind];
+  if (choice === 'erase') {
+    await conflicts.purge(table, holder.id);
+    await adoptFresh(deps, file, as);
+    return { done: true };
+  }
+  await deps.articles.reassociateNote(file, table, holder.id);
+  // Nothing is ever taken from a card
+  if (holder.kind !== 'card') {
+    try {
+      await deps.articles.claimInPlace(file, holder.id);
+    } catch (error) {
+      console.error(error);
+      Obsidian.notify(
+        `"${file.basename}" is the ${holder.kind}'s note again, but the snippets and cards taken from it couldn't be adopted`,
+        { kind: 'error', persist: true }
+      );
+    }
+  }
+  return { done: true };
 }
 
 /** Tell the user doing `what` failed, and why, and answer so. */

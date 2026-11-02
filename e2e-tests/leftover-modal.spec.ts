@@ -6,7 +6,7 @@ import test, {
 } from '@playwright/test';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { executeCommandById } from './helpers';
+import { executeCommandById, openFileInActiveLeaf } from './helpers';
 import {
   closeElectron,
   createVaultCopy,
@@ -149,4 +149,139 @@ test('saves only the leftover notes left checked on Confirm', async () => {
   await expect(
     window.locator('#manage-leftovers-button .ir-leftover-count')
   ).toHaveText('1');
+});
+
+test.describe("A leftover at another item's path", () => {
+  /** The question asked about the row holding the leftover's path. */
+  const question = () => window.locator('.modal-container.mod-confirmation');
+
+  /**
+   * Click `button` in the open question until it goes away, with the question
+   * it is in: Obsidian can take a click before a modal's button is wired. A
+   * question asked next, once more, has buttons of its own.
+   */
+  async function answer(button: string) {
+    const target = question().locator(`.modal-button-container ${button}`);
+    await expect(async () => {
+      if (await target.isVisible()) await target.click();
+      await expect(target).toHaveCount(0, { timeout: 2_000 });
+    }).toPass();
+  }
+
+  /**
+   * Put the snippet `id` at `at`, deleted or not, due `due`, reviewed once,
+   * and a leftover note there holding another id; then open the leftover
+   * modal, save the note as an article, and wait for the question about the
+   * snippet.
+   */
+  async function adoptOverSnippet(
+    at: string,
+    { id, deleted, due }: { id: string; deleted: boolean; due: number }
+  ) {
+    await mutate(
+      `INSERT INTO snippet (id, reference, due, interval, priority, deleted)
+       VALUES ($1, $2, $3, 86400000, 25, $4)`,
+      [id, at, due, Number(deleted)]
+    );
+    await mutate(
+      `INSERT INTO snippet_review (id, snippet_id, review_time)
+       VALUES ('review-1', $1, $2)`,
+      [id, due - 86_400_000]
+    );
+    await writeVaultFile(at, articleNote('fictitious', 'Left over'));
+    await window.evaluate(() => {
+      const { app } = window as unknown as { app: PageApp };
+      void app.plugins.plugins['incremental-reading'].leftovers?.manage();
+    });
+    const name = path.basename(at, '.md');
+    await expect(lineOf(name).locator('.checkbox-container')).toHaveClass(
+      /\bis-enabled\b/
+    );
+    await window
+      .locator('.ir-leftover-modal .modal-button-container .mod-cta')
+      .click();
+    await expect(question().last()).toBeVisible();
+  }
+
+  /** The item's action bar in the active tab, which a plain note has none of. */
+  const actionBar = () =>
+    window
+      .locator('.workspace-leaf.mod-active .ir-action-bar-panel')
+      .filter({ visible: true });
+
+  test("Re-associate makes the note the deleted snippet's note, with its schedule, and the leftover is gone", async () => {
+    // Ten days ago, at noon, so the day shown is the same in any zone
+    const dueDate = new Date();
+    dueDate.setDate(dueDate.getDate() - 10);
+    dueDate.setHours(12, 0, 0, 0);
+    const day = `${dueDate.getFullYear()}/${dueDate.getMonth() + 1}/${dueDate.getDate()}`;
+    await adoptOverSnippet('notes/Leftover.md', {
+      id: 'held-snippet',
+      deleted: true,
+      due: dueDate.getTime(),
+    });
+
+    await answer('.mod-cta');
+
+    await expect(window.locator('.ir-leftover-modal')).toHaveCount(0);
+    await openFileInActiveLeaf(window, 'notes/Leftover.md');
+    await expect(actionBar()).toBeVisible();
+    await executeCommandById(window, 'incremental-reading:learn');
+    const rows = window.locator('.ir-queue-row');
+    const snippet = rows.filter({ hasText: 'Leftover' });
+    await expect(snippet).toHaveAttribute('data-type', 'snippet');
+    await expect(snippet).toContainText(day);
+    await expect(
+      window.locator('#manage-leftovers-button .ir-leftover-count')
+    ).toHaveCount(0);
+  });
+
+  test('Erase and import fresh, once confirmed, saves the note as a new article in place of the snippet', async () => {
+    await adoptOverSnippet('notes/Missing.md', {
+      id: 'live-snippet',
+      deleted: false,
+      due: Date.now() - 1_000,
+    });
+
+    await answer('button.mod-destructive:not(.mod-cta)');
+    // Asked once more, as it can't be undone
+    await expect(question().last()).toBeVisible();
+    await answer('.mod-cta');
+
+    await expect(window.locator('.ir-leftover-modal')).toHaveCount(0);
+    await executeCommandById(window, 'incremental-reading:learn');
+    const rows = window.locator('.ir-queue-row').filter({ hasText: 'Missing' });
+    await expect(rows).toHaveCount(1);
+    await expect(rows).toHaveAttribute('data-type', 'article');
+  });
+
+  test('Cancel writes nothing, shows no error, and the leftover stays listed', async () => {
+    await adoptOverSnippet('notes/Kept.md', {
+      id: 'held-snippet',
+      deleted: true,
+      due: Date.now() - 1_000,
+    });
+
+    await answer('.mod-cancel');
+
+    // The line stays as it was, with no error: backing out is no failure
+    await expect(
+      window.locator('.ir-leftover-modal .modal-button-container .mod-cta')
+    ).toBeEnabled();
+    await expect(lineOf('Kept')).toBeVisible();
+    await expect(lineOf('Kept').locator('.ir-leftover-error')).toHaveCount(0);
+    await window
+      .locator('.ir-leftover-modal .modal-button-container .mod-cancel')
+      .click();
+    await expect(window.locator('.ir-leftover-modal')).toHaveCount(0);
+    // Neither the snippet back nor an article made
+    await executeCommandById(window, 'incremental-reading:learn');
+    await expect(
+      window.locator('.ir-queue-row').filter({ hasText: 'Kept' })
+    ).toHaveCount(0);
+    // Still a leftover, to be asked about again
+    await expect(
+      window.locator('#manage-leftovers-button .ir-leftover-count')
+    ).toHaveText('1');
+  });
 });

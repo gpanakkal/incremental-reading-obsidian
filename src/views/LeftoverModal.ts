@@ -10,7 +10,10 @@ import {
   leftoversMessage,
   resolveLeftover,
 } from '#/lib/crash-leftovers';
+import { getDeviceId } from '#/lib/device-id';
+import type ReviewManager from '#/lib/items/ReviewManager';
 import { notify } from '#/lib/notices';
+import { askToResolveHeld } from '#/lib/reassociate-prompt';
 import type { NoteType, SQLiteRepository } from '#/lib/types';
 import { openModal } from '#/lib/ui-window';
 import {
@@ -183,7 +186,7 @@ export class LeftoverModal extends Modal {
   readonly #resolve: (
     leftover: Leftover,
     choice: LeftoverChoice
-  ) => Promise<boolean | LeftoverFailure>;
+  ) => Promise<boolean | LeftoverFailure | null>;
   #rows: Row[] = [];
   #buttonsEl: HTMLElement | null = null;
   /** The toggle that turns every line's "Keep as" toggle on or off. */
@@ -197,7 +200,8 @@ export class LeftoverModal extends Modal {
 
   /**
    * @param resolve does what was chosen for a leftover, answering `true` once
-   *   done; else `false`, or why it failed, which the line's tooltip says
+   *   done; else `false`, or why it failed, which the line's tooltip says; or
+   *   `null` when the user backed out, which leaves the line as it was
    */
   constructor(
     app: App,
@@ -205,7 +209,7 @@ export class LeftoverModal extends Modal {
     resolve: (
       leftover: Leftover,
       choice: LeftoverChoice
-    ) => Promise<boolean | LeftoverFailure>
+    ) => Promise<boolean | LeftoverFailure | null>
   ) {
     super(app);
     this.#leftovers = leftovers;
@@ -512,7 +516,7 @@ export class LeftoverModal extends Modal {
       if (this.#closed) break;
       const choice = choiceOf(row)!;
       row.info.querySelector('.ir-leftover-error')?.remove();
-      let outcome: boolean | LeftoverFailure;
+      let outcome: boolean | LeftoverFailure | null;
       try {
         outcome = await this.#resolve(row.leftover, choice);
       } catch (error) {
@@ -524,6 +528,8 @@ export class LeftoverModal extends Modal {
         );
         outcome = failureOf(error);
       }
+      // Backed out of by the user, which is no failure to show
+      if (outcome === null) continue;
       if (outcome === true) {
         if (this.#open?.row === row) this.#closePreview();
         row.el.remove();
@@ -553,8 +559,12 @@ export class LeftoverModal extends Modal {
 export interface LeftoverWatchDeps {
   app: App;
   repo: SQLiteRepository;
-  /** The item managers, asked for only once something is chosen. */
-  managers: () => Pick<LeftoverDeps, 'articles' | 'snippets' | 'cards'>;
+  /**
+   * The item managers, and what erases a row for good, asked for only once
+   * something is chosen.
+   */
+  managers: () => Pick<LeftoverDeps, 'articles' | 'snippets' | 'cards'> &
+    Pick<ReviewManager, 'deleteRow'>;
   /** Told once a leftover is resolved, for what shows items to be refreshed. */
   onResolved: () => unknown;
   /** Whether a review tab is open, its view loaded. */
@@ -644,13 +654,32 @@ export class LeftoverWatch {
       app,
       this.#current,
       async (leftover, choice) => {
+        const reviewManager = managers();
+        const { articles, snippets, cards } = reviewManager;
+        // A row holding the note's path is asked about, one at a time, as the
+        // modal does each line after the one before
+        let erased = false;
+        const conflicts: LeftoverDeps['conflicts'] = {
+          ask: (file, holder) =>
+            askToResolveHeld(app, file, holder, getDeviceId(app)),
+          purge: async (table, id) => {
+            await reviewManager.deleteRow(table, id);
+            erased = true;
+          },
+        };
         const outcome = await resolveLeftover(
-          { app, repo, ...managers() },
+          { app, repo, articles, snippets, cards, conflicts },
           leftover,
           choice.action,
           choice.action === 'adopt' ? choice.as : undefined
         );
-        if (!outcome.done) return outcome.failure ?? false;
+        if (!outcome.done) {
+          // A row erased before the note failed to be saved is gone all the
+          // same
+          if (erased) await onResolved();
+          if ('canceled' in outcome) return null;
+          return outcome.failure ?? false;
+        }
         this.#set(this.#current.filter((left) => left !== leftover));
         await onResolved();
         return true;

@@ -3,13 +3,34 @@ import { type App, ButtonComponent, Modal, Platform } from 'obsidian';
 
 export interface ConfirmOptions {
   title: string;
-  /** The question and anything the user should know first, one per paragraph. */
-  paragraphs: readonly string[];
+  /**
+   * The question and anything the user should know first, one per paragraph;
+   * one given as several lines is shown as a list of them.
+   */
+  paragraphs: readonly (string | readonly string[])[];
   /** The text of the button that goes ahead, such as "Delete". */
   confirmText: string;
   /** Style the confirm button as Obsidian styles one that deletes. */
   destructive?: boolean;
+  /**
+   * A second way to go ahead, on a button between Cancel and the confirm
+   * button: see {@link promptForChoice}.
+   */
+  alternative?: {
+    text: string;
+    /** Style it as Obsidian styles a button that deletes but isn't the default. */
+    destructive?: boolean;
+  };
 }
+
+/**
+ * The class on each of the modal's buttons, which gives them the pointer
+ * (styles.css): Obsidian's take `--cursor`, the arrow unless the user changes it.
+ */
+const BUTTON_CLASS = 'ir-confirm-button';
+
+/** What was chosen in a {@link promptForChoice}. */
+export type ConfirmChoice = 'confirm' | 'alternative' | 'cancel';
 
 /**
  * Ask the user to confirm an action.
@@ -18,10 +39,35 @@ export interface ConfirmOptions {
  */
 export function promptForConfirmation(
   app: App,
-  options: ConfirmOptions
+  // An alternative answers only through `promptForChoice`
+  options: Omit<ConfirmOptions, 'alternative'>
 ): Promise<boolean> {
   return new Promise((resolve) => {
     openModal(new ConfirmModal(app, options, resolve));
+  });
+}
+
+/**
+ * Ask the user to choose between two ways to go ahead, or neither: the
+ * confirm button, the default, or the alternative beside it.
+ * @returns what they chose; closing the modal any way but those buttons
+ * answers `cancel`
+ */
+export function promptForChoice(
+  app: App,
+  options: ConfirmOptions & {
+    alternative: NonNullable<ConfirmOptions['alternative']>;
+  }
+): Promise<ConfirmChoice> {
+  return new Promise((resolve) => {
+    openModal(
+      new ConfirmModal(
+        app,
+        options,
+        (confirmed) => resolve(confirmed ? 'confirm' : 'cancel'),
+        () => resolve('alternative')
+      )
+    );
   });
 }
 
@@ -35,25 +81,39 @@ export function promptForConfirmation(
 export class ConfirmModal extends Modal {
   readonly #options: ConfirmOptions;
   #onAnswer: ((confirmed: boolean) => void) | null;
+  readonly #onAlternative: (() => void) | undefined;
   #buttonsEl: HTMLElement | null = null;
   #confirmEl: HTMLButtonElement | null = null;
 
   constructor(
     app: App,
     options: ConfirmOptions,
-    onAnswer: (confirmed: boolean) => void
+    onAnswer: (confirmed: boolean) => void,
+    /** Told instead of `onAnswer` when the alternative is pressed. */
+    onAlternative?: () => void
   ) {
     super(app);
     this.#options = options;
     this.#onAnswer = onAnswer;
+    this.#onAlternative = onAlternative;
   }
 
   onOpen() {
-    const { title, paragraphs, confirmText, destructive } = this.#options;
+    const { title, paragraphs, confirmText, destructive, alternative } =
+      this.#options;
     this.containerEl.classList.add('mod-confirmation');
     this.setTitle(title);
-    for (const text of paragraphs) {
-      createEl('p', { cls: 'u-break-word', text, parent: this.contentEl });
+    for (const paragraph of paragraphs) {
+      if (typeof paragraph === 'string') {
+        createEl('p', {
+          cls: 'u-break-word',
+          text: paragraph,
+          parent: this.contentEl,
+        });
+        continue;
+      }
+      const list = createEl('ul', { parent: this.contentEl });
+      for (const text of paragraph) createEl('li', { text, parent: list });
     }
 
     const buttons = createDiv({
@@ -64,9 +124,23 @@ export class ConfirmModal extends Modal {
     new ButtonComponent(buttons)
       .setButtonText('Cancel')
       .setClass('mod-cancel')
+      .setClass(BUTTON_CLASS)
       .onClick(() => this.close());
+    if (alternative) {
+      const other = new ButtonComponent(buttons)
+        .setButtonText(alternative.text)
+        .setClass(BUTTON_CLASS)
+        .onClick(() => {
+          // Answered here, so closing answers nothing more
+          this.#onAnswer = null;
+          this.#onAlternative?.();
+          this.close();
+        });
+      if (alternative.destructive) other.setDestructive();
+    }
     const confirm = new ButtonComponent(buttons)
       .setButtonText(confirmText)
+      .setClass(BUTTON_CLASS)
       .onClick(() => {
         this.#answer(true);
         this.close();

@@ -29,6 +29,7 @@ import {
   sniffMimeType,
   supportsFrontmatter,
 } from '#/lib/mime';
+import type { ItemTable } from '#/lib/moved-note-scan';
 import { noteFingerprint } from '#/lib/note-fingerprint';
 import type { NoticeAction } from '#/lib/notices';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
@@ -749,12 +750,12 @@ export class ArticleManager extends ItemManager {
 
   /**
    * Adopt the snippets and cards taken from `file` before it became the
-   * article `articleId` where it is (see `adoptOrphans`), then reload its
-   * highlights: they stay where they are, reached by parent id from here on.
-   * A card made from a note keeps its embed there, which is where its context
-   * is found (see `backlinkRange`).
+   * article `articleId` where it is (see `adoptOrphans`), or the snippet, then
+   * reload its highlights: they stay where they are, reached by parent id
+   * from here on. A card made from a note keeps its embed there, which is
+   * where its context is found (see `backlinkRange`).
    */
-  private async claimInPlace(file: TFile, articleId: string): Promise<void> {
+  async claimInPlace(file: TFile, articleId: string): Promise<void> {
     const reviewManager = this.plugin.reviewManager;
     if (!reviewManager) return;
     const { snippets, cards } = reviewManager;
@@ -1123,13 +1124,8 @@ export class ArticleManager extends ItemManager {
   }
 
   /**
-   * Make `file` the note of the snippet or card `holder`, whose path it is at:
-   * write the row's `ir-id` and type tag into it, as the item's creation
-   * does, taking off any other item type's tag, which would read the note as
-   * that type instead (see `typeOfTags`), and bring the row back if it is
-   * deleted. Nothing else changes: the row already holds the path, and every
-   * other tag and property stays. A row that can't be saved puts the note's
-   * id and tags back as they were. Asked for by the user, so first checks that
+   * Make `file` the note of the snippet or card `holder`, whose path it is at
+   * (see {@link reassociateNote}). Asked for by the user, so first checks that
    * saving is still allowed and that the row is still at the note's path.
    */
   private async reassociate(
@@ -1150,6 +1146,26 @@ export class ArticleManager extends ItemManager {
       });
       return;
     }
+    await this.reassociateNote(file, table, id);
+    report.confirm(`"${file.basename}" is the ${kind}'s note again`);
+  }
+
+  /**
+   * Make `file` the note of the `table` row `id`, which holds its path: write
+   * the row's `ir-id` and type tag into it, as the item's creation does,
+   * taking off any other item type's tag, which would read the note as that
+   * type instead (see `typeOfTags`), and bring the row back if it is deleted,
+   * recording the note's fingerprint. Nothing else changes: the row already
+   * holds the path, and every other tag and property stays. A row that can't
+   * be saved puts the note's id and tags back as they were. The caller checks
+   * first that saving is allowed and that the row is still at the path.
+   * @throws what the note's or the row's write threw, once undone
+   */
+  async reassociateNote(
+    file: TFile,
+    table: ItemTable,
+    id: string
+  ): Promise<void> {
     const tag = TAG_BY_TABLE[table];
     const otherTypeTags = Object.values(TAG_BY_TABLE).filter(
       (typeTag) => typeTag !== tag
@@ -1171,7 +1187,6 @@ export class ArticleManager extends ItemManager {
         [noteFingerprint(file), id, file.path]
       );
     });
-    report.confirm(`"${file.basename}" is the ${kind}'s note again`);
   }
 
   /**

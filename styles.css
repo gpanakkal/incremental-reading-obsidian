@@ -3998,6 +3998,15 @@ input.ir-queue-page-input {
 
 /* #endregion */
 
+/* #region Confirmation modal (ConfirmModal.ts) */
+
+/* Obsidian's buttons take `--cursor`, `default` unless the user changes it */
+.ir-confirm-button:not(:disabled) {
+  cursor: pointer;
+}
+
+/* #endregion */
+
 /* #region Leftover notes modal (LeftoverModal.ts) */
 
 /* Obsidian's buttons and dropdowns take `--cursor`, `default` unless the user

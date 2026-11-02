@@ -6,8 +6,10 @@ import {
   type LeftoverAction,
   type LeftoverFailure,
 } from '#/lib/crash-leftovers';
+import { getDeviceId } from '#/lib/device-id';
 import * as Notices from '#/lib/notices';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
+import * as ReassociatePrompt from '#/lib/reassociate-prompt';
 import type { NoteType } from '#/lib/types';
 import { Notice } from '#/test/__mocks__/obsidian';
 import { makeItemVault, TestRepository } from '#/test/item-vault';
@@ -410,10 +412,14 @@ async function wireWatch(
     });
   const error = vi.spyOn(console, 'error').mockReturnValue(undefined);
   const adoptLeftover = vi.fn(async () => undefined);
+  const reassociateNote = vi.fn(async () => undefined);
+  const claimInPlace = vi.fn(async () => undefined);
+  const deleteRow = vi.fn(async () => undefined);
   const managers = vi.fn(() => ({
-    articles: { adoptLeftover },
+    articles: { adoptLeftover, reassociateNote, claimInPlace },
     snippets: { adoptLeftover },
     cards: { adoptLeftover },
+    deleteRow,
   }));
   const onResolved = vi.fn();
   let reviewOpen = false;
@@ -434,6 +440,9 @@ async function wireWatch(
     managers,
     onResolved,
     adoptLeftover,
+    reassociateNote,
+    claimInPlace,
+    deleteRow,
     /** Open a review tab, as its view's `onOpen` tells the watch. */
     openReview: () => {
       reviewOpen = true;
@@ -1004,7 +1013,17 @@ describe('LeftoverModal', () => {
       const id = '1a2b3c4d-5e6f-4a1b-8c2d-3e4f5a6b7c8d';
       const failure: LeftoverFailure = {
         reason: 'held',
-        holder: { kind, id, deleted },
+        holder: {
+          kind,
+          id,
+          deleted,
+          dismissed: false,
+          due: 0,
+          lastReview: null,
+          updatedAt: 0,
+          updatedBy: '',
+          parent: null,
+        },
       };
       const { rowOf, confirmButton } = openModal(
         [IN_PLACE],
@@ -1754,27 +1773,141 @@ describe('LeftoverWatch', () => {
     expect(wired.watch.current.map(({ id }) => id)).toEqual(['x']);
   });
 
-  it("explains in a failed line's tooltip which row holds its note's path, writing nothing", async () => {
+  it("leaves a line as it was before Confirm, with nothing written and nothing said, when the user backs out of what to do about the row holding its note's path", async () => {
     const wired = await wireWatch({
       'notes/a.md': { 'ir-id': 'x', tags: [ARTICLE_TAG] },
     });
     wired.repo.mutate(
       `INSERT INTO article (id, reference, due, interval, priority, deleted) VALUES ('held-1234-abcd', 'notes/a.md', 0, 1, 30, 1)`
     );
-    vi.spyOn(console, 'warn').mockReturnValue(undefined);
-    vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
+    const notify = vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
+    // Asked what to do about the row, the user chose neither
+    const ask = vi
+      .spyOn(ReassociatePrompt, 'askToResolveHeld')
+      .mockResolvedValue(null);
     await wired.watch.manage();
     const modal = showModal(wired.opened[0]);
 
     choose(modal.contentEl, { action: 'adopt', as: 'article' });
     confirmOf(modal).click();
 
-    const label = await vi.waitFor(
-      () => errorOf(modal.contentEl)!.getAttribute('aria-label')!
-    );
-    expect(label).toContain('held-123');
-    expect(label).toMatch(/deleted/);
+    await vi.waitFor(() => expect(confirmOf(modal).disabled).toBe(false));
+    expect(ask).toHaveBeenCalledOnce();
+    expect(errorOf(modal.contentEl)).toBeNull();
+    expect(modal.contentEl.querySelectorAll('.setting-item')).toHaveLength(1);
+    expect(notify).not.toHaveBeenCalled();
     expect(wired.adoptLeftover).not.toHaveBeenCalled();
     expect(wired.onResolved).not.toHaveBeenCalled();
+    expect(wired.watch.current.map(({ id }) => id)).toEqual(['x']);
   });
+
+  it.each(['reassociate', 'erase'] as const)(
+    "asks what to do about the row holding a leftover's path, telling it this device's id, and does what is chosen (%s)",
+    async (choice) => {
+      const wired = await wireWatch({
+        'notes/a.md': { 'ir-id': 'x', tags: [ARTICLE_TAG] },
+      });
+      wired.repo.mutate(
+        `INSERT INTO snippet (id, reference, due, interval, priority, deleted) VALUES ('held-1234-abcd', 'notes/a.md', 0, 1, 30, 1)`
+      );
+      vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
+      const ask = vi
+        .spyOn(ReassociatePrompt, 'askToResolveHeld')
+        .mockResolvedValue(choice);
+      // Erased, the row lets go of the path, as a real erase does
+      wired.deleteRow.mockImplementation(async () => {
+        wired.repo.mutate(
+          `UPDATE snippet SET reference = 'gone', deleted = 1 WHERE id = 'held-1234-abcd'`
+        );
+      });
+      await wired.watch.manage();
+      const modal = showModal(wired.opened[0]);
+      const file = wired.vault.files.get('notes/a.md')!;
+
+      choose(modal.contentEl, { action: 'adopt', as: 'article' });
+      confirmOf(modal).click();
+
+      await vi.waitFor(() => expect(wired.onResolved).toHaveBeenCalledOnce());
+      expect(ask).toHaveBeenCalledExactlyOnceWith(
+        wired.vault.app,
+        file,
+        expect.objectContaining({
+          kind: 'snippet',
+          id: 'held-1234-abcd',
+          deleted: true,
+        }),
+        getDeviceId(wired.vault.app as never)
+      );
+      if (choice === 'reassociate') {
+        expect(wired.reassociateNote).toHaveBeenCalledExactlyOnceWith(
+          file,
+          'snippet',
+          'held-1234-abcd'
+        );
+        expect(wired.deleteRow).not.toHaveBeenCalled();
+        expect(wired.adoptLeftover).not.toHaveBeenCalled();
+      } else {
+        expect(wired.deleteRow).toHaveBeenCalledExactlyOnceWith(
+          'snippet',
+          'held-1234-abcd'
+        );
+        // On the manager, as a ReviewManager method reads its own fields
+        expect(wired.deleteRow.mock.contexts[0]).toBe(
+          wired.managers.mock.results.at(-1)!.value
+        );
+        // As a new item, under a fresh id rather than the note's own
+        expect(wired.adoptLeftover).toHaveBeenCalledOnce();
+        const [[adopted, id]] = wired.adoptLeftover.mock.calls as unknown as [
+          [unknown, string],
+        ];
+        expect(adopted).toBe(file);
+        expect(id).not.toBe('x');
+        expect(wired.reassociateNote).not.toHaveBeenCalled();
+      }
+      expect(wired.watch.current).toEqual([]);
+      // Its line is taken away, as one done is
+      expect(modal.contentEl.querySelectorAll('.setting-item')).toHaveLength(0);
+    }
+  );
+
+  it.each([
+    { failing: 'the save after the erase', erased: true },
+    { failing: 'the erase', erased: false },
+  ])(
+    'has what shows items refreshed once a row is erased, though the note then fails to be saved, and only then ($failing fails)',
+    async ({ erased }) => {
+      const wired = await wireWatch({
+        'notes/a.md': { 'ir-id': 'x', tags: [ARTICLE_TAG] },
+      });
+      wired.repo.mutate(
+        `INSERT INTO snippet (id, reference, due, interval, priority, deleted) VALUES ('held-1234-abcd', 'notes/a.md', 0, 1, 30, 0)`
+      );
+      vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
+      vi.spyOn(ReassociatePrompt, 'askToResolveHeld').mockResolvedValue(
+        'erase'
+      );
+      wired.deleteRow.mockImplementation(async () => {
+        if (!erased) throw new Error('Database locked');
+        wired.repo.mutate(
+          `UPDATE snippet SET reference = 'gone', deleted = 1 WHERE id = 'held-1234-abcd'`
+        );
+      });
+      wired.adoptLeftover.mockRejectedValue(new Error('Disk full'));
+      await wired.watch.manage();
+      const modal = showModal(wired.opened[0]);
+
+      choose(modal.contentEl, { action: 'adopt', as: 'article' });
+      confirmOf(modal).click();
+
+      await vi.waitFor(() =>
+        expect(
+          modal.contentEl.querySelector('.ir-leftover-error')
+        ).not.toBeNull()
+      );
+      expect(wired.deleteRow).toHaveBeenCalledOnce();
+      expect(wired.onResolved).toHaveBeenCalledTimes(erased ? 1 : 0);
+      // Still a leftover, to be saved again
+      expect(wired.watch.current).toHaveLength(1);
+    }
+  );
 });
