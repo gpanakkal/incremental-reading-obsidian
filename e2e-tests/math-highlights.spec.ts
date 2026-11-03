@@ -31,6 +31,13 @@ type PageApp = {
       openFile(file: unknown, state?: unknown): Promise<void>;
     };
     setActiveLeaf(leaf: unknown, params: { focus: boolean }): void;
+    getMostRecentLeaf(): {
+      view: {
+        containerEl: HTMLElement;
+        getViewData(): string;
+        currentMode: { applyScroll(line: number): void };
+      };
+    } | null;
     getActiveFile(): { path: string } | null;
     activeEditor: {
       editor?: {
@@ -117,6 +124,28 @@ async function extract(page: Page, text: string, count: number) {
 }
 
 /**
+ * Scroll the reading view in the active tab to the line holding `text`, until
+ * its math is drawn. Reading view draws only the sections near the screen, so
+ * math further down the note has no rendering at all until it is scrolled to;
+ * and a scroll made while the view is still opening is undone by its own.
+ */
+const scrollReadingTo = (page: Page, text: string) =>
+  expect
+    .poll(() =>
+      page.evaluate((text) => {
+        const { app } = window as unknown as { app: PageApp };
+        const { view } = app.workspace.getMostRecentLeaf()!;
+        const data = view.getViewData();
+        const line = data.slice(0, data.indexOf(text)).split('\n').length - 1;
+        view.currentMode.applyScroll(line);
+        return view.containerEl.querySelectorAll(
+          '.markdown-preview-view .math-block'
+        ).length;
+      }, text)
+    )
+    .toBeGreaterThan(0);
+
+/**
  * Put the cursor on the line after the math, out of it, and the math on
  * screen: live preview draws only the lines in view.
  */
@@ -165,6 +194,9 @@ test.beforeEach(async () => {
   vaultPath = await createVaultCopy('math-hl');
   app = await launchElectron(vaultPath);
   window = await openVault(app, vaultPath);
+  // CI's window is this small and local ones are far larger: pinned, the math
+  // starts off screen everywhere, so every run scrolls to it the same way.
+  await window.setViewportSize({ width: 1024, height: 768 });
 });
 
 test.afterEach(async () => {
@@ -230,6 +262,7 @@ test('shows a snippet cut from one line of a math block on that line of the rend
 
   // Reading view: the same part marked, opening the snippet on a click
   await openNote(window, 'preview');
+  await scrollReadingTo(window, LINE);
   const reading = readingMath(window);
   await expect(
     reading.locator('mjx-container .ir-snippet-highlight')
@@ -259,6 +292,7 @@ test('shows a snippet over a whole math block on the whole rendered math', async
   ).toHaveCount(0);
 
   await openNote(window, 'preview');
+  await scrollReadingTo(window, LINE);
   await expect(
     readingMath(window).locator('mjx-container.ir-snippet-highlight')
   ).toHaveCount(1);
