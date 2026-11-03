@@ -4118,13 +4118,27 @@ describe('ReviewManager.handleCreation copy detection', () => {
     };
   }
 
+  /**
+   * Answer the queries of `repo` as a database whose row `article-1` is
+   * deleted at `at` would: only one asking for that row there finds it.
+   */
+  function deletedAt(repo: ReturnType<typeof makeRepo>, at: string) {
+    (repo.query as ReturnType<typeof vi.fn>).mockImplementation(((
+      _sql: string,
+      params: unknown[] = []
+    ) =>
+      Promise.resolve(
+        params[0] === 'article-1' && params[1] === at
+          ? [{ id: 'article-1' }]
+          : []
+      )) as never);
+  }
+
   it('does not repoint the row when the original note still exists (copy)', async () => {
     const repo = makeRepo();
     const originalPath = `${IR_DIR}/articles/original.md`;
     const copyPath = `${IR_DIR}/articles/original 1.md`;
-    (repo.query as ReturnType<typeof vi.fn>).mockResolvedValue([
-      { reference: originalPath },
-    ]);
+    deletedAt(repo, originalPath);
     const appObj = makeCreationApp('article-1', [
       { path: originalPath, irId: 'article-1' },
       { path: copyPath, irId: 'article-1' },
@@ -4138,15 +4152,12 @@ describe('ReviewManager.handleCreation copy detection', () => {
     expect(repo.mutate).not.toHaveBeenCalled();
   });
 
-  it('repoints the row when the note at the reference has a different ir-id', async () => {
-    // The stored reference points at a note that is no longer this item's
-    // original (its ir-id differs), so the creation is treated as a restore.
+  // 0231: a note at another path is a leftover, re-associated by the user
+  it('does not repoint the row when the note at the reference has a different ir-id', async () => {
     const repo = makeRepo();
     const originalPath = `${IR_DIR}/articles/original.md`;
     const createdPath = `${IR_DIR}/articles/original 1.md`;
-    (repo.query as ReturnType<typeof vi.fn>).mockResolvedValue([
-      { reference: originalPath },
-    ]);
+    deletedAt(repo, originalPath);
     const appObj = makeCreationApp('article-1', [
       { path: originalPath, irId: 'some-other-id' },
       { path: createdPath, irId: 'article-1' },
@@ -4157,19 +4168,14 @@ describe('ReviewManager.handleCreation copy detection', () => {
     await manager.handleCreation({ path: createdPath } as TAbstractFile);
 
     // eslint-disable-next-line @typescript-eslint/unbound-method -- vi.fn mock, no `this` to lose
-    expect(repo.mutate).toHaveBeenCalled();
-    const [, params] = (repo.mutate as ReturnType<typeof vi.fn>).mock
-      .calls[0] as [string, unknown[]];
-    expect(params).toEqual([createdPath, 'article-1']);
+    expect(repo.mutate).not.toHaveBeenCalled();
   });
 
-  it('repoints and un-deletes the row when the original note is gone (restore)', async () => {
+  it('neither repoints nor un-deletes the row when the original note is gone and the note turns up elsewhere', async () => {
     const repo = makeRepo();
     const originalPath = `${IR_DIR}/articles/original.md`;
     const restoredPath = `${IR_DIR}/restored/original.md`;
-    (repo.query as ReturnType<typeof vi.fn>).mockResolvedValue([
-      { reference: originalPath },
-    ]);
+    deletedAt(repo, originalPath);
     const appObj = makeCreationApp('article-1', [
       { path: restoredPath, irId: 'article-1' },
     ]);
@@ -4179,19 +4185,13 @@ describe('ReviewManager.handleCreation copy detection', () => {
     await manager.handleCreation({ path: restoredPath } as TAbstractFile);
 
     // eslint-disable-next-line @typescript-eslint/unbound-method -- vi.fn mock, no `this` to lose
-    expect(repo.mutate).toHaveBeenCalled();
-    const [sql, params] = (repo.mutate as ReturnType<typeof vi.fn>).mock
-      .calls[0] as [string, unknown[]];
-    expect(sql).toContain('deleted = FALSE');
-    expect(params).toEqual([restoredPath, 'article-1']);
+    expect(repo.mutate).not.toHaveBeenCalled();
   });
 
   it('un-deletes the row when the note is restored at its original path', async () => {
     const repo = makeRepo();
     const originalPath = `${IR_DIR}/articles/original.md`;
-    (repo.query as ReturnType<typeof vi.fn>).mockResolvedValue([
-      { reference: originalPath },
-    ]);
+    deletedAt(repo, originalPath);
     const appObj = makeCreationApp('article-1', [
       { path: originalPath, irId: 'article-1' },
     ]);
@@ -4201,10 +4201,11 @@ describe('ReviewManager.handleCreation copy detection', () => {
     await manager.handleCreation({ path: originalPath } as TAbstractFile);
 
     // eslint-disable-next-line @typescript-eslint/unbound-method -- vi.fn mock, no `this` to lose
-    expect(repo.mutate).toHaveBeenCalled();
-    const [, params] = (repo.mutate as ReturnType<typeof vi.fn>).mock
+    expect(repo.mutate).toHaveBeenCalledOnce();
+    const [sql, params] = (repo.mutate as ReturnType<typeof vi.fn>).mock
       .calls[0] as [string, unknown[]];
-    expect(params).toEqual([originalPath, 'article-1']);
+    expect(sql).toContain('deleted = FALSE');
+    expect(params).toEqual(['article-1', originalPath]);
   });
 });
 
@@ -5419,27 +5420,45 @@ describe('ReviewManager reads the frontmatter of a renamed or created note witho
     );
   });
 
-  it('restores the row of a note created with its ir-id, never writing the note', async () => {
+  // 0231: a note moved outside Obsidian while it runs arrives as a delete and
+  // a create; its row is re-associated from the leftover modal only, tagged
+  // or not, never paired with the create on its own
+  it('restores only the row deleted at the path of a note created there with its ir-id, tagged or not, leaving a row elsewhere as it is, never writing the note', async () => {
     await fc.assert(
-      fc.asyncProperty(tableArb, fc.boolean(), async (table, lone) => {
-        const tag = TABLE_TAG[table];
-        const wired = wireRenames({});
-        wired.insert(table, 'row', 'IR/gone.md');
-        wired.repo.mutate(`UPDATE ${table} SET deleted = TRUE WHERE id = $1`, [
-          'row',
-        ]);
+      fc.asyncProperty(
+        tableArb,
+        fc.constantFrom('lone', 'list', 'none'),
+        fc.boolean(),
+        fc.boolean(),
+        async (table, tagged, samePath, deleted) => {
+          const tag = TABLE_TAG[table];
+          const wired = wireRenames({});
+          wired.insert(table, 'row', 'IR/gone.md');
+          if (deleted) {
+            wired.repo.mutate(
+              `UPDATE ${table} SET deleted = TRUE WHERE id = $1`,
+              ['row']
+            );
+          }
 
-        const file = wired.add('IR/back.md', {
-          'ir-id': 'row',
-          tags: lone ? tag : [tag],
-        });
-        await wired.manager.handleCreation(file);
+          const file = wired.add(samePath ? 'IR/gone.md' : 'IR/back.md', {
+            'ir-id': 'row',
+            ...(tagged === 'none'
+              ? {}
+              : { tags: tagged === 'lone' ? tag : [tag] }),
+          });
+          await wired.manager.handleCreation(file);
 
-        expect(wired.repo.rows(table)).toStrictEqual([
-          { id: 'row', reference: 'IR/back.md', deleted: false },
-        ]);
-        expect(wired.processFrontMatter).not.toHaveBeenCalled();
-      })
+          expect(wired.repo.rows(table)).toStrictEqual([
+            {
+              id: 'row',
+              reference: 'IR/gone.md',
+              deleted: deleted && !samePath,
+            },
+          ]);
+          expect(wired.processFrontMatter).not.toHaveBeenCalled();
+        }
+      )
     );
   });
 
@@ -5794,8 +5813,9 @@ describe('ReviewManager.handleCreation reports an item arriving where its path b
     SQL = await initSqlJs({ wasmBinary: wasmBinary as unknown as ArrayBuffer });
   });
 
+  // A note arriving at another path takes no row (0231): nothing came to it
   it.each([
-    ['moved to a path that breaks links', 'a.md', false, 'x|y/a.md', true],
+    ['moved to a path that breaks links', 'a.md', false, 'x|y/a.md', false],
     ['moved to a plain path', 'a.md', false, 'xy/a.md', false],
     ['brought back where it breaks links', 'x|y/a.md', true, 'x|y/a.md', true],
     ['made again where it already was', 'x|y/a.md', false, 'x|y/a.md', false],
@@ -5811,7 +5831,7 @@ describe('ReviewManager.handleCreation reports an item arriving where its path b
     );
 
     expect(wired.repo.rows('article')).toStrictEqual([
-      { id: 'x', reference: arrives, deleted: false },
+      { id: 'x', reference, deleted: false },
     ]);
     expect(refused).toBe(reported ? arrives : null);
   });

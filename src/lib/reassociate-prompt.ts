@@ -1,7 +1,11 @@
 import { formatQueueDate } from '#/components/review-queue/columns';
 import { promptForChoice, promptForConfirmation } from '#/views/ConfirmModal';
 import type { App, TFile } from 'obsidian';
-import type { HeldChoice, PathHolder as RowAtPath } from './crash-leftovers';
+import type {
+  HeldChoice,
+  Plan,
+  PathHolder as RowAtPath,
+} from './crash-leftovers';
 
 /**
  * A snippet or card row whose path a note is at, though the note doesn't
@@ -124,4 +128,70 @@ export async function askToResolveHeld(
     destructive: true,
   });
   return sure ? 'erase' : null;
+}
+
+/** `kind` with its article: "an article", "a snippet". */
+const withArticle = (kind: string) =>
+  `${kind === 'article' ? 'an' : 'a'} ${kind}`;
+
+/**
+ * Ask whether to make `file`, a leftover note (see `crash-leftovers`), the
+ * note of what `plan` offers, its target: the row holding the note's id,
+ * deleted or with its note missing, coming to the note's path from where its
+ * note was; or the row at its path while one holds its id. Shown are the
+ * row's details, the deleted row at the path that gives it up, if any, and
+ * each row holding the note's id that isn't offered, with why. A plan that
+ * offers erasing (only the row at the path, while no row holds the note's
+ * id) is asked about as {@link askToResolveHeld} asks.
+ * @param thisDevice this device's id (see `getDeviceId`), to say whether the
+ *   row was last changed here
+ * @returns `reassociate` if the user confirmed; else, or with no target,
+ *   `null`
+ */
+export async function askToResolve(
+  app: App,
+  file: TFile,
+  plan: Plan,
+  thisDevice: string
+): Promise<HeldChoice> {
+  const { target, evicts, refused } = plan;
+  if (!target) return null;
+  if (plan.erase) return askToResolveHeld(app, file, target.row, thisDevice);
+  const { kind, deleted } = target.row;
+  const state = deleted
+    ? `a deleted ${kind}`
+    : `${withArticle(kind)} whose note is missing`;
+  let opening = `This note's path, "${file.path}", belongs to ${state}, but the note holds another ID.`;
+  if (target.by === 'id') {
+    const { reference } = target.row;
+    opening =
+      reference === file.path
+        ? `This note holds the ID of ${state} recorded at this note's path.`
+        : `This note holds the ID of ${state}, last recorded at "${reference}".`;
+  }
+  const paragraphs: (string | string[])[] = [
+    opening,
+    detailsOf(target.row, thisDevice),
+  ];
+  if (evicts) {
+    paragraphs.push(
+      `The deleted ${evicts.kind} recorded at this note's path (ID ${shortId(evicts.id)}) gives that path up.`
+    );
+  }
+  for (const { row, why } of refused) {
+    paragraphs.push(
+      why === 'copy'
+        ? `The ${row.kind} holding this note's ID (${shortId(row.id)}) isn't offered: the note at "${row.reference}" still holds that ID, so this note is a copy.`
+        : `The ${row.kind} holding this note's ID (${shortId(row.id)}), last recorded at "${row.reference}", isn't offered: the ${kind} holds this note's path.`
+    );
+  }
+  paragraphs.push(
+    `Re-associate makes this note the ${kind}'s note, keeping its schedule and review history${deleted ? ', and brings it back to review' : ''}.`
+  );
+  const confirmed = await promptForConfirmation(app, {
+    title: `Re-associate "${file.basename}" with ${kind}?`,
+    paragraphs,
+    confirmText: 'Re-associate',
+  });
+  return confirmed ? 'reassociate' : null;
 }

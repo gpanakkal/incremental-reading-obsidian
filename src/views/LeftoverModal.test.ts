@@ -110,7 +110,7 @@ function openModal(
   resolve: (
     leftover: Leftover,
     choice: LeftoverChoice
-  ) => Promise<boolean | LeftoverFailure>,
+  ) => Promise<boolean | LeftoverFailure | null>,
   read: (file: TFile) => Promise<string> = async () => ''
 ) {
   const cachedRead = vi.fn(read);
@@ -159,13 +159,13 @@ const stripOf = (row: Element) =>
     '.setting-item-control button.ir-leftover-strip'
   );
 
-/** The "Keep as" toggle on `row`, or `null`. */
+/** The "Save" toggle on `row`, or `null`. */
 const keepOf = (row: Element) =>
   row.querySelector<HTMLElement>(
     '.setting-item-control .ir-leftover-keep .checkbox-container'
   );
 
-/** The toggle over the lines that turns every "Keep as" toggle on or off. */
+/** The toggle over the lines that turns every "Save" toggle on or off. */
 const allBoxOf = (modal: LeftoverModal) =>
   modal.contentEl.querySelector<HTMLElement>(
     '.ir-leftover-all .checkbox-container'
@@ -185,7 +185,7 @@ function isOff(toggle: HTMLElement): boolean {
 }
 
 /**
- * What the user can do in the modal: click a line's "Keep as" box, pick a
+ * What the user can do in the modal: click a line's "Save" box, pick a
  * type, press its trash or strip button (again, taking it back), or click the
  * box over the lines. `at` is any index, wrapped to a line.
  */
@@ -728,7 +728,7 @@ describe('LeftoverModal', () => {
     }
   );
 
-  it('does what was chosen for each note on Confirm, one at a time, takes its line away, and closes once none are left', async () => {
+  it('does what was chosen for each note on Confirm, one at a time, takes its line away, and closes once every chosen one is done, whatever was left be', async () => {
     await fc.assert(
       fc.asyncProperty(
         leftoversArb,
@@ -768,14 +768,16 @@ describe('LeftoverModal', () => {
           expect(overlapped).toBe(false);
           expect(resolve.mock.calls).toEqual(expected);
           expect(rows()).toHaveLength(leftovers.length - expected.length);
-          expect(close).toHaveBeenCalledTimes(chosen.every(Boolean) ? 1 : 0);
+          // Closed once every chosen line is done, lines left be or not;
+          // nothing chosen leaves Confirm off
+          expect(close).toHaveBeenCalledTimes(expected.length > 0 ? 1 : 0);
         }
       ),
       { numRuns: 40 }
     );
   });
 
-  it('reflects the "Keep as" boxes in the box over the lines, and keeps each box off while its line shows no type, whatever the user does', () => {
+  it('reflects the "Save" boxes in the box over the lines, and keeps each box off while its line shows no type, whatever the user does', () => {
     fc.assert(
       fc.property(
         mixedLeftoversArb,
@@ -841,7 +843,7 @@ describe('LeftoverModal', () => {
     );
   });
 
-  it('leaves a recognized note be once its box is unchecked, saving the others, and reflects only the lines left', async () => {
+  it('leaves a recognized note be once its box is unchecked, saving the others and closing, the line left be as it was', async () => {
     const resolve = vi.fn(async () => true);
     const { modal, rows, rowOf, confirmButton, close } = openModal(
       [MADE, IN_PLACE],
@@ -864,7 +866,8 @@ describe('LeftoverModal', () => {
     expect(rows()[0].textContent).toContain(MADE.file.basename);
     expect(isOn(allBoxOf(modal))).toBe(false);
     expect(isOff(allBoxOf(modal))).toBe(false);
-    expect(close).not.toHaveBeenCalled();
+    // A line left be never holds the modal open
+    expect(close).toHaveBeenCalledOnce();
   });
 
   it.each(['line', 'all'] as const)(
@@ -1908,6 +1911,345 @@ describe('LeftoverWatch', () => {
       expect(wired.onResolved).toHaveBeenCalledTimes(erased ? 1 : 0);
       // Still a leftover, to be saved again
       expect(wired.watch.current).toHaveLength(1);
+    }
+  );
+});
+
+describe('LeftoverModal of notes a row holds the id of', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.restoreAllMocks();
+  });
+
+  /** A leftover in `notes` whose id the `kind` row at `reference` holds. */
+  const matchedArb = fc.record({
+    kind: fc.constantFrom<NoteType>('article', 'snippet', 'card'),
+    deleted: fc.boolean(),
+    reference: fc
+      .string({ minLength: 1 })
+      .filter((text) => text.trim() === text && text !== ''),
+    inPlace: fc.boolean(),
+  });
+
+  const leftoverOf = ({
+    kind,
+    deleted,
+    reference,
+    inPlace,
+  }: typeof matchedArb extends fc.Arbitrary<infer T>
+    ? T
+    : never): Leftover => ({
+    file: fileAt('notes', 'moved.md'),
+    id: 'x',
+    type: kind,
+    kind: inPlace ? 'in-place' : 'made',
+    match: {
+      kind,
+      id: 'x',
+      deleted,
+      dismissed: false,
+      due: null,
+      lastReview: null,
+      updatedAt: 0,
+      updatedBy: '',
+      parent: null,
+      reference,
+    },
+  });
+
+  it("says under a line which row holds its note's id, where it was, and starts it on that row's type, a card's among the types offered only then", () => {
+    fc.assert(
+      fc.property(matchedArb, (matched) => {
+        document.body.innerHTML = '';
+        const leftover = leftoverOf(matched);
+        const { rows } = openModal([leftover], async () => true);
+        const [row] = rows();
+
+        // Styled as the folder above the name is
+        const line = row.querySelector(
+          '.setting-item-description.ir-leftover-match'
+        );
+        expect(line?.textContent).toContain(matched.reference);
+        expect(line?.textContent).toContain(matched.kind);
+        const select = dropdownOf(row)!;
+        expect(select.value).toBe(matched.kind);
+        expect(isOn(keepOf(row)!)).toBe(true);
+        expect([...select.options].map(({ value }) => value)).toEqual(
+          matched.kind === 'card'
+            ? ['', 'article', 'snippet', 'card']
+            : ['', 'article', 'snippet']
+        );
+      })
+    );
+  });
+
+  it('tells a deleted row from one whose note is missing', () => {
+    const texts = [true, false].map((deleted) => {
+      document.body.innerHTML = '';
+      const leftover = leftoverOf({
+        kind: 'snippet',
+        deleted,
+        reference: 'notes/old.md',
+        inPlace: true,
+      });
+      const { rows } = openModal([leftover], async () => true);
+      return rows()[0].querySelector('.ir-leftover-match')?.textContent;
+    });
+
+    expect(texts[0]).not.toBe(texts[1]);
+  });
+
+  it("keeps a matched line on its row's type, its dropdown locked and its toggle its own, through a save that fails, and saves it as that type", async () => {
+    await fc.assert(
+      fc.asyncProperty(matchedArb, async (matched) => {
+        document.body.innerHTML = '';
+        const resolve = vi.fn(async () => false);
+        const leftover = leftoverOf(matched);
+        const { rows, confirmButton } = openModal([leftover], resolve);
+        const expectLocked = () => {
+          const select = dropdownOf(rows()[0])!;
+          expect(select.disabled).toBe(true);
+          expect(select.value).toBe(matched.kind);
+        };
+
+        expectLocked();
+        const keep = keepOf(rows()[0])!;
+        expect(isOn(keep)).toBe(true);
+        expect(isOff(keep)).toBe(false);
+        confirmButton().click();
+        await vi.waitFor(() =>
+          expect(resolve).toHaveBeenCalledExactlyOnceWith(leftover, {
+            action: 'adopt',
+            as: matched.kind,
+          })
+        );
+        await settle();
+
+        // The controls come back once the save fails, the dropdown still not
+        expectLocked();
+        expect(isOff(keepOf(rows()[0])!)).toBe(false);
+        keepOf(rows()[0])!.click();
+        expect(isOn(keepOf(rows()[0])!)).toBe(false);
+        expectLocked();
+      }),
+      { numRuns: 30 }
+    );
+  });
+});
+
+describe('LeftoverWatch of a note moved away from its row', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("asks what the note may be re-associated with, telling it this device's id, and re-associates it from where its row was", async () => {
+    const wired = await wireWatch({ 'notes/a.md': { 'ir-id': 'x' } });
+    wired.repo.mutate(
+      `INSERT INTO snippet (id, reference, due, interval, priority, deleted) VALUES ('x', 'notes/old.md', 0, 1, 30, 1)`
+    );
+    vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
+    const ask = vi
+      .spyOn(ReassociatePrompt, 'askToResolve')
+      .mockResolvedValue('reassociate');
+    const held = vi.spyOn(ReassociatePrompt, 'askToResolveHeld');
+    await wired.watch.manage();
+    const modal = showModal(wired.opened[0]);
+    const file = wired.vault.files.get('notes/a.md')!;
+
+    // Started on the row's type, its box on
+    confirmOf(modal).click();
+
+    await vi.waitFor(() => expect(wired.onResolved).toHaveBeenCalledOnce());
+    expect(ask).toHaveBeenCalledExactlyOnceWith(
+      wired.vault.app,
+      file,
+      expect.objectContaining({
+        target: {
+          by: 'id',
+          row: expect.objectContaining({
+            kind: 'snippet',
+            id: 'x',
+            reference: 'notes/old.md',
+          }) as unknown,
+        },
+      }),
+      getDeviceId(wired.vault.app as never)
+    );
+    expect(held).not.toHaveBeenCalled();
+    expect(wired.reassociateNote).toHaveBeenCalledExactlyOnceWith(
+      file,
+      'snippet',
+      'x',
+      'notes/old.md'
+    );
+    expect(wired.watch.current).toEqual([]);
+  });
+});
+
+describe('LeftoverModal of a typeless note at the path of a row holding another id', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * A typeless leftover at the path of the `kind` row, deleted or not, typed
+   * as that row unless a card, as `findLeftovers` types it.
+   */
+  const heldArb = fc.record({
+    kind: fc.constantFrom<NoteType>('article', 'snippet', 'card'),
+    deleted: fc.boolean(),
+    inPlace: fc.boolean(),
+  });
+
+  const leftoverAt = ({
+    kind,
+    deleted,
+    inPlace,
+  }: typeof heldArb extends fc.Arbitrary<infer T> ? T : never): Leftover => ({
+    file: fileAt('notes', 'taken.md'),
+    id: 'fake',
+    type: kind === 'card' ? null : kind,
+    kind: inPlace ? 'in-place' : 'made',
+    holder: {
+      kind,
+      id: 'held-1234',
+      deleted,
+      dismissed: false,
+      due: null,
+      lastReview: null,
+      updatedAt: 0,
+      updatedBy: '',
+      parent: null,
+    },
+  });
+
+  it("starts the line on that row's type, never offering a card, and lets the user pick another", () => {
+    fc.assert(
+      fc.property(heldArb, (held) => {
+        document.body.innerHTML = '';
+        const { rows } = openModal([leftoverAt(held)], async () => true);
+        const [row] = rows();
+
+        const select = dropdownOf(row)!;
+        const card = held.kind === 'card';
+        expect(select.value).toBe(card ? '' : held.kind);
+        expect(select.disabled).toBe(false);
+        expect(isOn(keepOf(row)!)).toBe(!card);
+        // A new card from a note of no type is none the user can mean: a
+        // card's row is the note's only through Re-associate, whatever it
+        // is saved as
+        expect([...select.options].map(({ value }) => value)).toEqual([
+          '',
+          'article',
+          'snippet',
+        ]);
+        // Matched with no row by its id, so no line says it was one
+        expect(row.querySelector('.ir-leftover-match')).toBeNull();
+      })
+    );
+  });
+
+  it('saves it as the type picked on Confirm', async () => {
+    const resolve = vi.fn(async () => true);
+    const leftover = leftoverAt({ kind: 'card', deleted: true, inPlace: true });
+    const { rows, confirmButton } = openModal([leftover], resolve);
+
+    choose(rows()[0], { action: 'adopt', as: 'article' });
+    confirmButton().click();
+
+    await vi.waitFor(() =>
+      expect(resolve).toHaveBeenCalledExactlyOnceWith(leftover, {
+        action: 'adopt',
+        as: 'article',
+      })
+    );
+  });
+});
+
+describe('LeftoverModal Confirm with lines left be', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.restoreAllMocks();
+  });
+
+  it('does every chosen line and closes, the lines left be untouched', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        leftoversArb,
+        fc.array(fc.boolean(), { minLength: 4, maxLength: 4 }),
+        async (leftovers, skips) => {
+          document.body.innerHTML = '';
+          const resolve = vi.fn(
+            async (_leftover: Leftover, _choice: LeftoverChoice) => true
+          );
+          const { rows, rowOf, close, confirmButton } = openModal(
+            leftovers,
+            resolve
+          );
+          // Lines left be by flipping their "Save" toggle off
+          for (const [i, leftover] of leftovers.entries()) {
+            const toggle = keepOf(rowOf(leftover));
+            if (skips[i] && toggle && isOn(toggle)) toggle.click();
+          }
+          const kept = leftovers.filter((leftover) => {
+            const toggle = keepOf(rowOf(leftover));
+            return toggle !== null && isOn(toggle);
+          });
+          fc.pre(kept.length > 0);
+          const leftBe = leftovers.filter((l) => !kept.includes(l));
+
+          confirmButton().click();
+          for (let i = 0; i <= kept.length; i++) await settle();
+
+          expect(resolve.mock.calls.map(([leftover]) => leftover)).toEqual(
+            kept
+          );
+          expect(close).toHaveBeenCalledOnce();
+          expect(rows()).toHaveLength(leftBe.length);
+          for (const row of rows()) {
+            expect(row.querySelector('.ir-leftover-error')).toBeNull();
+          }
+        }
+      ),
+      { numRuns: 60 }
+    );
+  });
+
+  it('is off while every line is left be', () => {
+    const { rowOf, confirmButton } = openModal(
+      [MADE, IN_PLACE],
+      async () => true
+    );
+    keepOf(rowOf(MADE))!.click();
+    keepOf(rowOf(IN_PLACE))!.click();
+
+    expect(confirmButton().disabled).toBe(true);
+  });
+
+  it.each([
+    ['failed', false],
+    ['backed out of', null],
+  ] as const)(
+    'stays open, Confirm on, once a chosen line %s while another was left be',
+    async (_, outcome) => {
+      const resolve = vi.fn(async () => outcome);
+      const { rows, close, confirmButton } = openModal(
+        [MADE, IN_PLACE],
+        resolve
+      );
+      keepOf(rows()[1])!.click();
+
+      confirmButton().click();
+      await vi.waitFor(() => expect(resolve).toHaveBeenCalledOnce());
+      await settle();
+
+      expect(close).not.toHaveBeenCalled();
+      expect(rows()).toHaveLength(2);
+      expect(rows()[0].querySelector('.ir-leftover-error') !== null).toBe(
+        outcome === false
+      );
+      expect(confirmButton().disabled).toBe(false);
     }
   );
 });

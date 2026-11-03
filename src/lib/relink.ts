@@ -235,7 +235,7 @@ export function vaultReader(app: App): RelinkVault<TFile> {
  * throw away highlight moves other notes have not saved yet. A failure here
  * leaves the relink standing, and the parent catches up when next opened.
  */
-async function reloadParentHighlights(
+export async function reloadParentHighlights(
   plugin: IncrementalReadingPlugin,
   snippetId: string
 ) {

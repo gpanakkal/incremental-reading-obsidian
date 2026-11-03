@@ -316,6 +316,12 @@ export default class IncrementalReadingPlugin extends Plugin {
    * Unset until the database it reads is up.
    */
   leftovers?: LeftoverWatch;
+  /**
+   * Gathers item files arriving at paths that break links into one notice
+   * (see `createArrivalWarning`): those the vault brings, and notes the user
+   * re-associates with a row from elsewhere. Unset until the layout is ready.
+   */
+  refusedArrivals?: { add(path: string): void };
 
   MarkdownEditor!: typeof ExtractedMarkdownEditor;
 
@@ -910,6 +916,7 @@ export default class IncrementalReadingPlugin extends Plugin {
       timer,
     });
     this.register(() => arrivals.dispose());
+    this.refusedArrivals = arrivals;
     this.registerEvent(
       this.app.vault.on('create', (file) => {
         if (!this.reviewManager) return;

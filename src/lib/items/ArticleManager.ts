@@ -29,7 +29,11 @@ import {
   sniffMimeType,
   supportsFrontmatter,
 } from '#/lib/mime';
-import type { ItemTable } from '#/lib/moved-note-scan';
+import {
+  evictedSpot,
+  ITEM_TABLES,
+  type ItemTable,
+} from '#/lib/moved-note-scan';
 import { noteFingerprint } from '#/lib/note-fingerprint';
 import type { NoticeAction } from '#/lib/notices';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
@@ -47,6 +51,7 @@ import {
   type FrontmatterLinkEdit,
   type ResolvedLink,
 } from '#/lib/rebase-links';
+import { reloadParentHighlights } from '#/lib/relink';
 import { BulkMutateError } from '#/lib/repository/BulkMutateError';
 import { stripFrontmatterTags } from '#/lib/tags';
 import type {
@@ -1159,12 +1164,20 @@ export class ArticleManager extends ItemManager {
    * holds the path, and every other tag and property stays. A row that can't
    * be saved puts the note's id and tags back as they were. The caller checks
    * first that saving is allowed and that the row is still at the path.
+   *
+   * With `from`, the row is at `from` instead, where its note was before it
+   * came to `file`'s path unseen (a move outside Obsidian, which reaches it
+   * as a delete and a create), and comes to the note's path, as a rename
+   * would bring it (see {@link moveRowTo}); the snippets and cards taken from
+   * it are then pointed at the note, as after a rename (see
+   * {@link followMovedRow}).
    * @throws what the note's or the row's write threw, once undone
    */
   async reassociateNote(
     file: TFile,
     table: ItemTable,
-    id: string
+    id: string,
+    from = file.path
   ): Promise<void> {
     const tag = TAG_BY_TABLE[table];
     const otherTypeTags = Object.values(TAG_BY_TABLE).filter(
@@ -1182,11 +1195,94 @@ export class ArticleManager extends ItemManager {
         (undo) => undo()
       );
       // Built once the note is written, so the fingerprint is the one it left
+      if (from !== file.path) {
+        await this.moveRowTo(file, table, id, from);
+        return;
+      }
       await this.repo.mutate(
         `UPDATE ${table} SET deleted = FALSE, note_mtime = $1 WHERE id = $2 AND reference = $3`,
         [noteFingerprint(file), id, file.path]
       );
     });
+    if (from === file.path) return;
+    // An item came to a path the user is told of, as one the vault brings
+    // there is (see `ReviewManager.handleCreation`)
+    if (refusedCharsIn(file.path).length > 0) {
+      this.plugin.refusedArrivals?.add(file.path);
+    }
+    await this.followMovedRow(table, id, from, file);
+  }
+
+  /**
+   * Bring the `table` row `id` from `from` to `file`, live, with the note's
+   * fingerprint, in one transaction that first checks it is still at `from`
+   * and that no live row of any table holds the note's path. A deleted row
+   * there has no note of its own there, and gives the path up as it does to
+   * a moved note at startup (see `evictedSpot`).
+   * @throws if the row left `from`, or a live row holds the path; nothing is
+   *   written then
+   */
+  private async moveRowTo(
+    file: TFile,
+    table: ItemTable,
+    id: string,
+    from: string
+  ): Promise<void> {
+    const options = { throwOnError: true };
+    await this.repo.transaction(async () => {
+      const [still] = await this.repo.query(
+        `SELECT 1 FROM ${table} WHERE id = $1 AND reference = $2`,
+        [id, from],
+        options
+      );
+      if (!still) throw new Error(`The item is no longer at "${from}"`);
+      for (const other of ITEM_TABLES) {
+        const holders = (await this.repo.query(
+          `SELECT id, deleted FROM ${other} WHERE reference = $1`,
+          [file.path],
+          options
+        )) as unknown as { id: string; deleted: unknown }[];
+        for (const holder of holders) {
+          if (!holder.deleted) {
+            throw new Error(`Another item's record points at "${file.path}"`);
+          }
+          await this.repo.mutate(
+            `UPDATE ${other} SET reference = $1 WHERE id = $2`,
+            [evictedSpot({ table: other, id: holder.id }), holder.id]
+          );
+        }
+      }
+      await this.repo.mutate(
+        `UPDATE ${table} SET reference = $1, deleted = FALSE, note_mtime = $2 WHERE id = $3`,
+        [file.path, noteFingerprint(file), id]
+      );
+    });
+  }
+
+  /**
+   * Follow the `table` row `id`, which came from `from` to `file`: its
+   * snippets' highlights move with it, and its snippets' and cards' `source`
+   * links are pointed at the note (see `retargetChildSources`); a snippet's
+   * own highlight in what it was taken from is loaded again, as the delete
+   * that left it deleted took it off. Each as `relinkItem` does it; the move
+   * stands if any fails, which is logged.
+   */
+  private async followMovedRow(
+    table: ItemTable,
+    id: string,
+    from: string,
+    file: TFile
+  ): Promise<void> {
+    const reviewManager = this.plugin.reviewManager;
+    if (!reviewManager) return;
+    reviewManager.snippets.offsetTracker.renameFile(from, file.path);
+    this.app.workspace.trigger('ir-highlights-changed', file.path);
+    if (table === 'snippet') await reloadParentHighlights(this.plugin, id);
+    try {
+      await this.retargetChildSources(id, from, file);
+    } catch (error) {
+      console.error(error);
+    }
   }
 
   /**

@@ -45,6 +45,7 @@ import type {
 import { getEndOfDay } from '#/lib/utils';
 // The mock the vitest config aliases `obsidian` to — imported by path so its
 // recorded notices are visible to the type checker as well as at runtime.
+import { evictedSpot } from '#/lib/moved-note-scan';
 import { Keymap, Notice } from '#/test/__mocks__/obsidian';
 import {
   excludedIdsOf,
@@ -54,6 +55,7 @@ import {
   textItemSpecArb,
 } from '#/test/due-query';
 import {
+  insertItemAt,
   makeItemVault,
   runOutMergeWait,
   TestRepository,
@@ -670,6 +672,73 @@ function makeLinkedCopyPlugin(text: string, cache: unknown) {
   };
   Object.assign(plugin.app.metadataCache, metadataCache);
   return { plugin, note, metadataCache };
+}
+
+/** The item tables, by name, as `reassociateNote` takes them. */
+const MOVE_TABLES = ['article', 'snippet', 'srs_card'] as const;
+type MoveTable = (typeof MOVE_TABLES)[number];
+
+/**
+ * A note at `at` (`notes/new.md`) holding `moved`, whose `table` row is still at
+ * `notes/old.md`, deleted, as the plugin deletes the row of a note moved
+ * where it saw only a delete and a create; the row of what it was taken
+ * from, `art` at `notes/art.md`; for an article or snippet, a snippet and a
+ * card taken from it whose links name the old path; and the `atPath` rows at
+ * the note's path. Managers over them, the review manager's workspace
+ * trigger and the plugin's `refusedArrivals.add` spied on.
+ */
+async function wireMovedRow(
+  table: MoveTable,
+  atPath: readonly { table: MoveTable; id: string; deleted: boolean }[] = [],
+  at = 'notes/new.md'
+) {
+  const vault = makeLinkVault({
+    [at]: { 'ir-id': 'moved', tags: ['kept'] },
+    'notes/art.md': { 'ir-id': 'art', tags: [ARTICLE_TAG] },
+    'IR/s.md': { 'ir-id': 'child-s', source: '[[notes/old|old]]' },
+    'IR/c.md': { 'ir-id': 'child-c', source: '[old](notes/old.md)' },
+  });
+  const repo = await TestRepository.create();
+  insertItemAt(repo, 'article', {
+    id: 'art',
+    reference: 'notes/art.md',
+    deleted: false,
+  });
+  insertItemAt(repo, table, {
+    id: 'moved',
+    reference: 'notes/old.md',
+    deleted: true,
+  });
+  if (table !== 'article') {
+    repo.mutate(`UPDATE ${table} SET parent = 'art' WHERE id = 'moved'`);
+  }
+  if (table !== 'srs_card') {
+    insertItemAt(repo, 'snippet', {
+      id: 'child-s',
+      reference: 'IR/s.md',
+      deleted: false,
+    });
+    insertItemAt(repo, 'srs_card', {
+      id: 'child-c',
+      reference: 'IR/c.md',
+      deleted: false,
+    });
+    repo.mutate(`UPDATE snippet SET parent = 'moved' WHERE id = 'child-s'`);
+    repo.mutate(`UPDATE srs_card SET parent = 'moved' WHERE id = 'child-c'`);
+  }
+  for (const row of atPath) {
+    insertItemAt(repo, row.table, { ...row, reference: at });
+  }
+  const trigger = vi.fn();
+  const plugin: Record<string, unknown> = {
+    app: { ...vault.app, workspace: { trigger } },
+    settings: {},
+    refusedArrivals: { add: vi.fn() },
+  };
+  const reviewManager = new ReviewManager(plugin as never, repo);
+  plugin.reviewManager = reviewManager;
+  const file = vault.files.get(at)!;
+  return { vault, repo, plugin, reviewManager, trigger, file };
 }
 
 /** The notice a copy whose links weren't all re-based is made with. */
@@ -11647,5 +11716,226 @@ describe("importing a snippet's or card's note that lost its type tag (0237)", (
         { numRuns: 120 }
       );
     });
+  });
+});
+
+describe('reassociateNote from where the row last had its note', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const TAG_OF_TABLE: Record<MoveTable, string> = {
+    article: ARTICLE_TAG,
+    snippet: SNIPPET_TAG,
+    srs_card: CARD_TAG,
+  };
+
+  it("brings the row to the note, live, with the note's fingerprint, moving aside every deleted row at the note's path, and points what was taken from it at the note", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom(...MOVE_TABLES),
+        fc.subarray([...MOVE_TABLES]),
+        async (table, deletedAtPath) => {
+          vi.restoreAllMocks();
+          const atPath = deletedAtPath.map((t) => ({
+            table: t,
+            id: `gone-${t}`,
+            deleted: true,
+          }));
+          const { vault, repo, reviewManager, trigger, file } =
+            await wireMovedRow(table, atPath);
+          const renameFile = vi.spyOn(
+            reviewManager.snippets.offsetTracker,
+            'renameFile'
+          );
+          vi.spyOn(reviewManager.snippets, 'getHighlights').mockResolvedValue(
+            []
+          );
+
+          await reviewManager.articles.reassociateNote(
+            file,
+            table,
+            'moved',
+            'notes/old.md'
+          );
+
+          const [row] = repo.storedRows(table, ` WHERE id = 'moved'`);
+          expect(row).toMatchObject({
+            reference: 'notes/new.md',
+            deleted: 0,
+            note_mtime: file.stat.mtime,
+          });
+          for (const t of deletedAtPath) {
+            expect(
+              repo.storedRows(t, ` WHERE id = 'gone-${t}'`)[0]
+            ).toMatchObject({
+              reference: evictedSpot({ table: t, id: `gone-${t}` }),
+              deleted: 1,
+            });
+          }
+          expect(
+            vault.app.metadataCache.getFileCache(file)?.frontmatter
+          ).toEqual({ 'ir-id': 'moved', tags: ['kept', TAG_OF_TABLE[table]] });
+          if (table === 'srs_card') {
+            expect(vault.sourceOf('IR/s.md')).toBe('[[notes/old|old]]');
+          } else {
+            expect(vault.sourceOf('IR/s.md')).toBe('[[notes/new|new]]');
+            expect(vault.sourceOf('IR/c.md')).toBe('[new](notes/new.md)');
+          }
+          expect(renameFile).toHaveBeenCalledExactlyOnceWith(
+            'notes/old.md',
+            'notes/new.md'
+          );
+          expect(trigger).toHaveBeenCalledWith(
+            'ir-highlights-changed',
+            'notes/new.md'
+          );
+          // A snippet's own highlight comes back in what it was taken from
+          expect(
+            trigger.mock.calls.some(([, path]) => path === 'notes/art.md')
+          ).toBe(table === 'snippet');
+        }
+      ),
+      { numRuns: 24 }
+    );
+  });
+
+  it('writes nothing, putting the note back, when the row left where it was or a live row of any table holds the note', async () => {
+    const cases = [
+      ...MOVE_TABLES.map((holder) => ({ holder, left: false })),
+      { holder: null, left: true },
+    ];
+    for (const table of MOVE_TABLES) {
+      for (const { holder, left } of cases) {
+        vi.restoreAllMocks();
+        const { vault, repo, reviewManager, trigger, file } =
+          await wireMovedRow(
+            table,
+            holder ? [{ table: holder, id: 'live-holder', deleted: false }] : []
+          );
+        if (left) {
+          repo.mutate(
+            `UPDATE ${table} SET reference = 'notes/else.md' WHERE id = 'moved'`
+          );
+        }
+        const stored = repo.dump();
+        const frontmatter = structuredClone(
+          vault.app.metadataCache.getFileCache(file)?.frontmatter
+        );
+
+        await expect(
+          reviewManager.articles.reassociateNote(
+            file,
+            table,
+            'moved',
+            'notes/old.md'
+          )
+        ).rejects.toThrow(left ? /notes\/old\.md/ : /notes\/new\.md/);
+
+        expect(repo.dump()).toBe(stored);
+        expect(vault.app.metadataCache.getFileCache(file)?.frontmatter).toEqual(
+          frontmatter
+        );
+        expect(vault.sourceOf('IR/s.md')).toBe('[[notes/old|old]]');
+        expect(trigger).not.toHaveBeenCalled();
+      }
+    }
+  });
+
+  it('follows nothing for a row already at the note, nor without a review manager, the move standing', async () => {
+    for (const from of ['notes/new.md', 'notes/old.md']) {
+      vi.restoreAllMocks();
+      const { repo, plugin, reviewManager, trigger, file } =
+        await wireMovedRow('snippet');
+      if (from === 'notes/new.md') {
+        repo.mutate(
+          `UPDATE snippet SET reference = 'notes/new.md' WHERE id = 'moved'`
+        );
+      } else {
+        delete plugin.reviewManager;
+      }
+      const renameFile = vi.spyOn(
+        reviewManager.snippets.offsetTracker,
+        'renameFile'
+      );
+      const retarget = vi.spyOn(reviewManager.articles, 'retargetChildSources');
+
+      await reviewManager.articles.reassociateNote(
+        file,
+        'snippet',
+        'moved',
+        from
+      );
+
+      expect(repo.rows('snippet')).toContainEqual(
+        expect.objectContaining({
+          id: 'moved',
+          reference: 'notes/new.md',
+          deleted: 0,
+        })
+      );
+      expect(renameFile).not.toHaveBeenCalled();
+      expect(retarget).not.toHaveBeenCalled();
+      expect(trigger).not.toHaveBeenCalled();
+    }
+  });
+
+  it('tells of the item arriving at a path that breaks links once the row has moved there, and of no other', async () => {
+    const bad = 'notes/new [x].md';
+    for (const table of MOVE_TABLES) {
+      for (const { at, from, holder } of [
+        { at: bad, from: 'notes/old.md', holder: false },
+        { at: 'notes/new.md', from: 'notes/old.md', holder: false },
+        { at: bad, from: 'notes/old.md', holder: true },
+      ]) {
+        vi.restoreAllMocks();
+        const { plugin, reviewManager, repo, file } = await wireMovedRow(
+          table,
+          holder ? [{ table, id: 'live-holder', deleted: false }] : [],
+          at
+        );
+        vi.spyOn(reviewManager.snippets, 'getHighlights').mockResolvedValue([]);
+        const { add } = plugin.refusedArrivals as {
+          add: ReturnType<typeof vi.fn>;
+        };
+
+        const moved = reviewManager.articles
+          .reassociateNote(file, table, 'moved', from)
+          .then(() => true);
+
+        expect(await moved.catch(() => false)).toBe(!holder);
+        const [row] = repo.storedRows(table, ` WHERE id = 'moved'`);
+        expect(row.reference).toBe(holder ? from : at);
+        if (at === bad && !holder) {
+          expect(add).toHaveBeenCalledExactlyOnceWith(bad);
+        } else {
+          expect(add).not.toHaveBeenCalled();
+        }
+      }
+    }
+  });
+
+  it("keeps the row's move when what was taken from it can't be pointed at the note", async () => {
+    const { repo, reviewManager, file } = await wireMovedRow('article');
+    vi.spyOn(reviewManager.articles, 'retargetChildSources').mockRejectedValue(
+      new Error('read failed')
+    );
+    const error = vi.spyOn(console, 'error').mockReturnValue(undefined);
+
+    await reviewManager.articles.reassociateNote(
+      file,
+      'article',
+      'moved',
+      'notes/old.md'
+    );
+
+    expect(repo.rows('article')).toContainEqual(
+      expect.objectContaining({
+        id: 'moved',
+        reference: 'notes/new.md',
+        deleted: 0,
+      })
+    );
+    expect(error).toHaveBeenCalledExactlyOnceWith(new Error('read failed'));
   });
 });

@@ -13,7 +13,7 @@ import {
 import { getDeviceId } from '#/lib/device-id';
 import type ReviewManager from '#/lib/items/ReviewManager';
 import { notify } from '#/lib/notices';
-import { askToResolveHeld } from '#/lib/reassociate-prompt';
+import { askToResolve, askToResolveHeld } from '#/lib/reassociate-prompt';
 import type { NoteType, SQLiteRepository } from '#/lib/types';
 import { openModal } from '#/lib/ui-window';
 import {
@@ -31,9 +31,12 @@ import {
 /** A type a leftover can be saved as from the modal. */
 export type SaveType = Extract<NoteType, 'article' | 'snippet'>;
 
-/** What can be chosen for a leftover in a {@link LeftoverModal}. */
+/**
+ * What can be chosen for a leftover in a {@link LeftoverModal}: a card only
+ * for one a card's row holds the id of (see `Leftover.match`).
+ */
 export type LeftoverChoice =
-  | { action: 'adopt'; as: SaveType }
+  | { action: 'adopt'; as: NoteType }
   | { action: 'trash' }
   | { action: 'strip' };
 
@@ -47,10 +50,32 @@ const SAVE_TYPES: Readonly<Record<SaveType, string>> = {
   snippet: 'Snippet',
 };
 
+/**
+ * The types offered for `leftover`: those any leftover can be saved as, and
+ * a card for one a card's row holds the id of, which is a card's note. Not
+ * for one at a card's path alone: saved as a new item, a note of no type is
+ * no card, and only Re-associate makes it the card's note.
+ */
+function saveTypesOf(leftover: Leftover): Readonly<Record<string, string>> {
+  return leftover.match?.kind === 'card'
+    ? { ...SAVE_TYPES, card: 'Card' }
+    : SAVE_TYPES;
+}
+
+/**
+ * What a line says of the row holding its note's id, if one does: its kind,
+ * deleted or not, and where it says its note is.
+ */
+function matchText({ kind, deleted, reference }: Leftover['match'] & {}) {
+  const state = deleted ? 'Deleted' : 'Missing';
+  return `${state} ${kind}, last at ${reference}`;
+}
+
 /** What a row says when what was chosen for it could not be done. */
-const FAILED: Readonly<Record<SaveType | 'trash' | 'strip', string>> = {
+const FAILED: Readonly<Record<NoteType | 'trash' | 'strip', string>> = {
   article: "Couldn't save this note as an article.",
   snippet: "Couldn't save this note as a snippet.",
+  card: "Couldn't save this note as a card.",
   trash: "Couldn't move this note to the trash.",
   strip: "Couldn't remove this note's incremental reading properties.",
 };
@@ -64,11 +89,11 @@ function folderOf(path: string): string {
 /**
  * One leftover's line in a {@link LeftoverModal}, and what is chosen on it.
  * A note made as a type it can be saved as starts with that type in its
- * "Save as…" dropdown and its "Keep as" toggle on, so Confirm saves it as
+ * "Save as…" dropdown and its "Save" toggle on, so Confirm saves it as
  * that unless the user changes it; any other starts with no type and the
  * toggle off, Confirm leaving it be. Turning the toggle off leaves a note be,
  * whatever type the dropdown shows; picking a type turns it on. The trash or
- * stripping, while pressed, stands in for keeping it, and taking either back
+ * stripping, while pressed, stands in for saving it, and taking either back
  * returns the line to the type and toggle it had before.
  */
 interface Row {
@@ -80,9 +105,9 @@ interface Row {
   /** Where the note is previewed, just under the line; empty while closed. */
   preview: HTMLElement;
   /** The type in the line's dropdown, `null` while it shows none. */
-  type: SaveType | null;
+  type: NoteType | null;
   /**
-   * Whether the line's "Keep as" toggle is on, which it shows only while
+   * Whether the line's "Save" toggle is on, which it shows only while
    * the toggle can be (see {@link keepable}): picking a type turns it on.
    */
   kept: boolean;
@@ -101,7 +126,7 @@ function choiceOf({ type, kept, other }: Row): LeftoverChoice | null {
 }
 
 /**
- * Whether `row`'s "Keep as" toggle can be on: while its dropdown shows a
+ * Whether `row`'s "Save" toggle can be on: while its dropdown shows a
  * type, which it doesn't while the trash or stripping is pressed.
  */
 const keepable = (row: Row) => row.type !== null && row.other === null;
@@ -189,7 +214,7 @@ export class LeftoverModal extends Modal {
   ) => Promise<boolean | LeftoverFailure | null>;
   #rows: Row[] = [];
   #buttonsEl: HTMLElement | null = null;
-  /** The toggle that turns every line's "Keep as" toggle on or off. */
+  /** The toggle that turns every line's "Save" toggle on or off. */
   #all: UserToggle | null = null;
   #confirm: ButtonComponent | null = null;
   /** Whether Confirm is under way. */
@@ -223,7 +248,7 @@ export class LeftoverModal extends Modal {
     // Above the lines, at the end, over their own toggles
     this.#all = userToggle(
       createDiv({ cls: 'ir-leftover-all', parent: this.contentEl }),
-      { cls: 'ir-leftover-all-text', text: 'Keep all' },
+      { cls: 'ir-leftover-all-text', text: 'Save all' },
       (on) => this.#keepAll(on)
     );
     this.#rows = this.#leftovers.map((leftover) => this.#addRow(leftover));
@@ -284,6 +309,14 @@ export class LeftoverModal extends Modal {
       'chevron-right'
     );
     name.append(file.basename);
+    // Why a note that was an item's is here, and which item it may be again
+    if (leftover.match) {
+      createDiv({
+        cls: ['setting-item-description', 'ir-leftover-match'],
+        text: matchText(leftover.match),
+        parent: info,
+      });
+    }
     const preview = createDiv({
       cls: ['ir-leftover-preview', 'markdown-rendered'],
       parent: this.contentEl,
@@ -292,8 +325,9 @@ export class LeftoverModal extends Modal {
     const controls = createDiv({ cls: 'setting-item-control', parent: el });
 
     // What the line starts with (see `Row`)
-    const shown: SaveType | null =
-      leftover.type === 'article' || leftover.type === 'snippet'
+    const saveTypes = saveTypesOf(leftover);
+    const shown: NoteType | null =
+      leftover.type !== null && leftover.type in saveTypes
         ? leftover.type
         : null;
     const row: Row = {
@@ -315,16 +349,19 @@ export class LeftoverModal extends Modal {
     const actions = actionsFor(leftover);
     /** Whether the line's controls are turned off. */
     let disabled = false;
-    /** Show what is chosen on the line's "Keep as" toggle, if it has one. */
+    /** Show what is chosen on the line's "Save" toggle, if it has one. */
     let showBox = () => {};
     let dropdown: DropdownComponent | null = null;
+    // A line matched with a row keeps that row's type: rows are the
+    // authority on what an item is, and Re-associate takes the row as it is
+    const locked = leftover.match !== undefined;
     if (actions.includes('adopt')) {
       // In front of the dropdown, its label's text a click target too,
       // which a phone hides but for screen readers (see styles.css). Never
       // flipped while no type is shown, as the toggle is off then
       const box = userToggle(
         createDiv({ cls: 'ir-leftover-keep', parent: controls }),
-        { cls: 'ir-leftover-keep-text', text: 'Keep as' },
+        { cls: 'ir-leftover-keep-text', text: 'Save' },
         (on) => {
           row.kept = on;
           changed();
@@ -334,16 +371,17 @@ export class LeftoverModal extends Modal {
         box.show(keepable(row) && row.kept, disabled || !keepable(row));
       dropdown = new DropdownComponent(controls)
         .addOption('', 'Save as…')
-        .addOptions(SAVE_TYPES)
+        .addOptions(saveTypes)
         .onChange((value) => {
           // The placeholder is no type, should a change ever land on it
-          row.type = value in SAVE_TYPES ? (value as SaveType) : null;
+          row.type = value in saveTypes ? (value as NoteType) : null;
           row.kept = true;
           row.other = null;
           changed();
         });
       // Shown while nothing is picked, but not one to pick
       dropdown.selectEl.options[0].disabled = true;
+      dropdown.setDisabled(locked);
     }
     /** A button chosen while pressed, and taken back pressed again. */
     const toggle = (action: 'trash' | 'strip') =>
@@ -386,7 +424,7 @@ export class LeftoverModal extends Modal {
     };
     row.setDisabled = (off) => {
       disabled = off;
-      dropdown?.setDisabled(off);
+      dropdown?.setDisabled(off || locked);
       strip?.setDisabled(off);
       trash?.setDisabled(off);
       row.show();
@@ -472,7 +510,7 @@ export class LeftoverModal extends Modal {
   }
 
   /**
-   * Turn every line's "Keep as" toggle that can be on, or off, as `keep` says:
+   * Turn every line's "Save" toggle that can be on, or off, as `keep` says:
    * the toggle over the lines, flipped. A line with no type, or with the trash
    * or stripping pressed, is left as it is.
    */
@@ -487,7 +525,7 @@ export class LeftoverModal extends Modal {
 
   /**
    * Confirm is on while something is chosen and nothing is under way. The
-   * toggle over the lines is on while every "Keep as" toggle that can be is,
+   * toggle over the lines is on while every "Save" toggle that can be is,
    * so flipping it with only some on turns the rest on; it is turned off
    * while none can be, or something is under way.
    */
@@ -505,9 +543,15 @@ export class LeftoverModal extends Modal {
   /**
    * Do what was chosen for each line, in order, as Confirm says to: on only
    * while something is chosen and nothing is under way (see {@link #update}).
+   * Closes once every chosen line is done: lines left be never hold it open,
+   * and are asked about again on the next look. One that failed, saying why,
+   * or whose question was backed out of, keeps it open, its choice kept, to
+   * try again.
    */
   async #run() {
     const chosen = this.#rows.filter((row) => choiceOf(row));
+    /** Whether a chosen line was not done: failed, or backed out of. */
+    let undone = false;
     this.#running = true;
     this.#update();
     for (const row of this.#rows) row.setDisabled(true);
@@ -528,6 +572,7 @@ export class LeftoverModal extends Modal {
         );
         outcome = failureOf(error);
       }
+      if (outcome !== true) undone = true;
       // Backed out of by the user, which is no failure to show
       if (outcome === null) continue;
       if (outcome === true) {
@@ -551,7 +596,7 @@ export class LeftoverModal extends Modal {
     if (this.#closed) return;
     for (const row of this.#rows) row.setDisabled(false);
     this.#update();
-    if (this.#rows.length === 0) this.close();
+    if (!undone) this.close();
   }
 }
 
@@ -660,8 +705,10 @@ export class LeftoverWatch {
         // modal does each line after the one before
         let erased = false;
         const conflicts: LeftoverDeps['conflicts'] = {
-          ask: (file, holder) =>
-            askToResolveHeld(app, file, holder, getDeviceId(app)),
+          ask: (file, holder, plan) =>
+            plan
+              ? askToResolve(app, file, plan, getDeviceId(app))
+              : askToResolveHeld(app, file, holder, getDeviceId(app)),
           purge: async (table, id) => {
             await reviewManager.deleteRow(table, id);
             erased = true;

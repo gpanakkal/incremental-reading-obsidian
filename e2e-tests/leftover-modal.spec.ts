@@ -132,13 +132,7 @@ test('saves only the leftover notes left checked on Confirm', async () => {
     .locator('.ir-leftover-modal .modal-button-container .mod-cta')
     .click();
 
-  // The note saved leaves the list; the one turned off stays, as it was
-  await expect(lineOf('Keep me')).toHaveCount(0);
-  await expect(lineOf('Leave me')).toHaveCount(1);
-  await expect(leave).not.toHaveClass(/\bis-enabled\b/);
-  await window
-    .locator('.ir-leftover-modal .modal-button-container .mod-cancel')
-    .click();
+  // Done once the note saved is: the one turned off never holds it open
   await expect(window.locator('.ir-leftover-modal')).toHaveCount(0);
 
   await executeCommandById(window, 'incremental-reading:learn');
@@ -284,4 +278,170 @@ test.describe("A leftover at another item's path", () => {
       window.locator('#manage-leftovers-button .ir-leftover-count')
     ).toHaveText('1');
   });
+});
+
+test.describe('A note moved outside Obsidian while it runs', () => {
+  /** The question asked about the row the note may be re-associated with. */
+  const question = () => window.locator('.modal-container.mod-confirmation');
+
+  /** The item's action bar in the active tab, which a plain note has none of. */
+  const actionBar = () =>
+    window
+      .locator('.workspace-leaf.mod-active .ir-action-bar-panel')
+      .filter({ visible: true });
+
+  /** Whether the `table` row `id` is deleted, as the plugin's database has it. */
+  const isDeleted = (table: string, id: string) =>
+    window.evaluate(
+      async ([table, id]) => {
+        const { app } = window as unknown as {
+          app: {
+            plugins: {
+              plugins: Record<
+                string,
+                {
+                  reviewManager: {
+                    repo: {
+                      query(sql: string, params: unknown[]): Promise<unknown[]>;
+                    };
+                  };
+                }
+              >;
+            };
+          };
+        };
+        const { repo } =
+          app.plugins.plugins['incremental-reading'].reviewManager;
+        const [row] = (await repo.query(
+          `SELECT deleted FROM ${table} WHERE id = $1`,
+          [id]
+        )) as { deleted: number }[];
+        return row ? Boolean(row.deleted) : null;
+      },
+      [table, id] as const
+    );
+
+  /**
+   * Put the `table` row `id` at `notes/Moved.md`, due ten days ago at noon
+   * and reviewed once, with its note there, tagged with the type's tag or
+   * not; then move the note's file to `Moved.md` in `folder` behind Obsidian's
+   * back, as Explorer or git would, and wait for the plugin to delete the
+   * row, as it does for the delete Obsidian sees. `viaOutside` moves it out
+   * of the vault first and back in once the row is deleted, as a cut and a
+   * later paste would, so Obsidian sees the delete before the create. Returns
+   * the due day as the queue writes it.
+   */
+  async function moveBehindObsidian(
+    table: 'article' | 'snippet',
+    id: string,
+    tag: string | null,
+    viaOutside: boolean,
+    folder: string
+  ) {
+    const due = new Date();
+    due.setDate(due.getDate() - 10);
+    due.setHours(12, 0, 0, 0);
+    await mutate(
+      `INSERT INTO ${table} (id, reference, due, interval, priority)
+       VALUES ($1, 'notes/Moved.md', $2, 86400000, 25)`,
+      [id, due.getTime()]
+    );
+    const log = table === 'article' ? 'article_review' : 'snippet_review';
+    await mutate(
+      `INSERT INTO ${log} (id, ${table}_id, review_time) VALUES ('review-1', $1, $2)`,
+      [id, due.getTime() - 86_400_000]
+    );
+    const tags = tag ? `tags: ${tag}\n` : '';
+    await writeVaultFile(
+      'notes/Moved.md',
+      `---\nir-id: ${id}\n${tags}---\nMoved\n`
+    );
+    await fs.mkdir(path.join(vaultPath, folder), { recursive: true });
+    const from = path.join(vaultPath, 'notes/Moved.md');
+    const to = path.join(vaultPath, `${folder}/Moved.md`);
+    if (viaOutside) {
+      const outside = `${vaultPath}-${id}.md`;
+      await fs.rename(from, outside);
+      await expect.poll(() => isDeleted(table, id)).toBe(true);
+      await fs.rename(outside, to);
+    } else {
+      await fs.rename(from, to);
+    }
+    await expect
+      .poll(() =>
+        window.evaluate((moved) => {
+          const { app } = window as unknown as { app: PageApp };
+          const file = app.vault.getFileByPath(moved);
+          return (
+            app.vault.getFileByPath('notes/Moved.md') === null &&
+            file !== null &&
+            app.metadataCache.getFileCache(file)?.frontmatter !== undefined
+          );
+        }, `${folder}/Moved.md`)
+      )
+      .toBe(true);
+    await expect.poll(() => isDeleted(table, id)).toBe(true);
+    return `${due.getFullYear()}/${due.getMonth() + 1}/${due.getDate()}`;
+  }
+
+  // A tagged note is no more taken back on its own than an untagged one,
+  // even when Obsidian sees the row deleted before the note turns up; one
+  // brought to a path that breaks links is told of, as one arriving there is
+  for (const [table, tag, viaOutside, folder] of [
+    ['article', ARTICLE_TAG, true, 'moved'],
+    ['snippet', null, false, 'moved [x]'],
+  ] as const) {
+    test(`Re-associate brings the ${tag ? 'tagged' : 'untagged'} ${table} back to review at the note's new path, with its schedule, and the leftover is gone`, async () => {
+      const day = await moveBehindObsidian(
+        table,
+        `moved-${table}`,
+        tag,
+        viaOutside,
+        folder
+      );
+      await window.evaluate(() => {
+        const { app } = window as unknown as { app: PageApp };
+        void app.plugins.plugins['incremental-reading'].leftovers?.manage();
+      });
+
+      // Listed, saying which row it was, and set to be kept as that type
+      await expect(lineOf('Moved').locator('.ir-leftover-match')).toBeVisible();
+      await expect(lineOf('Moved').locator('.checkbox-container')).toHaveClass(
+        /\bis-enabled\b/
+      );
+      // Its type is the row's, never another
+      await expect(
+        lineOf('Moved').locator('select.dropdown:not(.is-measuring)')
+      ).toHaveValue(table);
+      await expect(
+        lineOf('Moved').locator('select.dropdown:not(.is-measuring)')
+      ).toBeDisabled();
+      await window
+        .locator('.ir-leftover-modal .modal-button-container .mod-cta')
+        .click();
+      const reassociate = question().locator(
+        '.modal-button-container .mod-cta'
+      );
+      await expect(async () => {
+        if (await reassociate.isVisible()) await reassociate.click();
+        await expect(reassociate).toHaveCount(0, { timeout: 2_000 });
+      }).toPass();
+
+      await expect(window.locator('.ir-leftover-modal')).toHaveCount(0);
+      if (folder.includes('[')) {
+        await expect(
+          window.locator('.notice', { hasText: `"${folder}/Moved.md"` })
+        ).toBeVisible();
+      }
+      await openFileInActiveLeaf(window, `${folder}/Moved.md`);
+      await expect(actionBar()).toBeVisible();
+      await executeCommandById(window, 'incremental-reading:learn');
+      const row = window.locator('.ir-queue-row').filter({ hasText: 'Moved' });
+      await expect(row).toHaveAttribute('data-type', table);
+      await expect(row).toContainText(day);
+      await expect(
+        window.locator('#manage-leftovers-button .ir-leftover-count')
+      ).toHaveCount(0);
+    });
+  }
 });

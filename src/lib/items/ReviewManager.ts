@@ -1348,7 +1348,14 @@ export default class ReviewManager {
   }
 
   /**
-   * Mark rows as un-deleted where appropriate
+   * Mark rows as un-deleted where appropriate: a note brings back only the
+   * row deleted at its own path that holds its `ir-id` (see
+   * `#restoreOwnTombstone`), tagged or not. A note that turns up at another
+   * path, as one moved outside Obsidian while it runs does (a delete, which
+   * deletes its row, then a create), is never paired with a row here: it is
+   * a leftover, which the user may re-associate with its row (see
+   * `crash-leftovers`). A file without frontmatter, a PDF, is known by its
+   * path, and takes back a row by it.
    * @returns the file's path when an item came to it just now whose path
    *   breaks links to it (see `REFUSED_PATH_CHARS`), for the user to hear of:
    *   arriving as a new file, by a move Obsidian didn't see as one, it is left
@@ -1370,33 +1377,10 @@ export default class ReviewManager {
     // deleted again between the write's read and its write
     const frontmatter = await Obsidian.readFrontMatter(concreteFile, this.app);
     const id = irIdOf(frontmatter);
-    // Tag-only by design: a note at a new path claims a row elsewhere by its
-    // tag alone, as no row has its path yet; an untagged one brings back only
-    // its own tombstone (see `#restoreOwnTombstone`)
-    const type = Obsidian.typeOfTags(frontmatter.tags);
-
     if (!id) return null;
-    if (type === null) {
-      return (await this.#restoreOwnTombstone(file.path, id))
-        ? refusedAt(file.path)
-        : null;
-    }
-
-    const table = type === 'card' ? 'srs_card' : type;
-
-    // Copying a note also triggers a creation event, which leaves the row
-    // with its original
-    const row = await this.#rowOf(table, id);
-    if (row && ownNoteKeepsRow(this.app, id, row.reference, file.path)) {
-      return null;
-    }
-
-    await this.#repo.mutate(
-      `UPDATE ${table} SET deleted = FALSE, reference = $1 WHERE id = $2 AND ${NOT_PURGED}`,
-      [file.path, id]
-    );
-    const came = row && (row.reference !== file.path || Boolean(row.deleted));
-    return came ? refusedAt(file.path) : null;
+    return (await this.#restoreOwnTombstone(file.path, id))
+      ? refusedAt(file.path)
+      : null;
   }
 
   /** The `reference` and `deleted` of row `id` in `table`, unless purged. */
@@ -1414,14 +1398,14 @@ export default class ReviewManager {
 
   /**
    * Bring back the row `id`, deleted at `path`, now that a note claiming its
-   * id is there again, though the note lacks its type tag: a note deleted and
-   * brought back, from the trash or by an editor that saves by replacing the
-   * file, while its tag was off. The note at a row's reference is that row's
-   * note iff it carries its id, tag or no tag, and a tag added back later only
-   * changes the note, which no handler takes to restore a row: left deleted,
-   * the item stayed out of the queue for good (0228). A row anywhere else is
-   * left alone: with no tag, nothing says which item the note is if not the
-   * one at its own path. Reads first, as most notes created are no item.
+   * id is there again, tagged or not: a note deleted and brought back, from
+   * the trash or by an editor that saves by replacing the file. The note at a
+   * row's reference is that row's note iff it carries its id, tag or no tag,
+   * and a tag added back later only changes the note, which no handler takes
+   * to restore a row: left deleted, the item stayed out of the queue for good
+   * (0228). A row anywhere else is left alone, whatever the note's tags (0231):
+   * the note is a leftover then (see `crash-leftovers`). Reads first, as most
+   * notes created are no item.
    * @returns whether a row was brought back
    */
   async #restoreOwnTombstone(path: string, id: string): Promise<boolean> {

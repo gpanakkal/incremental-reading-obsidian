@@ -27,6 +27,14 @@ import type { NoteType, SQLiteRepository } from './types';
  * are found here, and the user is asked what to do with each. Nothing is done
  * to one without asking: a note the plugin made may have been written in
  * since, and one imported in place is the user's own.
+ *
+ * Found the same way: a note whose id only deleted rows hold, as a note moved
+ * outside Obsidian while it runs leaves it, the move reaching the vault as a
+ * delete, which deletes the row, and a create, which brings back only a row
+ * at the note's own path, tagged or not (see `ReviewManager.handleCreation`);
+ * and one at a path a row holding another id
+ * holds. The user may re-associate it with such a row (see
+ * {@link findCandidates}); nothing pairs the two on its own.
  */
 
 /**
@@ -51,6 +59,19 @@ export interface Leftover {
    */
   type: NoteType | null;
   kind: LeftoverKind;
+  /**
+   * The deleted row holding the note's id that it would be re-associated
+   * with, if any (see {@link findCandidates}): its note was moved or put back
+   * where the plugin didn't see it as a move. Its type, the row's, is the
+   * note's `type` then, as rows and `ir-id`s are the authority on what an
+   * item is.
+   */
+  match?: MatchedRow;
+  /**
+   * The row at the note's path, holding another id, that it would be
+   * re-associated with when no row holds its id (see {@link findCandidates}).
+   */
+  holder?: PathHolder;
 }
 
 /**
@@ -79,6 +100,55 @@ export interface PathHolder {
 }
 
 /**
+ * A row holding a note's `ir-id`, deleted or not, wherever it points: see
+ * {@link findCandidates}.
+ */
+export interface MatchedRow extends PathHolder {
+  /** Where the row says its note is: where the note was last seen. */
+  reference: string;
+}
+
+/**
+ * Why a row holding a leftover's id can't be made its row: a note at the
+ * row's reference still holds that id, so the leftover is a copy, and copies
+ * never take their original's row (`copy`); or a live row holds the
+ * leftover's path, which the row would have to take (`held`).
+ */
+export type Refusal = 'copy' | 'held';
+
+/**
+ * What a leftover may be re-associated with, from what holds its id and its
+ * path (see {@link findCandidates}).
+ */
+export interface Plan {
+  /**
+   * The row Re-associate makes the note's: one holding the note's id (`id`),
+   * first; else the one at its path (`path`), a live one before a deleted
+   * one, should rows of two tables be there; else none.
+   */
+  target:
+    | { by: 'id'; row: MatchedRow }
+    | { by: 'path'; row: PathHolder }
+    | null;
+  /**
+   * A deleted row at the note's path, which gives the path up to `target`
+   * coming there from elsewhere: moved aside, as the moved-note scan moves
+   * the tombstones in its way (see `evictedSpot`). Of deleted rows of two
+   * tables there, the one shown; each is moved aside.
+   */
+  evicts: PathHolder | null;
+  /**
+   * Whether erasing the row at the note's path and saving the note as a new
+   * item under a fresh id (see {@link adoptFresh}) is offered: only while no
+   * row holds the note's id, which makes that row the note's own item, to be
+   * re-associated rather than erased.
+   */
+  erase: boolean;
+  /** The rows holding the note's id that can't be made its row, and why. */
+  refused: { row: MatchedRow; why: Refusal }[];
+}
+
+/**
  * What the user chose to do about a row holding a leftover's path: make the
  * note that row's note (`reassociate`), erase the row and save the note as a
  * new item (`erase`), or neither (`null`).
@@ -91,6 +161,16 @@ export type HeldChoice = 'reassociate' | 'erase' | null;
  */
 export type LeftoverFailure =
   | { reason: 'held'; holder: PathHolder }
+  | {
+      /**
+       * A row holds the note's id, which it could be re-associated with
+       * (`copy` false), or which a note at the row's reference still holds
+       * (`copy` true).
+       */
+      reason: 'matched';
+      row: MatchedRow;
+      copy: boolean;
+    }
   | { reason: 'error'; message: string };
 
 /**
@@ -123,8 +203,13 @@ export interface LeftoverDeps {
    * {@link resolveLeftover}); without it, adopting one fails.
    */
   conflicts?: {
-    /** Ask the user what to do about `holder`, at `file`'s path. */
-    ask: (file: TFile, holder: PathHolder) => Promise<HeldChoice>;
+    /**
+     * Ask the user what to do about `holder`, a row at `file`'s path; or,
+     * with `plan`, about what `plan` offers, `holder` being its target: a
+     * row holding the note's id, or one at its path while one does (see
+     * {@link Plan}).
+     */
+    ask: (file: TFile, holder: PathHolder, plan?: Plan) => Promise<HeldChoice>;
     /** Erase the `table` row `id` for good (see `ReviewManager.deleteRow`). */
     purge: (table: ItemTable, id: string) => Promise<void>;
   };
@@ -209,25 +294,62 @@ export async function holdsItems(repo: SQLiteRepository): Promise<boolean> {
   return false;
 }
 
-/** Of `ids`, those some row holds, deleted or not. */
-async function heldIds(
+/** A note's claim on an item: where the note is, and the id it holds. */
+interface Claim {
+  path: string;
+  id: string;
+}
+
+/**
+ * Of `claims`, those of leftovers, each with whether a row holds its id or
+ * its path at all, deleted or not. A note is a leftover unless a live row
+ * holding its id
+ * points at it (its row) or elsewhere (a copy's original, or a row the
+ * moved-note scan has yet to follow, neither of which takes this note),
+ * though one whose path a row holding another id holds is one even then. So
+ * a note whose id only deleted rows hold is one: its note was moved where the
+ * plugin saw only a delete and a create, say, as a move outside Obsidian
+ * while it runs is. A row deleted for good holds no id and no path here.
+ */
+async function leftoverClaims<C extends Claim>(
   repo: SQLiteRepository,
-  ids: readonly string[]
-): Promise<Set<string>> {
-  const held = new Set<string>();
-  for (let i = 0; i < ids.length; i += MAX_SQL_QUERY_PARAMS) {
-    const batch = ids.slice(i, i + MAX_SQL_QUERY_PARAMS);
+  claims: readonly C[]
+): Promise<{ claim: C; rowed: boolean }[]> {
+  /** Each id's rows not deleted for good, by whether each is live. */
+  const rowsOf = new Map<string, { reference: string; live: boolean }[]>();
+  /** The ids of the rows at each path. */
+  const idsAt = new Map<string, string[]>();
+  for (let i = 0; i < claims.length; i += MAX_SQL_QUERY_PARAMS) {
+    const batch = claims.slice(i, i + MAX_SQL_QUERY_PARAMS);
     const marks = batch.map((_, j) => `$${j + 1}`).join(', ');
     for (const table of ITEM_TABLES) {
-      const rows = (await repo.query(
-        `SELECT id FROM ${table} WHERE id IN (${marks}) AND ${NOT_PURGED}`,
-        [...batch],
+      const byId = (await repo.query(
+        `SELECT id, reference, deleted FROM ${table} WHERE id IN (${marks}) AND ${NOT_PURGED}`,
+        batch.map(({ id }) => id),
         { throwOnError: true }
-      )) as unknown as { id: string }[];
-      for (const { id } of rows) held.add(id);
+      )) as unknown as { id: string; reference: string; deleted: unknown }[];
+      for (const { id, reference, deleted } of byId) {
+        const live = !deleted;
+        rowsOf.set(id, [...(rowsOf.get(id) ?? []), { reference, live }]);
+      }
+      const atPath = (await repo.query(
+        `SELECT id, reference FROM ${table} WHERE reference IN (${marks})`,
+        batch.map(({ path }) => path),
+        { throwOnError: true }
+      )) as unknown as { id: string; reference: string }[];
+      for (const { id, reference } of atPath) {
+        idsAt.set(reference, [...(idsAt.get(reference) ?? []), id]);
+      }
     }
   }
-  return held;
+  return claims.flatMap((claim) => {
+    const rows = rowsOf.get(claim.id) ?? [];
+    const live = rows.filter((row) => row.live);
+    if (live.some((row) => row.reference === claim.path)) return [];
+    const taken = (idsAt.get(claim.path) ?? []).some((id) => id !== claim.id);
+    if (live.length > 0 && !taken) return [];
+    return [{ claim, rowed: rows.length > 0 || taken }];
+  });
 }
 
 /**
@@ -243,50 +365,75 @@ const parentPath = (table: ItemTable) =>
     )
     .join(', ');
 
+/** A row as {@link detailRows} reads it. */
+interface DetailRow {
+  item_table: ItemTable;
+  id: string;
+  reference: string;
+  deleted: unknown;
+  dismissed: unknown;
+  due: number | null;
+  updated_at: number;
+  updated_by: string;
+  parent: string | null;
+  parent_path: string | null;
+  last_review: number | null;
+}
+
+/**
+ * The rows of every item table that `where` holds for, articles first, then
+ * snippets, then cards, with what the user is shown of each (see
+ * {@link PathHolder}) and its reference. Its last review is the latest not
+ * undone; a card keeps its own.
+ * @param where read against each table's own columns, with `params`
+ * @throws if the item tables cannot be read
+ */
+async function detailRows(
+  repo: SQLiteRepository,
+  where: string,
+  params: string[]
+): Promise<DetailRow[]> {
+  return (await repo.query(
+    `SELECT 0 AS rank, 'article' AS item_table, id, reference, deleted, dismissed, due, updated_at, updated_by,
+       NULL AS parent, NULL AS parent_path,
+       (SELECT MAX(review_time) FROM article_review
+        WHERE article_id = article.id AND deleted = FALSE) AS last_review
+     FROM article WHERE ${where}
+     UNION ALL SELECT 1, 'snippet', id, reference, deleted, dismissed, due, updated_at, updated_by,
+       parent, COALESCE(${parentPath('snippet')}),
+       (SELECT MAX(review_time) FROM snippet_review
+        WHERE snippet_id = snippet.id AND deleted = FALSE)
+     FROM snippet WHERE ${where}
+     UNION ALL SELECT 2, 'srs_card', id, reference, deleted, dismissed, due, updated_at, updated_by,
+       parent, COALESCE(${parentPath('srs_card')}), last_review
+     FROM srs_card WHERE ${where}
+     ORDER BY rank`,
+    params,
+    { throwOnError: true }
+  )) as unknown as DetailRow[];
+}
+
 /**
  * The row whose `reference` is `path`, of any item table, deleted or not, with
  * what the user is shown of it (see {@link PathHolder}): a row for another
  * note can't be added at `path` while it is there, as each table's
  * `reference` is unique, and one in another table would point a second item
  * at the same note. A purged row's reference is no path (see `NOT_PURGED`),
- * so never matches. Its last review is the latest not undone; a card keeps
- * its own.
+ * so never matches.
  * @throws if the item tables cannot be read
  */
 export async function findPathHolder(
   repo: SQLiteRepository,
   path: string
 ): Promise<PathHolder | null> {
-  const [row] = (await repo.query(
-    `SELECT 0 AS rank, 'article' AS item_table, id, deleted, dismissed, due, updated_at, updated_by,
-       NULL AS parent, NULL AS parent_path,
-       (SELECT MAX(review_time) FROM article_review
-        WHERE article_id = article.id AND deleted = FALSE) AS last_review
-     FROM article WHERE reference = $1
-     UNION ALL SELECT 1, 'snippet', id, deleted, dismissed, due, updated_at, updated_by,
-       parent, COALESCE(${parentPath('snippet')}),
-       (SELECT MAX(review_time) FROM snippet_review
-        WHERE snippet_id = snippet.id AND deleted = FALSE)
-     FROM snippet WHERE reference = $1
-     UNION ALL SELECT 2, 'srs_card', id, deleted, dismissed, due, updated_at, updated_by,
-       parent, COALESCE(${parentPath('srs_card')}), last_review
-     FROM srs_card WHERE reference = $1
-     ORDER BY rank LIMIT 1`,
-    [path],
-    { throwOnError: true }
-  )) as unknown as {
-    item_table: ItemTable;
-    id: string;
-    deleted: unknown;
-    dismissed: unknown;
-    due: number | null;
-    updated_at: number;
-    updated_by: string;
-    parent: string | null;
-    parent_path: string | null;
-    last_review: number | null;
-  }[];
-  if (!row) return null;
+  const [row] = await detailRows(repo, 'reference = $1', [path]);
+  return row ? holderOf(row) : null;
+}
+
+/**
+ * What the user is shown of the row `row` (see {@link PathHolder}).
+ */
+function holderOf(row: DetailRow): PathHolder {
   return {
     kind: KIND_OF_TABLE[row.item_table],
     id: row.id,
@@ -298,6 +445,70 @@ export async function findPathHolder(
     updatedBy: row.updated_by,
     parent: row.parent ? { id: row.parent, path: row.parent_path } : null,
   };
+}
+
+/**
+ * What the note at `path` holding the id `id` may be re-associated with (see
+ * {@link Plan}).
+ * @throws if the item tables cannot be read
+ */
+export async function findCandidates(
+  { app, repo }: Pick<LeftoverDeps, 'app' | 'repo'>,
+  path: string,
+  id: string
+): Promise<Plan> {
+  const byId = await detailRows(repo, `id = $1 AND ${NOT_PURGED}`, [id]);
+  // Another table may hold the id at this very path: that row is no holder
+  const atPathRows = await detailRows(repo, 'reference = $1 AND id != $2', [
+    path,
+    id,
+  ]);
+  // A live row there keeps the path from any row, whatever the tables' rank,
+  // and is the one whose note this may be: a deleted one has none
+  const atPath = atPathRows.find((row) => !row.deleted) ?? atPathRows[0];
+  const holder = atPath ? holderOf(atPath) : null;
+  let matched: MatchedRow | null = null;
+  const refused: Plan['refused'] = [];
+  for (const found of byId) {
+    const row: MatchedRow = { ...holderOf(found), reference: found.reference };
+    const moving = row.reference !== path;
+    const note = moving ? app.vault.getFileByPath(row.reference) : null;
+    const why: Refusal | null =
+      note && claimOf(app, note)?.id === id
+        ? 'copy'
+        : moving && holder && !holder.deleted
+          ? 'held'
+          : null;
+    if (why) refused.push({ row, why });
+    else matched ??= row;
+  }
+  const target: Plan['target'] = matched
+    ? { by: 'id', row: matched }
+    : holder && { by: 'path', row: holder };
+  const evicts =
+    matched && matched.reference !== path && holder?.deleted ? holder : null;
+  return {
+    target,
+    evicts,
+    erase: byId.length === 0 && holder !== null,
+    refused,
+  };
+}
+
+/** Whether `plan` has anything to offer or refuse: any row at all. */
+const hasCandidates = (plan: Plan) =>
+  plan.target !== null || plan.refused.length > 0;
+
+/**
+ * The failure of saving a note as a new item while `plan` stands, saying
+ * which row is in the way: the one it would be re-associated with, else the
+ * one it is a copy of.
+ */
+function failureOfPlan(plan: Plan): LeftoverFailure {
+  const { target } = plan;
+  if (target?.by === 'path') return { reason: 'held', holder: target.row };
+  if (target) return { reason: 'matched', row: target.row, copy: false };
+  return { reason: 'matched', row: plan.refused[0].row, copy: true };
 }
 
 /**
@@ -315,15 +526,24 @@ export function failureOf(error: unknown): LeftoverFailure {
 const shortId = (id: string) => id.slice(0, 8);
 
 /**
- * Why `failure` happened, as the user is told: for a held path, which row
- * holds it and what to do about it; else the first line of what went wrong,
- * `''` if it says nothing.
+ * Why `failure` happened, as the user is told: for a held path or id, which
+ * row holds it and what to do about it; else the first line of what went
+ * wrong, `''` if it says nothing.
  */
 export function failureDetail(failure: LeftoverFailure): string {
   if (failure.reason === 'error') {
     // Its first line with any text: a stack, say, can follow
     const line = failure.message.split('\n').find((text) => text.trim());
     return line?.trim() ?? '';
+  }
+  if (failure.reason === 'matched') {
+    const { kind, id, deleted, reference } = failure.row;
+    const row =
+      `This note holds the ID of ${deleted ? 'a deleted' : 'an existing'} ` +
+      `${kind}, id ${shortId(id)}, last at "${reference}". `;
+    return failure.copy
+      ? `${row}The note there still holds that ID, so this note is a copy of it and can't take its record.`
+      : `${row}Confirm again to re-associate this note with it.`;
   }
   const { kind, id, deleted } = failure.holder;
   const short = shortId(id);
@@ -347,21 +567,30 @@ export async function findLeftovers(
   const { app, repo } = deps;
   const claims = app.vault.getMarkdownFiles().flatMap((file) => {
     const claim = claimOf(app, file);
-    return claim ? [{ file, ...claim }] : [];
+    return claim ? [{ file, path: file.path, ...claim }] : [];
   });
-  const held = await heldIds(
-    repo,
-    claims.map(({ id }) => id)
-  );
-  return claims
-    .filter(({ id }) => !held.has(id))
-    .map(
-      ({ file, id, type }): Leftover => ({
-        file,
-        id,
-        ...placeOf(file.path, type),
-      })
-    );
+  const leftovers: Leftover[] = [];
+  for (const { claim, rowed } of await leftoverClaims(repo, claims)) {
+    const { file, id, type } = claim;
+    const leftover: Leftover = { file, id, ...placeOf(file.path, type) };
+    // Looked up only for the few whose id or path a row holds
+    const { target } = rowed
+      ? await findCandidates(deps, file.path, id)
+      : { target: null };
+    if (target?.by === 'id') {
+      leftover.match = target.row;
+      leftover.type = target.row.kind;
+    } else if (target) {
+      leftover.holder = target.row;
+      // A note of no type of its own starts as the type of the row whose
+      // place it took, which the user may change, saving it as a new item;
+      // never a card, which a note of no type is no card's note as: only
+      // Re-associate makes it the card's, whatever type it is saved as
+      if (target.row.kind !== 'card') leftover.type ??= target.row.kind;
+    }
+    leftovers.push(leftover);
+  }
+  return leftovers;
 }
 
 /**
@@ -390,8 +619,8 @@ export function leftoversMessage(leftovers: readonly Leftover[]): string {
  * type's tag first, in place of any other item type's. One typed by its folder
  * alone, or of no type, has none, and the tag is what Obsidian's tag search
  * shows an item's note by and what lets the note take its row along when it
- * turns up at a path the row doesn't name (see `ReviewManager.handleCreation`
- * and its rename handling). One the user chose to keep as another
+ * is renamed from a path the row doesn't name (see
+ * `ReviewManager.handleExternalRename`). One the user chose to keep as another
  * type than its tag names (a card kept as a snippet, say) would read as the old
  * type. The row comes last, as it commits the adoption, and a note left tagged
  * by a failed one is still a leftover.
@@ -478,7 +707,10 @@ async function isLeftover(
 ): Promise<boolean> {
   const claim =
     app.vault.getFileByPath(file.path) === file ? claimOf(app, file) : null;
-  return claim?.id === id && (await heldIds(repo, [id])).size === 0;
+  return (
+    claim?.id === id &&
+    (await leftoverClaims(repo, [{ path: file.path, id }])).length === 1
+  );
 }
 
 /**
@@ -487,10 +719,10 @@ async function isLeftover(
  * database, say. Says so when it fails, or when writes are refused.
  * @param as for `adopt`, the type to keep it as, the user's choice: by
  *   default the one it was made as; with neither, it isn't adopted
- * Adopting a note whose path another row holds asks the user what to do
- * about that row, when `deps.conflicts` can (see {@link resolveHeld}); else it
- * fails before anything is written, saying which row (see
- * {@link findPathHolder}).
+ * Adopting a note whose id or path another row holds asks the user what to
+ * do about that row, when `deps.conflicts` can (see {@link resolveHeld}); else
+ * it fails before anything is written, saying which row (see
+ * {@link findCandidates}).
  * @returns whether it was done, and why not when it failed
  */
 export async function resolveLeftover(
@@ -500,16 +732,18 @@ export async function resolveLeftover(
   as: NoteType | null = leftover.type
 ): Promise<LeftoverOutcome> {
   const { app, repo } = deps;
-  const { file, id, type } = leftover;
+  const { file, id } = leftover;
   // A note of no known type is adopted only as a type the user chose
   if (action === 'adopt' && !as) return { done: false };
   const what = DOING[action](`"${file.basename}"`);
   if (await refusedWrite(repo, what)) return { done: false };
   try {
     if (!(await isLeftover(deps, leftover))) return { done: false };
-    const holder =
-      action === 'adopt' ? await findPathHolder(repo, file.path) : null;
-    if (holder && as) return await resolveHeld(deps, leftover, holder, as);
+    const plan =
+      action === 'adopt' ? await findCandidates(deps, file.path, id) : null;
+    if (plan && as && hasCandidates(plan)) {
+      return await resolveHeld(deps, leftover, plan, as);
+    }
     if (action === 'trash') {
       await app.fileManager.trashFile(file);
     } else if (action === 'strip') {
@@ -517,12 +751,13 @@ export async function resolveLeftover(
         file,
         (frontmatter) => {
           delete frontmatter['ir-id'];
-          // A note typed by its folder alone has no type tag to take off,
-          // and its tags are left as they are
-          const typeTag = type && TAG_OF[type];
+          // Every item type's tag: one typed by the row holding its id may
+          // carry another type's. A note typed by its folder alone has no
+          // type tag to take off, and its tags are left as they are
+          const typeTags: unknown[] = Object.values(TAG_OF);
           const tags = tagEntries(frontmatter.tags);
-          if (!typeTag || !tags.includes(typeTag)) return;
-          const kept = tags.filter((tag) => tag !== typeTag);
+          if (!tags.some((tag) => typeTags.includes(tag))) return;
+          const kept = tags.filter((tag) => !typeTags.includes(tag));
           if (kept.length > 0) frontmatter.tags = kept;
           else delete frontmatter.tags;
         },
@@ -538,63 +773,85 @@ export async function resolveLeftover(
   }
 }
 
-/** Whether `a` and `b` are the same row as the user would be shown it. */
-const sameRow = (a: PathHolder, b: PathHolder) =>
-  JSON.stringify(a) === JSON.stringify(b);
+/** Whether `a` and `b` offer the same, as the user would be shown it. */
+const samePlan = (a: Plan, b: Plan) => JSON.stringify(a) === JSON.stringify(b);
 
 /**
- * Adopt `leftover` as `as`, though `holder` holds its note's path, as the
- * user chooses (see `conflicts.ask`): make the note that row's note, keeping
- * its schedule and history (`reassociate`: see
- * `ArticleManager.reassociateNote`), and hand it the parentless snippets and
- * cards taken from the note, unless it is a card; or erase the row for good
- * and save the note as a new item of `as`, under a fresh id (`erase`: see
- * {@link adoptFresh}); or neither, which writes nothing and fails as held,
- * saying nothing more.
+ * Adopt `leftover` as `as`, though rows hold its id or its note's path, as
+ * `plan` offers and the user chooses (see `conflicts.ask`): make the note
+ * the target row's note, keeping its schedule and history (`reassociate`: see
+ * `ArticleManager.reassociateNote`), a row from elsewhere coming to the
+ * note's path, and hand it the parentless snippets and cards taken from the
+ * note, unless it is a card; or, where offered, erase the row at its path
+ * for good and save the note as a new item of `as`, under a fresh id
+ * (`erase`: see {@link adoptFresh}); or neither, which writes nothing and
+ * fails saying which row is in the way, saying nothing more. With no target, it fails at once, saying
+ * why. The plan itself is passed to `ask` only where it offers more than the
+ * row at the path, or other than it (see {@link Plan.erase}).
  *
  * The user may take a while to choose, so before writing anything, checks
  * again that saving is allowed, that the note is still a leftover, and that
- * the row at its path is still `holder` as they were shown it; one changed
+ * the rows holding its id and path are still as they were shown; any changed
  * meanwhile is refused, saying so.
  */
 async function resolveHeld(
   deps: LeftoverDeps,
   leftover: Leftover,
-  holder: PathHolder,
+  plan: Plan,
   as: NoteType
 ): Promise<LeftoverOutcome> {
   const { repo, conflicts } = deps;
   const { file } = leftover;
   const what = DOING.adopt(`"${file.basename}"`);
-  const held: LeftoverFailure = { reason: 'held', holder };
-  if (!conflicts) {
-    console.warn(
-      `Incremental Reading - can't ${what}: another row holds its path`,
-      holder
-    );
+  const held = failureOfPlan(plan);
+  const { target } = plan;
+  if (!conflicts || !target) {
+    if (!conflicts) {
+      console.warn(
+        `Incremental Reading - can't ${what}: another row holds its id or path`,
+        target?.row ?? plan
+      );
+    }
     return failed(what, held);
   }
-  const choice = await conflicts.ask(file, holder);
+  const choice = plan.erase
+    ? await conflicts.ask(file, target.row)
+    : await conflicts.ask(file, target.row, plan);
   if (!choice) return { done: false, canceled: true };
+  // Erasing is offered for a row at the path only (see `Plan.erase`)
+  if (choice === 'erase' && !plan.erase) return { done: false, failure: held };
   if (await refusedWrite(repo, what)) return { done: false };
   if (!(await isLeftover(deps, leftover))) return { done: false };
-  const now = await findPathHolder(repo, file.path);
-  if (!now || !sameRow(now, holder)) {
+  const now = await findCandidates(deps, file.path, leftover.id);
+  if (!samePlan(now, plan)) {
+    const which = target.by === 'id' ? 'holding its ID' : 'at its path';
     Obsidian.notify(
-      `Nothing was done to "${file.basename}": the ${holder.kind} at its path changed while you chose. Confirm again to see it as it is now.`,
+      `Nothing was done to "${file.basename}": the ${target.row.kind} ${which} changed while you chose. Confirm again to see it as it is now.`,
       { kind: 'error' }
     );
-    return now
-      ? { done: false, failure: { reason: 'held', holder: now } }
+    return hasCandidates(now)
+      ? { done: false, failure: failureOfPlan(now) }
       : { done: false };
   }
+  const holder = target.row;
   const table = TABLE_OF_KIND[holder.kind];
   if (choice === 'erase') {
     await conflicts.purge(table, holder.id);
     await adoptFresh(deps, file, as);
     return { done: true };
   }
-  await deps.articles.reassociateNote(file, table, holder.id);
+  if (target.by === 'id') {
+    // From where the row last had its note: the note's path, for one whose
+    // note came back to it
+    await deps.articles.reassociateNote(
+      file,
+      table,
+      holder.id,
+      target.row.reference
+    );
+  } else {
+    await deps.articles.reassociateNote(file, table, holder.id);
+  }
   // Nothing is ever taken from a card
   if (holder.kind !== 'card') {
     try {

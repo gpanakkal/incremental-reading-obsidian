@@ -1,10 +1,17 @@
+// @vitest-environment jsdom
+import * as UiWindow from '#/lib/ui-window';
 import * as ConfirmModalModule from '#/views/ConfirmModal';
 import fc from 'fast-check';
 import type { App, TFile } from 'obsidian';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { PathHolder as RowAtPath } from './crash-leftovers';
+import type {
+  MatchedRow,
+  Plan,
+  PathHolder as RowAtPath,
+} from './crash-leftovers';
 import {
   askToReassociate,
+  askToResolve,
   askToResolveHeld,
   type PathHolder,
 } from './reassociate-prompt';
@@ -271,5 +278,223 @@ describe('askToResolveHeld', () => {
         }
       )
     );
+  });
+});
+
+describe('askToResolve', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const file = { path: 'notes/new.md', basename: 'new' } as TFile;
+  const app = {} as App;
+
+  /** A row holding a note's id, pointing at the note's path or elsewhere. */
+  const matchedArb: fc.Arbitrary<MatchedRow> = fc
+    .tuple(
+      rowAtPathArb,
+      fc.oneof(fc.constant(file.path), fc.string({ minLength: 1 }))
+    )
+    .map(([row, reference]) => ({ ...row, reference }));
+
+  /**
+   * A plan offering no erase: the row holding the note's id, with a deleted
+   * row at its path moved aside or not; or the row at its path, while a row
+   * holding its id is refused; with any rows refused, either way.
+   */
+  const planArb: fc.Arbitrary<Plan> = fc.oneof(
+    fc.record({
+      target: matchedArb.map((row) => ({ by: 'id' as const, row })),
+      evicts: fc.option(rowAtPathArb, { nil: null }),
+      erase: fc.constant(false),
+      refused: fc.array(
+        fc.record({
+          row: matchedArb,
+          why: fc.constantFrom('copy' as const, 'held' as const),
+        }),
+        { maxLength: 2 }
+      ),
+    }),
+    fc.record({
+      target: rowAtPathArb.map((row) => ({ by: 'path' as const, row })),
+      evicts: fc.constant(null),
+      erase: fc.constant(false),
+      refused: fc.array(
+        fc.record({
+          row: matchedArb,
+          why: fc.constantFrom('copy' as const, 'held' as const),
+        }),
+        { minLength: 1, maxLength: 2 }
+      ),
+    })
+  );
+
+  it("asks once, showing the target row's details and where it is, the row moved aside and each row refused, and answers re-associate or nothing", async () => {
+    await fc.assert(
+      fc.asyncProperty(planArb, fc.boolean(), async (plan, confirmed) => {
+        vi.restoreAllMocks();
+        const confirm = vi
+          .spyOn(ConfirmModalModule, 'promptForConfirmation')
+          .mockResolvedValue(confirmed);
+        const choose = vi.spyOn(ConfirmModalModule, 'promptForChoice');
+
+        const answer = await askToResolve(app, file, plan, THIS_DEVICE);
+
+        expect(answer).toBe(confirmed ? 'reassociate' : null);
+        expect(choose).not.toHaveBeenCalled();
+        expect(confirm).toHaveBeenCalledOnce();
+        const [asked, options] = confirm.mock.calls[0];
+        expect(asked).toBe(app);
+        const text = options.paragraphs.flat().join('\n');
+        const { target } = plan;
+        expect(text).toContain(target!.row.id);
+        expect(options.title).toContain(target!.row.kind);
+        if (target!.by === 'id' && target!.row.reference !== file.path) {
+          expect(text).toContain(`"${target!.row.reference}"`);
+        } else if (target!.by === 'path') {
+          expect(text).toContain(`"${file.path}"`);
+        }
+        const evicted = plan.evicts?.id.slice(0, 8);
+        if (evicted) expect(text).toContain(evicted);
+        for (const { row } of plan.refused) {
+          expect(text).toContain(row.id.slice(0, 8));
+          expect(text).toContain(`"${row.reference}"`);
+        }
+      }),
+      { numRuns: 60 }
+    );
+  });
+
+  it('tells a deleted row from one whose note is missing, a copy from a held path, and the row at the path from the one holding its id', async () => {
+    const confirm = vi
+      .spyOn(ConfirmModalModule, 'promptForConfirmation')
+      .mockResolvedValue(false);
+    const row: MatchedRow = {
+      kind: 'snippet',
+      id: 'row-1234-abcd',
+      deleted: true,
+      dismissed: false,
+      due: null,
+      lastReview: null,
+      updatedAt: 0,
+      updatedBy: '',
+      parent: null,
+      reference: 'notes/old.md',
+    };
+    const paragraphsOf = async (plan: Plan) => {
+      confirm.mockClear();
+      await askToResolve(app, file, plan, THIS_DEVICE);
+      return confirm.mock.calls[0][1].paragraphs.map((p) =>
+        [p].flat().join('\n')
+      );
+    };
+    const byId = (r: MatchedRow): Plan => ({
+      target: { by: 'id', row: r },
+      evicts: null,
+      erase: false,
+      refused: [],
+    });
+    const refusing = (why: 'copy' | 'held'): Plan => ({
+      target: { by: 'path', row: { ...row, kind: 'article', id: 'art-0000' } },
+      evicts: null,
+      erase: false,
+      refused: [{ row, why }],
+    });
+
+    const deleted = await paragraphsOf(byId(row));
+    const missing = await paragraphsOf(byId({ ...row, deleted: false }));
+    const here = await paragraphsOf(byId({ ...row, reference: file.path }));
+    for (const paragraphs of [deleted, missing, here]) {
+      // Its kind where it is told what the row is, and what Re-associate does
+      expect(paragraphs[0]).toContain('snippet');
+      expect(paragraphs.at(-1)).toContain('snippet');
+    }
+    expect(deleted[0]).toContain('"notes/old.md"');
+    expect(missing[0]).toContain('"notes/old.md"');
+    expect(deleted[0]).not.toBe(missing[0]);
+    expect(deleted.at(-1)).not.toBe(missing.at(-1));
+    // One recorded at the note's own path names no other
+    expect(here[0]).not.toMatch(/"notes\//);
+    // A held path is the target's doing, which a copy's refusal never names
+    const refusalOf = async (why: 'copy' | 'held') =>
+      (await paragraphsOf(refusing(why))).find((p) =>
+        p.includes(row.id.slice(0, 8))
+      )!;
+    expect(await refusalOf('held')).toContain('article');
+    expect(await refusalOf('copy')).not.toContain('article');
+  });
+
+  it('asks as for the row at the path alone, offering to erase it, where the plan offers erasing', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        rowAtPathArb,
+        answersArb,
+        async (row, { choice, sure }) => {
+          const { ask } = wireChoice(choice, sure);
+          const plan: Plan = {
+            target: { by: 'path', row },
+            evicts: null,
+            erase: true,
+            refused: [],
+          };
+
+          const answer = await askToResolve(app, file, plan, THIS_DEVICE);
+          const asked = structuredClone(ask.mock.calls);
+          const held = wireChoice(choice, sure);
+          const alone = await askToResolveHeld(app, file, row, THIS_DEVICE);
+
+          expect(answer).toBe(alone);
+          expect(asked).toEqual(structuredClone(held.ask.mock.calls));
+          expect(asked).toHaveLength(1);
+        }
+      ),
+      { numRuns: 30 }
+    );
+  });
+
+  it('opens in the window the plugin answers from, not over a settings window behind it', async () => {
+    const openModal = vi.spyOn(UiWindow, 'openModal');
+    const row: MatchedRow = {
+      kind: 'snippet',
+      id: 'row-1234-abcd',
+      deleted: true,
+      dismissed: false,
+      due: null,
+      lastReview: null,
+      updatedAt: 0,
+      updatedBy: '',
+      parent: null,
+      reference: 'notes/old.md',
+    };
+
+    const answered = askToResolve(
+      app,
+      file,
+      { target: { by: 'id', row }, evicts: null, erase: false, refused: [] },
+      THIS_DEVICE
+    );
+
+    expect(openModal).toHaveBeenCalledOnce();
+    const [modal] = openModal.mock.calls[0];
+    expect(modal).toBeInstanceOf(ConfirmModalModule.ConfirmModal);
+    // As Escape or the close button closes it, which ends in `onClose`
+    modal.onClose();
+    await expect(answered).resolves.toBeNull();
+  });
+
+  it('answers nothing, asking nothing, when the plan offers no row', async () => {
+    const confirm = vi.spyOn(ConfirmModalModule, 'promptForConfirmation');
+    const choose = vi.spyOn(ConfirmModalModule, 'promptForChoice');
+
+    const answer = await askToResolve(
+      app,
+      file,
+      { target: null, evicts: null, erase: false, refused: [] },
+      THIS_DEVICE
+    );
+
+    expect(answer).toBeNull();
+    expect(confirm).not.toHaveBeenCalled();
+    expect(choose).not.toHaveBeenCalled();
   });
 });
