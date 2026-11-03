@@ -825,8 +825,8 @@ export default class IncrementalReadingPlugin extends Plugin {
         // A swapped-in database reports no change to any row, so the queue
         // would keep what it last read, a failed read included
         await queryClient.invalidateQueries({ queryKey: ['queue'] });
-        // A PDF is an article only by its row, and a swapped-in database
-        // reports no change to any row
+        // A PDF is an article only by its row, as is a note no tag types,
+        // and a swapped-in database reports no change to any row
         this.resyncLeafActionBars?.();
         // Nor does what is due
         this.reviewReminder?.refresh();

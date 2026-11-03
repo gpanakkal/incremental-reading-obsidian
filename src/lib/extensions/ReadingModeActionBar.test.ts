@@ -1,10 +1,16 @@
 // @vitest-environment jsdom
 import { ObsidianHelpers } from '#/lib/ObsidianHelpers';
-import { ARTICLE_TAG } from '#/lib/constants';
+import { ARTICLE_TAG, CARD_TAG } from '#/lib/constants';
 import * as ActionBarExtension from '#/lib/extensions/ActionBarExtension';
 import { ItemManager } from '#/lib/items/ItemManager';
 import * as ObsidianPdf from '#/lib/pdf/obsidian-pdf';
-import { insertItemAt, makeItemVault, TestRepository } from '#/test/item-vault';
+import {
+  insertItemAt,
+  makeItemVault,
+  TestRepository,
+  trackChangeListeners,
+} from '#/test/item-vault';
+import { applyRowWrite, rowWriteArb } from '#/test/row-writes';
 import ReviewView from '#/views/ReviewView';
 import fc from 'fast-check';
 import {
@@ -120,6 +126,9 @@ function makePlugin(leaves: Array<FakeLeaf | FakePdfLeaf> = []) {
       getItemType: vi.fn(
         async (_file: TFile): Promise<string | null> => 'article'
       ),
+      // With no rows, no note is typed by one
+      typingRowId: vi.fn((_file: TFile): string | null => null),
+      watchRow: vi.fn(() => () => {}),
     },
     repo: {
       onDataChange: vi.fn((listener: () => void) => {
@@ -189,9 +198,11 @@ async function wireItemNote(spec: {
   row: 'live' | 'deleted' | 'absent';
   atReference: boolean;
   frontmatter: Record<string, unknown>;
+  /** Other notes in the vault, by path, with their frontmatter. */
+  others?: Record<string, Record<string, unknown>>;
 }) {
   const path = spec.atReference ? ROW_REFERENCE : `copies/${ROW_REFERENCE}`;
-  const vault = makeItemVault({ [path]: spec.frontmatter });
+  const vault = makeItemVault({ ...spec.others, [path]: spec.frontmatter });
   const repo = await TestRepository.create();
   if (spec.row !== 'absent') {
     insertItemAt(repo, spec.table, {
@@ -202,19 +213,19 @@ async function wireItemNote(spec: {
   }
   const file = vault.files.get(path)!;
   const containerEl = makeContainerEl();
-  const plugin = makePlugin([makeMarkdownLeaf({ containerEl, file })]);
+  const leaf = makeMarkdownLeaf({ containerEl, file });
+  const plugin = makePlugin([leaf]);
   // The note reads as that vault has it, through the plugin's app too
   Object.assign(plugin.app, { vault: vault.app.vault });
-  Object.assign(plugin.reviewManager, {
-    articles: new ItemManager({ app: vault.app } as never, repo),
-  });
+  const manager = new ItemManager({ app: vault.app } as never, repo);
+  Object.assign(plugin.reviewManager, { articles: manager });
   /** Edit the note's frontmatter, as the cache then reports. */
   const editNote = async (edit: (fm: Record<string, unknown>) => void) => {
     await vault.app.fileManager.processFrontMatter(file, edit);
     plugin.emitMetadataChanged(file);
     await flush();
   };
-  return { plugin, containerEl, editNote };
+  return { plugin, containerEl, editNote, repo, manager, file, leaf, vault };
 }
 
 // #endregion
@@ -965,6 +976,19 @@ describe('registerReadingModeActionBar', () => {
 
       expect(lookedUp(plugin)).toEqual(pathsOf(note, pdf));
     });
+
+    it('tells the edit-mode bars to look again through the function it returns', () => {
+      const plugin = makePlugin([]);
+      const trigger = vi.spyOn(plugin.app.workspace, 'trigger');
+      const resync = registerReadingModeActionBar(plugin as never);
+      expect(trigger).not.toHaveBeenCalled();
+
+      resync();
+
+      expect(trigger).toHaveBeenCalledExactlyOnceWith(
+        ActionBarExtension.ROWS_RELOADED_EVENT
+      );
+    });
   });
 
   describe('notes whose metadata changes', () => {
@@ -1150,6 +1174,289 @@ describe('registerReadingModeActionBar', () => {
       await editNote((fm) => delete fm['ir-id']);
 
       expect(containerEl.children).toHaveLength(0);
+    });
+  });
+
+  describe('notes their rows alone type', () => {
+    /** The frontmatter of a note no tag types, claiming row `x`, afresh: edits change it. */
+    const untagged = () => ({ 'ir-id': 'x', tags: ['mine'] });
+    const tableArb = fc.constantFrom('article', 'snippet', 'srs_card' as const);
+
+    /** Tombstone row `x` of `table`, or bring it back, with no note edit. */
+    const flagRow = (repo: TestRepository, table: string, deleted: boolean) => {
+      repo.mutate(`UPDATE ${table} SET deleted = $1 WHERE id = 'x'`, [deleted]);
+    };
+
+    it("shows the bar exactly while the item layer types the note, tagged or not, the row's note or a copy of it, after any write to the database and no edit to the note", async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          tableArb,
+          fc.constantFrom('live', 'deleted', 'absent' as const),
+          fc.boolean(),
+          fc.boolean(),
+          rowWriteArb,
+          async (table, row, tagged, atReference, write) => {
+            const frontmatter = untagged();
+            if (tagged) frontmatter.tags = [ARTICLE_TAG];
+            const { plugin, containerEl, repo, manager, file } =
+              await wireItemNote({
+                table,
+                row,
+                atReference,
+                frontmatter,
+                // A copy's original, at the row's reference, claiming its id
+                others: atReference
+                  ? {}
+                  : { [ROW_REFERENCE]: { 'ir-id': 'x' } },
+              });
+            registerReadingModeActionBar(plugin as never);
+            await flush();
+            try {
+              applyRowWrite(repo, write, file.path);
+            } catch {
+              // A row the table already holds by id or path: nothing written
+              plugin.runCleanup();
+              return;
+            }
+            await flush();
+
+            const typed = (await manager.getItemType(file)) !== null;
+            expect(containerEl.children).toHaveLength(typed ? 1 : 0);
+            plugin.runCleanup();
+          }
+        ),
+        { numRuns: 100 }
+      );
+    }, 30_000);
+
+    it('takes the bar down when the row is deleted elsewhere, and puts it back once the row is back', async () => {
+      const { plugin, containerEl, repo } = await wireItemNote({
+        table: 'srs_card',
+        row: 'live',
+        atReference: true,
+        frontmatter: untagged(),
+      });
+      registerReadingModeActionBar(plugin as never);
+      await flush();
+      expect(containerEl.children).toHaveLength(1);
+
+      flagRow(repo, 'srs_card', true);
+      await flush();
+      expect(containerEl.children).toHaveLength(0);
+
+      flagRow(repo, 'srs_card', false);
+      await flush();
+      expect(containerEl.children).toHaveLength(1);
+    });
+
+    it('puts the bar on a tagged copy once the row its original holds is deleted, and takes it off once the row is back', async () => {
+      const { plugin, containerEl, repo } = await wireItemNote({
+        table: 'article',
+        row: 'live',
+        atReference: false,
+        frontmatter: { 'ir-id': 'x', tags: [ARTICLE_TAG] },
+        others: { [ROW_REFERENCE]: { 'ir-id': 'x' } },
+      });
+      registerReadingModeActionBar(plugin as never);
+      await flush();
+      expect(containerEl.children).toHaveLength(0);
+
+      flagRow(repo, 'article', true);
+      await flush();
+      expect(containerEl.children).toHaveLength(1);
+
+      flagRow(repo, 'article', false);
+      await flush();
+      expect(containerEl.children).toHaveLength(0);
+    });
+
+    it('watches the row of a note claiming an id, tagged or not, asking the database once per write naming it, and nothing for a note claiming none', async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          fc.constantFrom<unknown>(
+            [ARTICLE_TAG],
+            [CARD_TAG, 'mine'],
+            ['mine'],
+            undefined
+          ),
+          fc.constantFrom<unknown>('x', undefined, 7),
+          async (tags, irId) => {
+            const watchRow = vi.spyOn(ItemManager.prototype, 'watchRow');
+            watchRow.mockClear();
+            const frontmatter: Record<string, unknown> = {};
+            if (tags !== undefined) frontmatter.tags = tags;
+            if (irId !== undefined) frontmatter['ir-id'] = irId;
+            const { plugin, repo } = await wireItemNote({
+              table: 'article',
+              row: 'live',
+              atReference: true,
+              frontmatter,
+            });
+            registerReadingModeActionBar(plugin as never);
+            await flush();
+            const query = vi.spyOn(repo, 'query');
+            const claimsId = typeof irId === 'string';
+
+            flagRow(repo, 'article', true);
+            await flush();
+
+            expect(watchRow).toHaveBeenCalledTimes(claimsId ? 1 : 0);
+            expect(query).toHaveBeenCalledTimes(claimsId ? 1 : 0);
+            plugin.runCleanup();
+            watchRow.mockRestore();
+          }
+        ),
+        { numRuns: 24 }
+      );
+    });
+
+    it('asks the database once for writes reported together, however many name the row', async () => {
+      const { plugin, containerEl, repo } = await wireItemNote({
+        table: 'article',
+        row: 'live',
+        atReference: true,
+        frontmatter: untagged(),
+      });
+      registerReadingModeActionBar(plugin as never);
+      await flush();
+      const query = vi.spyOn(repo, 'query');
+
+      await repo.transaction(async () => {
+        repo.mutate("UPDATE article SET priority = 40 WHERE id = 'x'");
+        insertItemAt(repo, 'snippet', {
+          id: 'x',
+          reference: 'elsewhere/other.md',
+          deleted: false,
+        });
+        flagRow(repo, 'article', true);
+      });
+      await flush();
+
+      expect(query).toHaveBeenCalledOnce();
+      expect(containerEl.children).toHaveLength(0);
+    });
+
+    it('stops watching the row once the leaf closes, leaves reading mode or shows another note, or the plugin unloads', async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          fc.constantFrom(
+            'closed',
+            'edit mode',
+            'other note',
+            'unloaded' as const
+          ),
+          async (ending) => {
+            const { plugin, repo, leaf, vault } = await wireItemNote({
+              table: 'article',
+              row: 'live',
+              atReference: true,
+              frontmatter: untagged(),
+              others: { 'plain.md': { tags: ['mine'] } },
+            });
+            registerReadingModeActionBar(plugin as never);
+            await flush();
+            if (ending === 'closed') {
+              plugin._leaves.length = 0;
+              plugin.app.workspace.triggerLayoutChange();
+            } else if (ending === 'edit mode') {
+              leaf.view.getMode.mockReturnValue('source');
+              plugin.app.workspace.triggerLayoutChange();
+            } else if (ending === 'other note') {
+              leaf.view.file = vault.files.get('plain.md')!;
+              plugin.app.workspace.trigger('file-open');
+            } else {
+              plugin.runCleanup();
+            }
+            await flush();
+            const query = vi.spyOn(repo, 'query');
+            query.mockClear();
+
+            flagRow(repo, 'article', true);
+            await flush();
+
+            expect(query).not.toHaveBeenCalled();
+            plugin.runCleanup();
+            query.mockRestore();
+          }
+        ),
+        { numRuns: 8 }
+      );
+    });
+
+    it('holds one watch at most however often the leaf switches notes, and none once the plugin unloads', async () => {
+      /** Each note the leaf can show, and whether it claims an id. */
+      const notes: Record<string, boolean> = {
+        [ROW_REFERENCE]: true,
+        'same.md': true,
+        'other.md': true,
+        'tagged.md': true,
+        'plain.md': false,
+      };
+      await fc.assert(
+        fc.asyncProperty(
+          fc.array(fc.constantFrom(...Object.keys(notes)), {
+            minLength: 1,
+            maxLength: 12,
+          }),
+          async (paths) => {
+            const listeners = trackChangeListeners();
+            try {
+              const { plugin, repo, leaf, vault } = await wireItemNote({
+                table: 'article',
+                row: 'live',
+                atReference: true,
+                frontmatter: untagged(),
+                others: {
+                  'same.md': { 'ir-id': 'x' },
+                  'other.md': { 'ir-id': 'y', tags: ['mine'] },
+                  'tagged.md': { 'ir-id': 'z', tags: [ARTICLE_TAG] },
+                  'plain.md': { tags: ['mine'] },
+                },
+              });
+              registerReadingModeActionBar(plugin as never);
+              await flush();
+              for (const path of paths) {
+                leaf.view.file = vault.files.get(path)!;
+                plugin.app.workspace.trigger('file-open');
+                await flush();
+              }
+              const claimsId = notes[paths.at(-1)!];
+
+              expect(listeners.count(repo)).toBe(claimsId ? 1 : 0);
+              plugin.runCleanup();
+              expect(listeners.count(repo)).toBe(0);
+            } finally {
+              listeners.restore();
+            }
+          }
+        ),
+        { numRuns: 30 }
+      );
+    }, 30_000);
+
+    it('keeps one watch through re-checks that leave the note claiming the same row', async () => {
+      const watchRow = vi.spyOn(ItemManager.prototype, 'watchRow');
+      const listeners = trackChangeListeners();
+      const { plugin, editNote, repo } = await wireItemNote({
+        table: 'article',
+        row: 'live',
+        atReference: true,
+        frontmatter: untagged(),
+      });
+      registerReadingModeActionBar(plugin as never);
+      await flush();
+
+      await editNote((fm) => {
+        fm.extra = 1;
+      });
+      await editNote((fm) => {
+        fm.tags = [ARTICLE_TAG];
+      });
+      plugin.app.workspace.triggerLayoutChange();
+      await flush();
+
+      expect(watchRow).toHaveBeenCalledOnce();
+      expect(listeners.count(repo)).toBe(1);
     });
   });
 

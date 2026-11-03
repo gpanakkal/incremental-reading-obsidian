@@ -9,7 +9,10 @@ import {
   type View,
   type WorkspaceLeaf,
 } from 'obsidian';
-import { renderStandaloneActionBarDOM } from './ActionBarExtension';
+import {
+  renderStandaloneActionBarDOM,
+  ROWS_RELOADED_EVENT,
+} from './ActionBarExtension';
 
 /**
  * Whether `view` is Obsidian's built-in PDF tab, as the PDF adapter (the one
@@ -74,6 +77,12 @@ class LeafActionBarController {
    * dropped, so the last sync decides however the lookups interleave.
    */
   private latestSync: object | null = null;
+  /**
+   * The row the note the leaf shows claims, if it claims one, and how to stop
+   * watching it. A database write naming it can change what the note is with
+   * the note untouched, so each batch of them re-checks the leaf.
+   */
+  private followed: { id: string; stop: () => void } | null = null;
 
   constructor(
     private readonly leaf: WorkspaceLeaf,
@@ -84,6 +93,8 @@ class LeafActionBarController {
     const thisSync = {};
     this.latestSync = thisSync;
     const target = targetOf(this.leaf.view);
+    const items = this.plugin.reviewManager.articles;
+    this.follow(target && items.typingRowId(target.file));
     if (!target) {
       this.unmount();
       return;
@@ -93,7 +104,7 @@ class LeafActionBarController {
       // The item layer types a note by the row its `ir-id` names at its path
       // or else by its tags, a copy of an item's note as none, and a PDF by
       // the row at its path
-      type = await this.plugin.reviewManager.articles.getItemType(target.file);
+      type = await items.getItemType(target.file);
     } catch (error) {
       // A note whose frontmatter won't parse, say: no type, so no bar
       console.error(
@@ -107,7 +118,23 @@ class LeafActionBarController {
     else this.unmount();
   }
 
-  /** Whether the leaf shows a PDF, the only kind of view typed by its row. */
+  /**
+   * Watch row `id` (see `ItemManager.typingRowId`), or none for `null`,
+   * letting go of any other.
+   */
+  private follow(id: string | null): void {
+    if (this.followed?.id === id) return;
+    this.followed?.stop();
+    this.followed = null;
+    if (id === null) return;
+    const stop = this.plugin.reviewManager.articles.watchRow(
+      id,
+      () => void this.sync()
+    );
+    this.followed = { id, stop };
+  }
+
+  /** Whether the leaf shows a PDF, typed by the row at its path. */
   showsPdf(): boolean {
     return isPdfFileView(this.leaf.view);
   }
@@ -146,6 +173,7 @@ class LeafActionBarController {
   /** Removes the bar for good, and any lookup still pending with it. */
   dispose(): void {
     this.latestSync = null;
+    this.follow(null);
     this.unmount();
   }
 }
@@ -154,8 +182,13 @@ class LeafActionBarController {
  * Keeps a standalone action bar on every leaf showing an item outside review:
  * notes in reading mode, and PDFs that are articles.
  *
+ * A note claiming an id is what its row makes it, tags aside, and its leaf
+ * watches that row alone while it shows one (see `ItemManager.typingRowId`):
+ * a note claiming no id watches nothing.
+ *
  * @returns a function that re-checks every leaf, for a database swapped in
- * from disk, which replaces the rows without reporting any change to them
+ * from disk, which replaces the rows without reporting any change to them,
+ * and tells the edit-mode bars to look again too ({@link ROWS_RELOADED_EVENT})
  */
 export function registerReadingModeActionBar(
   plugin: IncrementalReadingPlugin
@@ -212,10 +245,8 @@ export function registerReadingModeActionBar(
   plugin.registerEvent(workspace.on('file-open', queueSyncAll));
   plugin.registerEvent(workspace.on('active-leaf-change', queueSyncAll));
   // A PDF is an article only by its row, which a rename or an import settles
-  // after the workspace events for it have fired. A note is re-checked by the
-  // cache hook below only: one typed by its tags keeps them through any
-  // database write, but one typed by its row alone (no type tag) misses a
-  // write that moves or tombstones that row until its next change.
+  // after the workspace events for it have fired. A note claiming an id
+  // watches that row from its controller.
   const unsubscribe = plugin.reviewManager.repo.onDataChange(() =>
     syncLeaves((ctrl) => ctrl.showsPdf())
   );
@@ -236,5 +267,9 @@ export function registerReadingModeActionBar(
     controllers.clear();
   });
   syncAll();
-  return syncAll;
+  return () => {
+    syncAll();
+    // Edit-mode bars are CodeMirror's, out of reach here: they hear it
+    workspace.trigger(ROWS_RELOADED_EVENT);
+  };
 }

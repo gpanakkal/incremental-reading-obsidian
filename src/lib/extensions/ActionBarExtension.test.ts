@@ -20,7 +20,13 @@ import type {
 } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';
 import { Notice, removeIcon } from '#/test/__mocks__/obsidian';
-import { insertItemAt, makeItemVault, TestRepository } from '#/test/item-vault';
+import {
+  insertItemAt,
+  makeItemVault,
+  TestRepository,
+  trackChangeListeners,
+} from '#/test/item-vault';
+import { applyRowWrite, rowWriteArb } from '#/test/row-writes';
 import {
   showSuccessNotices,
   SUCCESS_NOTICE_LEVELS,
@@ -37,6 +43,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   actionBarExtension,
   renderStandaloneActionBarDOM,
+  ROWS_RELOADED_EVENT,
   setReviewCallbacks,
   setReviewModeEffect,
   setShowAnswerEffect,
@@ -235,9 +242,27 @@ function mountPanel(
     options.items?.vault.files ?? new Map<string, TFile>([[file.path, file]]);
   // Over a real item layer, the note reads as that vault has it
   const itemApp = options.items?.vault.app;
+  /** The workspace events listened for, by name. */
+  const workspaceListeners = new Map<string, Set<() => void>>();
   const app = {
     ...itemApp,
     isMobile: false,
+    workspace: {
+      on: vi.fn((name: string, listener: () => void) => {
+        const named = workspaceListeners.get(name) ?? new Set();
+        named.add(listener);
+        workspaceListeners.set(name, named);
+        return { name, listener };
+      }),
+      offref: vi.fn((ref: { name: string; listener: () => void }) => {
+        workspaceListeners.get(ref.name)?.delete(ref.listener);
+      }),
+      trigger: (name: string) => {
+        for (const listener of [...(workspaceListeners.get(name) ?? [])]) {
+          listener();
+        }
+      },
+    },
     vault: itemApp?.vault ?? {
       getFileByPath: (path: string) => vaultFiles.get(path) ?? null,
     },
@@ -268,6 +293,8 @@ function mountPanel(
     getItemType: vi.fn(options.noteType ?? (async () => 'article' as const)),
     itemTypeFromCache: (changed: TFile, cache: CachedMetadata | null) =>
       Obsidian.noteTypeFromCache(changed, cache, app as never),
+    // With no rows, no note is typed by one
+    typingRowId: () => null,
   };
   Object.assign(harness.reviewManager, { articles });
 
@@ -307,6 +334,9 @@ function mountPanel(
       info = { file: other, app } as unknown as MarkdownFileInfo;
       view?.dispatch({ changes: { from: 0, insert: ' ' } });
     },
+    /** How many listeners the workspace event `name` has. */
+    workspaceListenerCount: (name: string) =>
+      workspaceListeners.get(name)?.size ?? 0,
     /** Take the open file out of the vault, as a delete does. */
     dropFromVault: () => vaultFiles.delete(file.path),
     /** The bar on screen, if any. */
@@ -338,9 +368,11 @@ async function wireItemNote(spec: {
   row: 'live' | 'deleted' | 'absent';
   atReference: boolean;
   frontmatter: Record<string, unknown>;
+  /** Other notes in the vault, by path, with their frontmatter. */
+  others?: Record<string, Record<string, unknown>>;
 }) {
   const path = spec.atReference ? ROW_REFERENCE : `copies/${ROW_REFERENCE}`;
-  const vault = makeItemVault({ [path]: spec.frontmatter });
+  const vault = makeItemVault({ ...spec.others, [path]: spec.frontmatter });
   const repo = await TestRepository.create();
   if (spec.row !== 'absent') {
     insertItemAt(repo, spec.table, {
@@ -360,7 +392,7 @@ async function wireItemNote(spec: {
       vault.app.metadataCache.getFileCache(panel.file)?.frontmatter
     );
   };
-  return { panel, repo, editNote };
+  return { panel, repo, manager, vault, editNote };
 }
 
 /**
@@ -1266,6 +1298,356 @@ describe('the edit-mode bar on a note that lost its type tag', () => {
     await tick();
 
     expect(panel.hasBar()).toBe(true);
+  });
+});
+
+describe('the edit-mode bar on a note its row alone types', () => {
+  /** The frontmatter of a note no tag types, claiming row `x`, afresh: edits change it. */
+  const untagged = () => ({ 'ir-id': 'x', tags: ['mine'] });
+  const tableArb = fc.constantFrom('article', 'snippet', 'srs_card' as const);
+
+  /** Tombstone row `x` of `table`, or bring it back, with no note edit. */
+  const flagRow = (repo: TestRepository, table: string, deleted: boolean) => {
+    repo.mutate(`UPDATE ${table} SET deleted = $1 WHERE id = 'x'`, [deleted]);
+  };
+
+  it("shows the bar exactly while the item layer types the note, tagged or not, the row's note or a copy of it, after any write to the database and no edit to the note", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        tableArb,
+        fc.constantFrom('live', 'deleted', 'absent' as const),
+        fc.boolean(),
+        fc.boolean(),
+        rowWriteArb,
+        async (table, row, tagged, atReference, write) => {
+          const frontmatter = untagged();
+          if (tagged) frontmatter.tags = [ARTICLE_TAG];
+          const { panel, repo, manager } = await wireItemNote({
+            table,
+            row,
+            atReference,
+            frontmatter,
+            // A copy's original, at the row's reference, claiming its id
+            others: atReference ? {} : { [ROW_REFERENCE]: { 'ir-id': 'x' } },
+          });
+          await tick();
+          try {
+            applyRowWrite(repo, write, panel.file.path);
+          } catch {
+            // A row the table already holds by id or path: nothing written
+            panel.view.destroy();
+            return;
+          }
+          await tick();
+
+          const typed = (await manager.getItemType(panel.file)) !== null;
+          expect(panel.hasBar()).toBe(typed);
+          panel.view.destroy();
+        }
+      ),
+      { numRuns: 100 }
+    );
+  });
+
+  it('takes the bar off when the row is deleted elsewhere, and puts it back once the row is back', async () => {
+    const { panel, repo } = await wireItemNote({
+      table: 'snippet',
+      row: 'live',
+      atReference: true,
+      frontmatter: untagged(),
+    });
+    await tick();
+    expect(panel.hasBar()).toBe(true);
+
+    flagRow(repo, 'snippet', true);
+    await tick();
+    expect(panel.hasBar()).toBe(false);
+
+    flagRow(repo, 'snippet', false);
+    await tick();
+    expect(panel.hasBar()).toBe(true);
+  });
+
+  it('puts the bar on a tagged copy once the row its original holds is deleted, and takes it off once the row is back', async () => {
+    const { panel, repo } = await wireItemNote({
+      table: 'article',
+      row: 'live',
+      atReference: false,
+      frontmatter: { 'ir-id': 'x', tags: [ARTICLE_TAG] },
+      others: { [ROW_REFERENCE]: { 'ir-id': 'x' } },
+    });
+    await tick();
+    expect(panel.hasBar()).toBe(false);
+
+    flagRow(repo, 'article', true);
+    await tick();
+    expect(panel.hasBar()).toBe(true);
+
+    flagRow(repo, 'article', false);
+    await tick();
+    expect(panel.hasBar()).toBe(false);
+  });
+
+  it('watches the row of a note claiming an id, tagged or not, asking the database once per write naming it, and nothing for a note claiming none', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom<unknown>(
+          [ARTICLE_TAG],
+          [CARD_TAG, 'mine'],
+          ['mine'],
+          undefined
+        ),
+        fc.constantFrom<unknown>('x', undefined, 7),
+        async (tags, irId) => {
+          const watchRow = vi.spyOn(ItemManager.prototype, 'watchRow');
+          watchRow.mockClear();
+          const frontmatter: Record<string, unknown> = {};
+          if (tags !== undefined) frontmatter.tags = tags;
+          if (irId !== undefined) frontmatter['ir-id'] = irId;
+          const { panel, repo } = await wireItemNote({
+            table: 'article',
+            row: 'live',
+            atReference: true,
+            frontmatter,
+          });
+          await tick();
+          const query = vi.spyOn(repo, 'query');
+          const claimsId = typeof irId === 'string';
+
+          flagRow(repo, 'article', true);
+          await tick();
+
+          expect(watchRow).toHaveBeenCalledTimes(claimsId ? 1 : 0);
+          expect(query).toHaveBeenCalledTimes(claimsId ? 1 : 0);
+          expect(panel.workspaceListenerCount(ROWS_RELOADED_EVENT)).toBe(
+            claimsId ? 1 : 0
+          );
+          panel.view.destroy();
+          watchRow.mockRestore();
+        }
+      ),
+      { numRuns: 24 }
+    );
+  });
+
+  it('asks the database once for writes reported together, however many name the row', async () => {
+    const { panel, repo } = await wireItemNote({
+      table: 'article',
+      row: 'live',
+      atReference: true,
+      frontmatter: untagged(),
+    });
+    await tick();
+    const query = vi.spyOn(repo, 'query');
+
+    await repo.transaction(async () => {
+      repo.mutate("UPDATE article SET priority = 40 WHERE id = 'x'");
+      insertItemAt(repo, 'snippet', {
+        id: 'x',
+        reference: 'elsewhere/other.md',
+        deleted: false,
+      });
+      flagRow(repo, 'article', true);
+    });
+    await tick();
+
+    expect(query).toHaveBeenCalledOnce();
+    expect(panel.hasBar()).toBe(false);
+  });
+
+  it('keeps the bar it has while a slower database answers a write, then shows its answer', async () => {
+    const { panel, repo } = await wireItemNote({
+      table: 'article',
+      row: 'live',
+      atReference: true,
+      frontmatter: untagged(),
+    });
+    await tick();
+    const answer = repo.deferReads();
+
+    flagRow(repo, 'article', true);
+    await tick();
+    expect(panel.hasBar()).toBe(true);
+
+    answer();
+    await tick();
+    expect(panel.hasBar()).toBe(false);
+  });
+
+  it("drops a slower database's answer to a write once a change to the note answers after it", async () => {
+    const { panel, repo, editNote } = await wireItemNote({
+      table: 'article',
+      row: 'live',
+      atReference: true,
+      frontmatter: untagged(),
+    });
+    await tick();
+    const answer = repo.deferReads();
+
+    // Asks the database, which will say the tombstone holds no note
+    flagRow(repo, 'article', true);
+    await tick();
+    // Answered at once by the tag put on
+    await editNote((fm) => {
+      fm.tags = [ARTICLE_TAG];
+    });
+    answer();
+    await tick();
+
+    expect(panel.hasBar()).toBe(true);
+  });
+
+  it('stops watching the row once the note lets go of its id, gives way to another note, or the editor goes away', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom('no id', 'other note', 'gone' as const),
+        async (ending) => {
+          const { panel, repo, editNote, vault } = await wireItemNote({
+            table: 'article',
+            row: 'live',
+            atReference: true,
+            frontmatter: untagged(),
+            others: { 'plain.md': { tags: ['mine'] } },
+          });
+          await tick();
+          if (ending === 'no id') {
+            await editNote((fm) => delete fm['ir-id']);
+          } else if (ending === 'other note') {
+            panel.switchTo(vault.files.get('plain.md')!);
+          } else {
+            panel.view.destroy();
+          }
+          await tick();
+          const query = vi.spyOn(repo, 'query');
+          query.mockClear();
+
+          flagRow(repo, 'article', true);
+          panel.app.workspace.trigger(ROWS_RELOADED_EVENT);
+          await tick();
+
+          expect(query).not.toHaveBeenCalled();
+          expect(panel.workspaceListenerCount(ROWS_RELOADED_EVENT)).toBe(0);
+          panel.view.destroy();
+          query.mockRestore();
+        }
+      ),
+      { numRuns: 6 }
+    );
+  });
+
+  it('holds one watch at most however often the editor switches notes, and none once it goes away', async () => {
+    /** Each note the editor can show, and whether it claims an id. */
+    const notes: Record<string, boolean> = {
+      [ROW_REFERENCE]: true,
+      'same.md': true,
+      'other.md': true,
+      'tagged.md': true,
+      'plain.md': false,
+    };
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(fc.constantFrom(...Object.keys(notes)), {
+          minLength: 1,
+          maxLength: 12,
+        }),
+        async (paths) => {
+          const listeners = trackChangeListeners();
+          try {
+            const { panel, repo, vault } = await wireItemNote({
+              table: 'article',
+              row: 'live',
+              atReference: true,
+              frontmatter: untagged(),
+              others: {
+                'same.md': { 'ir-id': 'x' },
+                'other.md': { 'ir-id': 'y', tags: ['mine'] },
+                'tagged.md': { 'ir-id': 'z', tags: [ARTICLE_TAG] },
+                'plain.md': { tags: ['mine'] },
+              },
+            });
+            await tick();
+            for (const path of paths) {
+              panel.switchTo(vault.files.get(path)!);
+              await tick();
+            }
+            const claimsId = notes[paths.at(-1)!];
+
+            expect(listeners.count(repo)).toBe(claimsId ? 1 : 0);
+            expect(panel.workspaceListenerCount(ROWS_RELOADED_EVENT)).toBe(
+              claimsId ? 1 : 0
+            );
+            panel.view.destroy();
+            expect(listeners.count(repo)).toBe(0);
+            expect(panel.workspaceListenerCount(ROWS_RELOADED_EVENT)).toBe(0);
+          } finally {
+            listeners.restore();
+          }
+        }
+      ),
+      { numRuns: 30 }
+    );
+  });
+
+  it('keeps one watch through edits that leave the note claiming the same row', async () => {
+    const watchRow = vi.spyOn(ItemManager.prototype, 'watchRow');
+    const { panel, editNote } = await wireItemNote({
+      table: 'article',
+      row: 'live',
+      atReference: true,
+      frontmatter: untagged(),
+    });
+    await tick();
+
+    await editNote((fm) => {
+      fm.extra = 1;
+    });
+    await editNote((fm) => {
+      fm.tags = ['other'];
+    });
+    await editNote((fm) => {
+      fm.tags = [ARTICLE_TAG];
+    });
+
+    expect(watchRow).toHaveBeenCalledOnce();
+    expect(panel.workspaceListenerCount(ROWS_RELOADED_EVENT)).toBe(1);
+  });
+
+  it('follows the row a changed ir-id names instead', async () => {
+    const { panel, repo, editNote } = await wireItemNote({
+      table: 'article',
+      row: 'live',
+      atReference: true,
+      frontmatter: untagged(),
+    });
+    await tick();
+
+    await editNote((fm) => {
+      fm['ir-id'] = 'y';
+    });
+    await tick();
+    expect(panel.hasBar()).toBe(false);
+    repo.mutate("UPDATE article SET id = 'y' WHERE id = 'x'");
+    await tick();
+
+    expect(panel.hasBar()).toBe(true);
+  });
+
+  it('looks again once a database is swapped in from disk, which reports no write', async () => {
+    const { panel, repo } = await wireItemNote({
+      table: 'article',
+      row: 'live',
+      atReference: true,
+      frontmatter: untagged(),
+    });
+    await tick();
+
+    await repo.takeIn("UPDATE article SET deleted = TRUE WHERE id = 'x'");
+    await tick();
+    expect(panel.hasBar()).toBe(true);
+
+    panel.app.workspace.trigger(ROWS_RELOADED_EVENT);
+    await tick();
+    expect(panel.hasBar()).toBe(false);
   });
 });
 

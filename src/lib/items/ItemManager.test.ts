@@ -9,13 +9,21 @@ import {
 import IRScheduler from '#/lib/IRScheduler';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import { refusalReason } from '#/lib/readiness';
-import type { IArticleBase, NoteType, SQLiteRepository } from '#/lib/types';
+import type {
+  DataChangeEvent,
+  DataChangeListener,
+  DataChangeOp,
+  IArticleBase,
+  NoteType,
+  SQLiteRepository,
+} from '#/lib/types';
 import {
   insertItemAt,
   makeItemVault,
   runOutMergeWait,
   TestRepository,
 } from '#/test/item-vault';
+import { applyRowWrite, rowWriteArb } from '#/test/row-writes';
 import fc from 'fast-check';
 import type { CachedMetadata, TFile } from 'obsidian';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -358,6 +366,40 @@ async function wireDelete(row: ItemRowCase, confirm = true) {
   };
 }
 
+/**
+ * A repository that reports only the changes a test emits, all at once as
+ * one write's are.
+ */
+function makeChangingRepo() {
+  const listeners = new Set<DataChangeListener>();
+  const repo = {
+    onDataChange: vi.fn((listener: DataChangeListener) => {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    }),
+  } as unknown as SQLiteRepository;
+  const manager = new ItemManager({ app: {} } as never, repo);
+  /** Report the changes `events` name, back to back. */
+  const emit = (events: readonly DataChangeEvent[]) => {
+    for (const event of events) {
+      for (const listener of [...listeners]) listener(event);
+    }
+  };
+  return { manager, emit, listenerCount: () => listeners.size };
+}
+
+/** One change event, naming `ids`. */
+const changeArb = fc.record({
+  table: fc.constantFrom<NoteType>('article', 'snippet', 'card'),
+  op: fc.constantFrom<DataChangeOp>('insert', 'update', 'delete'),
+  ids: fc.array(fc.constantFrom('x', 'y', 'z'), { maxLength: 4 }),
+});
+
+/** Lets every queued microtask run. */
+const settled = () => new Promise((resolve) => setTimeout(resolve, 0));
+
 // #endregion
 
 describe('reconcileNote', () => {
@@ -690,6 +732,171 @@ describe('getItemType', () => {
       }),
       { numRuns: 100 }
     );
+  });
+});
+
+describe('typingRowId', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('names the ir-id of a note claiming one, tagged or not, and nothing for one claiming no id, reading no row', async () => {
+    await fc.assert(
+      fc.asyncProperty(noteCaseArb, async (note) => {
+        const { manager, file, repo } = await wireNote(note);
+        const query = vi.spyOn(repo, 'query');
+
+        expect(manager.typingRowId(file)).toBe(
+          typeof note.irId === 'string' ? note.irId : null
+        );
+        expect(query).not.toHaveBeenCalled();
+      }),
+      { numRuns: 60 }
+    );
+  });
+
+  it('reads the parse it is handed rather than the one the cache holds', async () => {
+    const { manager, file } = await wireNote({
+      table: 'article',
+      row: 'live',
+      atReference: true,
+      tag: null,
+      irId: 'x',
+      original: 'none',
+    });
+
+    expect(manager.typingRowId(file, { frontmatter: { 'ir-id': 'y' } })).toBe(
+      'y'
+    );
+    expect(
+      manager.typingRowId(file, {
+        frontmatter: { 'ir-id': 'z', tags: [ARTICLE_TAG] },
+      })
+    ).toBe('z');
+    expect(manager.typingRowId(file, { frontmatter: {} })).toBeNull();
+    expect(manager.typingRowId(file, null)).toBeNull();
+  });
+
+  it("names a row every write that changes the note's type names", async () => {
+    /**
+     * {@link noteCaseArb} weighted towards notes a write can retype: untagged,
+     * claiming `x` or `y`, which otherwise make too few of its cases for any
+     * write to reach the assertion.
+     */
+    const retypableArb = fc.record({
+      table: fc.constantFrom('article', 'snippet', 'srs_card' as const),
+      row: fc.constantFrom('live', 'deleted', 'absent' as const),
+      atReference: fc.boolean(),
+      tag: fc.option(typeArb, { nil: null, freq: 1 }),
+      irId: fc.oneof(
+        { weight: 4, arbitrary: fc.constantFrom<unknown>('x', 'y') },
+        { weight: 1, arbitrary: fc.constantFrom<unknown>(undefined, 7, null) }
+      ),
+      original: fc.constantFrom('claims', 'other', 'none' as const),
+    });
+    let retyped = 0;
+    await fc.assert(
+      fc.asyncProperty(retypableArb, rowWriteArb, async (note, write) => {
+        const { manager, file, repo } = await wireNote(note);
+        const before = await manager.getItemType(file);
+        const named = new Set<string>();
+        repo.onDataChange(({ ids }) => ids.forEach((id) => named.add(id)));
+        try {
+          applyRowWrite(repo, write, file.path);
+        } catch {
+          // A row the table already holds by id or path: nothing written
+          return;
+        }
+
+        if ((await manager.getItemType(file)) === before) return;
+        retyped++;
+        const id = manager.typingRowId(file);
+        expect(id).not.toBeNull();
+        expect(named.has(id!)).toBe(true);
+      }),
+      { numRuns: 200 }
+    );
+    // Not vacuous: some writes did retype the note
+    expect(retyped).toBeGreaterThan(0);
+  });
+});
+
+describe('watchRow', () => {
+  it('calls back once for changes reported together that name the row, and never for ones that do not', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(changeArb, { maxLength: 6 }),
+        async (events) => {
+          const { manager, emit } = makeChangingRepo();
+          const onWrite = vi.fn();
+          manager.watchRow('x', onWrite);
+
+          emit(events);
+          await settled();
+
+          const names = events.some(({ ids }) => ids.includes('x'));
+          expect(onWrite).toHaveBeenCalledTimes(names ? 1 : 0);
+        }
+      )
+    );
+  });
+
+  it('calls back again for a later write naming the row', async () => {
+    const { manager, emit } = makeChangingRepo();
+    const onWrite = vi.fn();
+    manager.watchRow('x', onWrite);
+    const change: DataChangeEvent = {
+      table: 'article',
+      op: 'update',
+      ids: ['x'],
+    };
+
+    emit([change, change]);
+    await settled();
+    emit([change]);
+    await settled();
+
+    expect(onWrite).toHaveBeenCalledTimes(2);
+  });
+
+  it('stops calling back once stopped, one already queued included, and lets go of the repository', async () => {
+    const { manager, emit, listenerCount } = makeChangingRepo();
+    const onWrite = vi.fn();
+    const stop = manager.watchRow('x', onWrite);
+    expect(listenerCount()).toBe(1);
+
+    emit([{ table: 'snippet', op: 'insert', ids: ['x'] }]);
+    stop();
+    await settled();
+    emit([{ table: 'snippet', op: 'update', ids: ['x'] }]);
+    await settled();
+
+    expect(onWrite).not.toHaveBeenCalled();
+    expect(listenerCount()).toBe(0);
+  });
+
+  it('calls back once for a transaction writing the row in two tables', async () => {
+    const repo = await TestRepository.create();
+    insertItemAt(repo, 'article', {
+      id: 'x',
+      reference: 'a.md',
+      deleted: false,
+    });
+    const manager = new ItemManager({ app: {} } as never, repo);
+    const onWrite = vi.fn();
+    manager.watchRow('x', onWrite);
+
+    await repo.transaction(async () => {
+      repo.mutate('UPDATE article SET deleted = TRUE WHERE id = $1', ['x']);
+      insertItemAt(repo, 'snippet', {
+        id: 'x',
+        reference: 'b.md',
+        deleted: false,
+      });
+    });
+    await settled();
+
+    expect(onWrite).toHaveBeenCalledTimes(1);
   });
 });
 

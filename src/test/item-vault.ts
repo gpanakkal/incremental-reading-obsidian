@@ -2,7 +2,12 @@ import { NOT_PURGED } from '#/lib/items/row-delete';
 import { MERGE_WAIT_MS } from '#/lib/readiness';
 import { disarmRowStamps, SYNCED_TABLES } from '#/lib/repository/row-stamps';
 import { SQLJSRepository } from '#/lib/repository/SQLJSRepository';
-import type { Readiness, RowTypes, SQLiteRepository } from '#/lib/types';
+import type {
+  DataChangeListener,
+  Readiness,
+  RowTypes,
+  SQLiteRepository,
+} from '#/lib/types';
 import type { Primitive } from '#/lib/utility-types';
 import { readFileSync } from 'fs';
 import type { App, TFile } from 'obsidian';
@@ -84,6 +89,22 @@ export class TestRepository extends SQLJSRepository {
     } finally {
       this.registerUpdateHook();
     }
+  }
+
+  /**
+   * Swap in a copy of the database that `query` changed, as taking in a file
+   * another device wrote does: the rows are other, and no change to any of
+   * them is reported.
+   */
+  async takeIn(query: string) {
+    const { SQL } = await getEmptyDb();
+    const old = this.db!;
+    const next = new SQL.Database(old.export());
+    old.close();
+    next.run(query);
+    this.db = next;
+    next.exec('PRAGMA foreign_keys = ON');
+    this.registerUpdateHook();
   }
 
   /** Refuse writes, as a changed file on disk that won't load does. */
@@ -208,6 +229,41 @@ export class TestRepository extends SQLJSRepository {
   }
 
   protected override async save() {}
+}
+
+/**
+ * Count the data-change listeners each repository holds that subscribe from
+ * now on (any subscribed before the call go unseen), so a test can tell a
+ * watch let go of from one left behind.
+ * @returns how many such listeners `repo` holds, and a way to stop counting
+ */
+export function trackChangeListeners() {
+  const live = new Map<object, number>();
+  const original: unknown = Reflect.get(
+    SQLJSRepository.prototype,
+    'onDataChange'
+  );
+  const subscribe = (repo: SQLJSRepository, listener: DataChangeListener) =>
+    Reflect.apply(original as () => void, repo, [listener]) as () => void;
+  const spy = vi
+    .spyOn(SQLJSRepository.prototype, 'onDataChange')
+    .mockImplementation(function (
+      this: SQLJSRepository,
+      listener: DataChangeListener
+    ) {
+      live.set(this, (live.get(this) ?? 0) + 1);
+      const unsubscribe = subscribe(this, listener);
+      let subscribed = true;
+      return () => {
+        if (subscribed) live.set(this, (live.get(this) ?? 0) - 1);
+        subscribed = false;
+        unsubscribe();
+      };
+    });
+  return {
+    count: (repo: SQLJSRepository) => live.get(repo) ?? 0,
+    restore: () => spy.mockRestore(),
+  };
 }
 
 /**

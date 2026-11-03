@@ -10,6 +10,15 @@ declare module 'obsidian' {
       ) => unknown,
       ctx?: unknown
     ): EventRef;
+    /**
+     * Raised once a database swapped in from disk is taken in
+     * (`ROWS_RELOADED_EVENT`).
+     */
+    on(
+      name: 'ir-rows-reloaded',
+      callback: () => unknown,
+      ctx?: unknown
+    ): EventRef;
   }
 
   /**

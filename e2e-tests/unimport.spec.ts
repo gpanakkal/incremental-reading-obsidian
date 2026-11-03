@@ -50,6 +50,7 @@ type PageApp = {
             query(
               sql: string
             ): Record<string, unknown>[] | Promise<Record<string, unknown>[]>;
+            mutate(sql: string, params: unknown[]): unknown;
           };
         };
         autoImportWatcher: { flushNow(): Promise<void> };
@@ -112,6 +113,9 @@ const propertyKeys = () =>
 /** The edit-mode action bar on the note's tab. */
 const actionBar = () =>
   window.locator('.mod-root .markdown-source-view .ir-action-bar-panel');
+
+/** The reading-mode action bar on the note's tab. */
+const readingBar = () => window.locator('.mod-root .ir-reading-mode-bar');
 
 /** The pills of the tags property the note's tab shows. */
 const tagPills = () =>
@@ -212,6 +216,51 @@ async function unimportFromQueueRow() {
   await expect(menu).toHaveCount(0);
 }
 
+/**
+ * Tombstone the note's article row, or bring it back, straight in the
+ * database, as a merge of another device's delete or undo would: the note is
+ * left as it is.
+ */
+async function flagArticleRow(deleted: boolean) {
+  const id = await cachedIrId();
+  await window.evaluate(
+    async ({ id, deleted }) => {
+      const { app } = window as unknown as { app: PageApp };
+      const { repo } = app.plugins.plugins['incremental-reading'].reviewManager;
+      await repo.mutate('UPDATE article SET deleted = $1 WHERE id = $2', [
+        deleted,
+        id,
+      ]);
+    },
+    { id, deleted }
+  );
+}
+
+/** Set the note's tags to `tags`, as the user's own edit would. */
+const setTags = (tags: string[]) =>
+  window.evaluate(
+    async ({ notePath, tags }) => {
+      const { app } = window as unknown as {
+        app: {
+          vault: { getFileByPath(path: string): unknown };
+          fileManager: {
+            processFrontMatter(
+              file: unknown,
+              fn: (frontmatter: Record<string, unknown>) => void
+            ): Promise<void>;
+          };
+        };
+      };
+      await app.fileManager.processFrontMatter(
+        app.vault.getFileByPath(notePath),
+        (frontmatter) => {
+          frontmatter.tags = tags;
+        }
+      );
+    },
+    { notePath: NOTE, tags }
+  );
+
 /** Import the note, then open the review tab's queue, showing its row. */
 async function importAndOpenQueue() {
   await importFromFiles();
@@ -244,6 +293,44 @@ test('un-imports an article from its menu in Files, leaving a plain note with it
   const titles = await menuTitles(fileRow());
   expect(titles).toContain('Import article');
   expect(titles).not.toContain('Un-import article');
+});
+
+test('puts the bar on an article open in reading view as it is imported, and takes it off as it is un-imported, without reopening it', async () => {
+  await openNote(window, NOTE);
+  await executeCommandById(window, 'markdown:toggle-preview');
+  await expect(
+    window.locator('.mod-root .markdown-reading-view')
+  ).toBeVisible();
+  await expect(readingBar()).toHaveCount(0);
+
+  await chooseFromMenu(fileRow(), 'Import article');
+  await finalizeArticleImport(window);
+  await expect(readingBar()).toBeVisible();
+
+  await chooseFromMenu(fileRow(), 'Un-import article');
+  await answer('Un-import');
+  await expect(readingBar()).toHaveCount(0);
+});
+
+test('takes the bar off a note no tag types while its row is deleted elsewhere, and puts it back with the row, in live preview and in reading view', async () => {
+  await importFromFiles();
+  // Its type tag taken off by hand: its row still holds it, by its ir-id
+  await setTags(['keep-me']);
+  await expect(tagPills()).toHaveText(['keep-me']);
+  await expect(actionBar()).toBeVisible();
+
+  await flagArticleRow(true);
+  await expect(actionBar()).toHaveCount(0);
+  await flagArticleRow(false);
+  await expect(actionBar()).toBeVisible();
+
+  await openNote(window, NOTE);
+  await executeCommandById(window, 'markdown:toggle-preview');
+  await expect(readingBar()).toBeVisible();
+  await flagArticleRow(true);
+  await expect(readingBar()).toHaveCount(0);
+  await flagArticleRow(false);
+  await expect(readingBar()).toBeVisible();
 });
 
 test('leaves the article as it was when the un-import is turned down', async () => {

@@ -196,6 +196,46 @@ export class ItemManager {
   }
 
   /**
+   * The `ir-id` note `file` claims, by `cache`, its metadata-cache parse: the
+   * row whose writes can change what the note is with the note untouched (see
+   * {@link getItemType}), and the only one. A note no tag types is what that
+   * row makes it. One its tags type is named too: that row decides whether
+   * it is the row's note or a copy of it. `null` for a note claiming no id,
+   * whose type no database write changes. Reads no row.
+   */
+  typingRowId(
+    file: TFile,
+    cache: CachedMetadata | null = this.app.metadataCache.getFileCache(file)
+  ): string | null {
+    const id: unknown = cache?.frontmatter?.['ir-id'];
+    return typeof id === 'string' ? id : null;
+  }
+
+  /**
+   * Call `onWrite` once database writes naming row `id` have landed: once
+   * for the writes the repository reports together, as it reports a merge's
+   * (each table and kind of write an event of its own, back to back), however
+   * many of them name it.
+   * @returns a function that stops the calls, one already due included
+   */
+  watchRow(id: string, onWrite: () => void): () => void {
+    let watching = true;
+    let due = false;
+    const unsubscribe = this.repo.onDataChange(({ ids }) => {
+      if (due || !ids.includes(id)) return;
+      due = true;
+      queueMicrotask(() => {
+        due = false;
+        if (watching) onWrite();
+      });
+    });
+    return () => {
+      watching = false;
+      unsubscribe();
+    };
+  }
+
+  /**
    * The type of note `file`, whose parse is `cache`, given `tagged`, the type
    * its tags name (see {@link getItemType}): the live row's whose id is the
    * `ir-id` in `cache` and whose `reference` is `file`'s path, `tagged` before

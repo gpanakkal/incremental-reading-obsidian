@@ -55,6 +55,14 @@ export const setReviewCallbacks = StateEffect.define<ReviewCallbacks>();
 const setNoteTypeEffect = StateEffect.define<NoteType | null>();
 
 /**
+ * The workspace event raised once a database swapped in from disk has been
+ * taken in, which replaces rows without reporting a change to any of them, so
+ * that edit-mode bars on notes typed by their rows look again (see
+ * `registerReadingModeActionBar`, which raises it).
+ */
+export const ROWS_RELOADED_EVENT = 'ir-rows-reloaded';
+
+/**
  * State field tracking action bar state.
  */
 interface ActionBarState {
@@ -635,10 +643,16 @@ function createPriorityInput(
  * once, and otherwise keeping the type the bar has until it answers, so a tag
  * coming off doesn't flash the bar away. The newest answer wins: a read still
  * under way when a newer answer lands is dropped, so a note opened just before
- * it is un-imported can't get its bar back from the tagged text. A database
- * write alone isn't heard: a note typed by its row, lacking a type tag, keeps
- * the type last resolved through a write that moves or tombstones that row,
- * until the note next changes or reopens.
+ * it is un-imported can't get its bar back from the tagged text.
+ *
+ * A note claiming an id is what its row makes it, tags aside, which the
+ * database can change with the note untouched: a row tombstoned or revived,
+ * moved onto the note or off it, by this device or by a merge from another.
+ * While the note claims one, the bar watches that row alone (see
+ * `ItemManager.typingRowId`), typing the note again once per batch of writes
+ * naming it, and once per database swapped in from disk, which reports no
+ * write ({@link ROWS_RELOADED_EVENT}). A note claiming no id watches nothing:
+ * no database write can change what it is.
  */
 const noteTypePlugin = ViewPlugin.define((view) => {
   let destroyed = false;
@@ -646,6 +660,11 @@ const noteTypePlugin = ViewPlugin.define((view) => {
   let metadataCacheRef: EventRef | undefined;
   /** Bumped by each answer started, so only the newest is applied. */
   let latest = 0;
+  /**
+   * The row the open note claims, if it claims one, and how to stop watching
+   * it.
+   */
+  let followed: { id: string; stop: () => void } | null = null;
 
   const apply = (resolved: NoteType | null) => {
     const current = view.state.field(actionBarStateField).noteType;
@@ -674,10 +693,49 @@ const noteTypePlugin = ViewPlugin.define((view) => {
     });
   };
 
-  const lookup = (file: TFile) => {
+  /**
+   * Type the open note again from its cached parse, after a database write.
+   * Only a watch calls it, and `destroy` stops that first.
+   */
+  const recheck = () => {
+    const { info } = Obsidian.getFileInfoFromState(view.state);
+    const itemLayer = items();
+    if (!info?.file || !info.app || !itemLayer) return;
+    settle(
+      itemLayer.itemTypeFromCache(
+        info.file,
+        info.app.metadataCache.getFileCache(info.file)
+      )
+    );
+  };
+
+  /**
+   * Watch row `id`, the one the open note claims, or none for `null`, letting
+   * go of any other.
+   */
+  const follow = (app: App, id: string | null) => {
+    if (followed?.id === id) return;
+    followed?.stop();
+    followed = null;
+    const itemLayer = items();
+    if (id === null || !itemLayer) return;
+    const unwatch = itemLayer.watchRow(id, recheck);
+    const ref = app.workspace.on(ROWS_RELOADED_EVENT, recheck);
+    followed = {
+      id,
+      stop: () => {
+        unwatch();
+        app.workspace.offref(ref);
+      },
+    };
+  };
+
+  const lookup = (app: App, file: TFile) => {
     lastFilePath = file.path;
     const itemLayer = items();
-    if (itemLayer) settle(itemLayer.getItemType(file));
+    if (!itemLayer) return;
+    settle(itemLayer.getItemType(file));
+    follow(app, itemLayer.typingRowId(file));
   };
 
   const subscribeToMetadataChanges = (app: App, filePath: string) => {
@@ -689,7 +747,9 @@ const noteTypePlugin = ViewPlugin.define((view) => {
       (changedFile, _data, cache) => {
         if (destroyed || changedFile.path !== filePath) return;
         const itemLayer = items();
-        if (itemLayer) settle(itemLayer.itemTypeFromCache(changedFile, cache));
+        if (!itemLayer) return;
+        settle(itemLayer.itemTypeFromCache(changedFile, cache));
+        follow(app, itemLayer.typingRowId(changedFile, cache));
       }
     );
   };
@@ -697,7 +757,7 @@ const noteTypePlugin = ViewPlugin.define((view) => {
   // Initial lookup on mount
   const { info } = Obsidian.getFileInfoFromState(view.state);
   if (info?.file && info.app) {
-    lookup(info.file);
+    lookup(info.app, info.file);
     subscribeToMetadataChanges(info.app, info.file.path);
   }
 
@@ -707,12 +767,14 @@ const noteTypePlugin = ViewPlugin.define((view) => {
       if (!newInfo?.file || !newInfo.app) return;
       // Re-resolve only when the open file actually changes
       if (newInfo.file.path !== lastFilePath) {
-        lookup(newInfo.file);
+        lookup(newInfo.app, newInfo.file);
         subscribeToMetadataChanges(newInfo.app, newInfo.file.path);
       }
     },
     destroy() {
       destroyed = true;
+      followed?.stop();
+      followed = null;
       const { info } = Obsidian.getFileInfoFromState(view.state);
       if (metadataCacheRef && info?.app) {
         info.app.metadataCache.offref(metadataCacheRef);
