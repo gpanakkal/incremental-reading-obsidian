@@ -4,8 +4,10 @@ import type { App, TFile } from 'obsidian';
 import type {
   HeldChoice,
   Plan,
+  PurgedRow,
   PathHolder as RowAtPath,
 } from './crash-leftovers';
+import type { NoteType } from './types';
 
 /**
  * A snippet or card row whose path a note is at, though the note doesn't
@@ -55,6 +57,17 @@ const dayOf = (ms: number) => formatQueueDate(new Date(ms));
 const shortId = (id: string) => id.slice(0, 8);
 
 /**
+ * On which device the row last written by `device` was, as the user is told:
+ * nothing when unknown.
+ */
+function deviceOf(device: string, thisDevice: string): string {
+  if (device === '') return '';
+  return device === thisDevice
+    ? ', on this device'
+    : `, on another device (${shortId(device)})`;
+}
+
+/**
  * What the user is shown of `holder` to choose by: its id, when it is due,
  * last reviewed and last changed, and on which device, and what it was taken
  * from, if anything.
@@ -68,13 +81,9 @@ function detailsOf(holder: RowAtPath, thisDevice: string): string[] {
     `Last reviewed: ${lastReview === null ? 'never' : dayOf(lastReview)}`,
   ];
   if (updatedAt > 0) {
-    const device =
-      updatedBy === ''
-        ? ''
-        : updatedBy === thisDevice
-          ? ', on this device'
-          : `, on another device (${shortId(updatedBy)})`;
-    details.push(`Last changed: ${dayOf(updatedAt)}${device}`);
+    details.push(
+      `Last changed: ${dayOf(updatedAt)}${deviceOf(updatedBy, thisDevice)}`
+    );
   }
   if (parent) {
     details.push(
@@ -194,4 +203,38 @@ export async function askToResolve(
     confirmText: 'Re-associate',
   });
   return confirmed ? 'reassociate' : null;
+}
+
+/**
+ * Ask whether to import `file`, a leftover note (see `crash-leftovers`) whose
+ * id `row`, a row deleted for good, held, as a new item of `as` under a new
+ * id: the only way to keep it as an item, as that row is gone for good and
+ * its id with it. Shown are what the row was, its id, and when and on which
+ * device it was erased, when known.
+ * @param thisDevice this device's id (see `getDeviceId`), to say whether the
+ *   row was erased here
+ * @returns whether the user confirmed
+ */
+export function askToImportFresh(
+  app: App,
+  file: TFile,
+  row: PurgedRow,
+  as: NoteType,
+  thisDevice: string
+): Promise<boolean> {
+  const { kind, id, erasedAt, erasedBy } = row;
+  const details = [`ID: ${id}`];
+  if (erasedAt > 0) {
+    details.push(`Erased: ${dayOf(erasedAt)}${deviceOf(erasedBy, thisDevice)}`);
+  }
+  const state = kind === 'article' ? 'An article' : `A ${kind}`;
+  return promptForConfirmation(app, {
+    title: `Import "${file.basename}" fresh?`,
+    paragraphs: [
+      `${state} that was erased for good had this note's ID. It can't be restored, and this note can't be saved under its ID.`,
+      details,
+      `"Import fresh" gives this note a new ID and saves it as a new ${as}.`,
+    ],
+    confirmText: 'Import fresh',
+  });
 }

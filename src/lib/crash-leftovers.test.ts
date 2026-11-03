@@ -1,7 +1,11 @@
 import { ArticleManager } from '#/lib/items/ArticleManager';
 import { CardManager } from '#/lib/items/CardManager';
 import ReviewManager from '#/lib/items/ReviewManager';
-import { REVIEW_LOG_OF, tombstoneRowStatements } from '#/lib/items/row-delete';
+import {
+  deleteRowStatements,
+  REVIEW_LOG_OF,
+  tombstoneRowStatements,
+} from '#/lib/items/row-delete';
 import { SnippetManager } from '#/lib/items/SnippetManager';
 import { evictedSpot } from '#/lib/moved-note-scan';
 import { makeItemVault, TestRepository } from '#/test/item-vault';
@@ -19,6 +23,7 @@ import {
   type Leftover,
   type PathHolder,
   type Plan,
+  type PurgedRow,
   actionsFor,
   failureDetail,
   failureOf,
@@ -458,7 +463,7 @@ const byRank = (a: WorldRow, b: WorldRow) =>
 
 /** The parts of a plan the world tests check, as {@link expectedPlan} gives them. */
 function project(plan: Plan) {
-  const { target, evicts, erase, refused } = plan;
+  const { target, evicts, erase, refused, purged } = plan;
   return {
     target: target && {
       by: target.by,
@@ -474,6 +479,7 @@ function project(plan: Plan) {
       id: row.id,
       why,
     })),
+    purged: purged && { kind: purged.kind, id: purged.id },
   };
 }
 
@@ -484,7 +490,8 @@ function project(plan: Plan) {
  * live row of any table holds the note's path; else the row at its path,
  * a live one before any deleted one there. A deleted row at the path gives
  * way to one coming from elsewhere. Erasing is offered for a row at the path
- * only while no row holds the id.
+ * only while no row not deleted for good holds the id. The first row deleted
+ * for good holding it, if any, is told apart.
  */
 function expectedPlan(world: World, path: string, id: string) {
   const kept = world.rows.filter((row) => row.state !== 'purged');
@@ -531,11 +538,15 @@ function expectedPlan(world: World, path: string, id: string) {
         ? { kind: holder.kind, id: holder.id }
         : null
       : null;
+  const [gone = null] = world.rows
+    .filter((row) => row.state === 'purged' && row.id === id)
+    .sort(byRank);
   return {
     target,
     evicts,
     erase: byId.length === 0 && holder !== null,
     refused,
+    purged: gone && { kind: gone.kind, id: gone.id },
   };
 }
 
@@ -621,6 +632,105 @@ async function wireMoved({
   )!;
   return { vault, repo, deps, leftover, notify, ask, purge, table };
 }
+
+/** The id a note holds whose row was deleted for good, in the import-fresh tests. */
+const PURGED_ID = 'purged-9abc-ijkl-0000';
+
+/**
+ * A note at `path` holding {@link PURGED_ID}, tagged `tags`, whose `kind` row
+ * was reviewed once and then deleted for good, as `ReviewManager.deleteRow`
+ * deletes one; with `pathRow`, a row {@link HOLDER_ID} holds `path`, deleted
+ * or not. Managers over them can erase rows for good, and a conflicts hook's
+ * `askFresh` does `meanwhile` and then answers `fresh`, while its `ask`
+ * answers `choice`.
+ */
+async function wirePurged({
+  kind,
+  path = 'notes/a.md',
+  tags = ['other'],
+  pathRow = null,
+  fresh = true,
+  choice = null,
+  meanwhile = () => {},
+}: {
+  kind: NoteType;
+  path?: string;
+  tags?: unknown;
+  pathRow?: { kind: NoteType; deleted: boolean } | null;
+  fresh?: boolean;
+  choice?: HeldChoice;
+  meanwhile?: (wired: {
+    repo: TestRepository;
+    vault: ReturnType<typeof makeItemVault>;
+  }) => unknown;
+}) {
+  const vault = makeItemVault({
+    [path]: { 'ir-id': PURGED_ID, tags, title: 'kept' },
+  });
+  const repo = await TestRepository.create();
+  const table = ITEM_TABLE_OF[kind];
+  insertRow(repo, kind, PURGED_ID, 'gone.md');
+  insertReview(repo, kind, PURGED_ID, 1_000);
+  for (const { query, params } of deleteRowStatements(table, PURGED_ID)) {
+    repo.mutate(query, params);
+  }
+  if (pathRow) insertRow(repo, pathRow.kind, HOLDER_ID, path, pathRow.deleted);
+  const trigger = vi.fn();
+  const plugin: Record<string, unknown> = {
+    app: { ...vault.app, workspace: { trigger } },
+    settings: {},
+  };
+  const reviewManager = new ReviewManager(plugin as never, repo);
+  plugin.reviewManager = reviewManager;
+  const notify = vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
+  vi.spyOn(console, 'error').mockReturnValue(undefined);
+  vi.spyOn(console, 'warn').mockReturnValue(undefined);
+  const ask = vi.fn(
+    async (_file: unknown, _holder: PathHolder, _plan?: Plan) => choice
+  );
+  const askFresh = vi.fn(
+    async (_file: unknown, _row: PurgedRow, _as: NoteType) => {
+      await meanwhile({ repo, vault });
+      return fresh;
+    }
+  );
+  const purge = vi.spyOn(reviewManager, 'deleteRow');
+  const deps = {
+    app: vault.app as never,
+    repo,
+    articles: reviewManager.articles,
+    snippets: reviewManager.snippets,
+    cards: reviewManager.cards,
+    conflicts: {
+      ask,
+      askFresh,
+      purge: (t: 'article' | 'snippet' | 'srs_card', id: string) =>
+        reviewManager.deleteRow(t, id),
+    },
+  };
+  const [leftover] = await findLeftovers(deps);
+  const [stored] = repo.storedRows(table, ` WHERE id = '${PURGED_ID}'`);
+  /** The row deleted for good, as the user is told of it. */
+  const gone: PurgedRow = {
+    kind,
+    id: PURGED_ID,
+    erasedAt: stored.updated_at as number,
+    erasedBy: stored.updated_by as string,
+  };
+  return { vault, repo, deps, leftover, notify, ask, askFresh, purge, gone };
+}
+
+/** Every stored row of every item table and review log, deleted or not. */
+function storedItemRows(repo: TestRepository) {
+  return Object.fromEntries(
+    Object.values(ITEM_TABLE_OF).flatMap((table) => [
+      [table, repo.storedRows(table)],
+      [REVIEW_LOG_OF[table][0], repo.storedRows(REVIEW_LOG_OF[table][0])],
+    ])
+  );
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 // #endregion
 
@@ -2477,6 +2587,378 @@ describe('failureDetail of a note holding the id of a row', () => {
               row: { ...row, deleted: !deleted },
               copy: false,
             })
+          );
+        }
+      )
+    );
+  });
+});
+
+describe('resolveLeftover of a note whose id belongs to a row deleted for good', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('lists the note, and plans nothing for it but what holds its id: the row deleted for good, as the user is told of it', async () => {
+    await fc.assert(
+      fc.asyncProperty(typeArb, leftoverPathArb, async (kind, path) => {
+        vi.restoreAllMocks();
+        const { deps, leftover, gone } = await wirePurged({ kind, path });
+
+        expect(leftover).toMatchObject({ id: PURGED_ID });
+        expect(leftover.match).toBeUndefined();
+        expect(await findCandidates(deps, path, PURGED_ID)).toEqual({
+          target: null,
+          evicts: null,
+          erase: false,
+          refused: [],
+          purged: gone,
+        });
+        expect(gone.erasedAt).toBeGreaterThan(0);
+        expect(gone.erasedBy).not.toBe('');
+      }),
+      { numRuns: 6 }
+    );
+  });
+
+  it("imports the note fresh once the user chooses to: a new id and the chosen type's tag in place of other types' in the note, a new row of that type at its path, and nothing else written, the row deleted for good least of all", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        typeArb,
+        typeArb,
+        leftoverPathArb,
+        leftoverTagsArb,
+        async (kind, as, path, tags) => {
+          vi.restoreAllMocks();
+          const wired = await wirePurged({ kind, path, tags });
+          const { vault, repo, deps, leftover, notify, ask, askFresh } = wired;
+          const before = storedItemRows(repo);
+
+          const outcome = await resolveLeftover(deps, leftover, 'adopt', as);
+
+          expect(outcome).toEqual({ done: true });
+          expect(askFresh).toHaveBeenCalledExactlyOnceWith(
+            leftover.file,
+            wired.gone,
+            as
+          );
+          expect(ask).not.toHaveBeenCalled();
+          expect(wired.purge).not.toHaveBeenCalled();
+          expect(notify).not.toHaveBeenCalled();
+          const frontmatter = vault.frontmatterOf(path)!;
+          const id = frontmatter['ir-id'] as string;
+          expect(id).toMatch(UUID);
+          expect(frontmatter).toEqual({
+            'ir-id': id,
+            tags: retagged(tags, as),
+            title: 'kept',
+          });
+          const after = storedItemRows(repo);
+          const table = ITEM_TABLE_OF[as];
+          expect(after[table].filter((row) => row.id === id)).toEqual([
+            expect.objectContaining({ id, reference: path, deleted: 0 }),
+          ]);
+          expect({
+            ...after,
+            [table]: after[table].filter((row) => row.id !== id),
+          }).toEqual(before);
+          expect(await findLeftovers(deps)).toEqual([]);
+        }
+      ),
+      { numRuns: 30 }
+    );
+  });
+
+  it('gives each note imported fresh an id of its own', async () => {
+    const ids = new Set<string>();
+    for (let i = 0; i < 3; i++) {
+      vi.restoreAllMocks();
+      const { vault, deps, leftover } = await wirePurged({ kind: 'snippet' });
+
+      await resolveLeftover(deps, leftover, 'adopt', 'snippet');
+
+      ids.add(vault.frontmatterOf('notes/a.md')!['ir-id'] as string);
+    }
+    expect(ids.size).toBe(3);
+    expect(ids.has(PURGED_ID)).toBe(false);
+  });
+
+  it('with no answer writes nothing and says nothing, answering that the user backed out', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        typeArb,
+        typeArb,
+        leftoverTagsArb,
+        async (kind, as, tags) => {
+          vi.restoreAllMocks();
+          const { vault, repo, deps, leftover, notify, askFresh } =
+            await wirePurged({ kind, tags, fresh: false });
+          const stored = repo.dump();
+          const frontmatter = structuredClone(
+            vault.frontmatterOf('notes/a.md')
+          );
+
+          const outcome = await resolveLeftover(deps, leftover, 'adopt', as);
+
+          expect(outcome).toEqual({ done: false, canceled: true });
+          expect(askFresh).toHaveBeenCalledOnce();
+          expect(repo.dump()).toBe(stored);
+          expect(vault.frontmatterOf('notes/a.md')).toEqual(frontmatter);
+          expect(notify).not.toHaveBeenCalled();
+        }
+      ),
+      { numRuns: 12 }
+    );
+  });
+
+  it('writes nothing, and says why, with no way to ask the user', async () => {
+    const { vault, repo, deps, leftover, notify, gone } = await wirePurged({
+      kind: 'article',
+    });
+    const stored = repo.dump();
+    const frontmatter = structuredClone(vault.frontmatterOf('notes/a.md'));
+    const { ask, purge } = deps.conflicts;
+
+    const outcome = await resolveLeftover(
+      { ...deps, conflicts: { ask, purge } },
+      leftover,
+      'adopt',
+      'article'
+    );
+
+    expect(outcome).toEqual({
+      done: false,
+      failure: { reason: 'purged', row: gone },
+    });
+    expect(repo.dump()).toBe(stored);
+    expect(vault.frontmatterOf('notes/a.md')).toEqual(frontmatter);
+    expect(notify).toHaveBeenCalledOnce();
+    expect(notify.mock.calls[0][0]).toContain('"a"');
+    expect(notify.mock.calls[0][0]).toContain(PURGED_ID.slice(0, 8));
+  });
+
+  it('writes nothing when saving is refused by the time the user chose', async () => {
+    const { vault, repo, deps, leftover, notify } = await wirePurged({
+      kind: 'card',
+      meanwhile: ({ repo }) => repo.refuseWrites(),
+    });
+    const stored = repo.dump();
+    const frontmatter = structuredClone(vault.frontmatterOf('notes/a.md'));
+
+    expect(await resolveLeftover(deps, leftover, 'adopt', 'card')).toEqual({
+      done: false,
+    });
+
+    expect(repo.dump()).toBe(stored);
+    expect(vault.frontmatterOf('notes/a.md')).toEqual(frontmatter);
+    expect(notify).toHaveBeenCalledOnce();
+    expect(notify.mock.calls[0][0]).toContain('"a"');
+  });
+
+  it('writes nothing when the note is no leftover any more by the time the user chose: its id given a row, or changed', async () => {
+    for (const change of ['row', 'id'] as const) {
+      vi.restoreAllMocks();
+      const path = 'notes/a.md';
+      let changed = '';
+      const { vault, repo, deps, leftover } = await wirePurged({
+        kind: 'article',
+        meanwhile: async ({ repo, vault }) => {
+          // By Sync, say: a row of another table holding the id at its path
+          if (change === 'row') insertRow(repo, 'snippet', PURGED_ID, path);
+          else {
+            await Obsidian.updateFrontMatter(
+              vault.files.get(path)!,
+              { 'ir-id': 'left-2' },
+              vault.app as never
+            );
+          }
+          changed = repo.dump();
+        },
+      });
+      const frontmatter = {
+        ...structuredClone(vault.frontmatterOf(path)),
+        ...(change === 'id' ? { 'ir-id': 'left-2' } : {}),
+      };
+
+      expect(await resolveLeftover(deps, leftover, 'adopt', 'article')).toEqual(
+        { done: false }
+      );
+
+      expect(repo.dump()).toBe(changed);
+      expect(vault.frontmatterOf(path)).toEqual(frontmatter);
+    }
+  });
+
+  it("writes nothing, and says so, when a row came to hold the note's path while the user was choosing, failing with that row", async () => {
+    for (const deleted of [false, true]) {
+      vi.restoreAllMocks();
+      const path = 'notes/a.md';
+      let changed = '';
+      const { vault, repo, deps, leftover, notify } = await wirePurged({
+        kind: 'snippet',
+        meanwhile: ({ repo }) => {
+          insertRow(repo, 'article', HOLDER_ID, path, deleted);
+          changed = repo.dump();
+        },
+      });
+      const frontmatter = structuredClone(vault.frontmatterOf(path));
+
+      const outcome = await resolveLeftover(deps, leftover, 'adopt', 'article');
+
+      expect(outcome).toEqual({
+        done: false,
+        failure: {
+          reason: 'held',
+          holder: expect.objectContaining({
+            id: HOLDER_ID,
+            deleted,
+          }) as unknown,
+        },
+      });
+      expect(repo.dump()).toBe(changed);
+      expect(vault.frontmatterOf(path)).toEqual(frontmatter);
+      expect(notify).toHaveBeenCalledExactlyOnceWith(
+        expect.stringContaining('"a"'),
+        {
+          kind: 'error',
+        }
+      );
+    }
+  });
+
+  it('writes nothing, and says so, when another row deleted for good came to hold its id while the user was choosing', async () => {
+    const path = 'notes/a.md';
+    let changed = '';
+    const { vault, repo, deps, leftover, notify } = await wirePurged({
+      kind: 'snippet',
+      meanwhile: ({ repo }) => {
+        // An article erased for good that Sync brought, say: first by table
+        insertRow(repo, 'article', PURGED_ID, 'elsewhere.md');
+        for (const { query, params } of deleteRowStatements(
+          'article',
+          PURGED_ID
+        )) {
+          repo.mutate(query, params);
+        }
+        changed = repo.dump();
+      },
+    });
+    const frontmatter = structuredClone(vault.frontmatterOf(path));
+
+    expect(await resolveLeftover(deps, leftover, 'adopt', 'article')).toEqual({
+      done: false,
+    });
+
+    expect(repo.dump()).toBe(changed);
+    expect(vault.frontmatterOf(path)).toEqual(frontmatter);
+    expect(notify).toHaveBeenCalledOnce();
+    expect(notify.mock.calls[0][0]).toContain('"a"');
+  });
+
+  it("puts the note's id and tags back as they were, and writes no row, when the new row can't be saved", async () => {
+    await fc.assert(
+      fc.asyncProperty(typeArb, leftoverTagsArb, async (as, tags) => {
+        vi.restoreAllMocks();
+        const { vault, repo, deps, leftover, notify } = await wirePurged({
+          kind: 'article',
+          tags,
+        });
+        const frontmatter = structuredClone(vault.frontmatterOf('notes/a.md'));
+        const stored = repo.dump();
+        const insert = new RegExp(`^\\s*INSERT INTO ${ITEM_TABLE_OF[as]}\\b`);
+        repo.failWrite((query) => insert.test(query));
+
+        const outcome = await resolveLeftover(deps, leftover, 'adopt', as);
+
+        expect(outcome).toMatchObject({
+          done: false,
+          failure: { reason: 'error' },
+        });
+        expect(vault.frontmatterOf('notes/a.md')).toEqual(frontmatter);
+        expect(repo.dump()).toBe(stored);
+        expect(notify).toHaveBeenCalledOnce();
+      }),
+      { numRuns: 12 }
+    );
+  });
+
+  it("re-associates the note with the row at its path, once the user chooses to, writing that row's id into the note and leaving the row deleted for good and its history as they were", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        typeArb,
+        typeArb,
+        fc.boolean(),
+        typeArb,
+        leftoverTagsArb,
+        async (kind, holderKind, deleted, as, tags) => {
+          vi.restoreAllMocks();
+          const { vault, repo, deps, leftover, askFresh, purge } =
+            await wirePurged({
+              kind,
+              tags,
+              pathRow: { kind: holderKind, deleted },
+              choice: 'reassociate',
+            });
+          const ofPurged = (rows: ReturnType<typeof storedItemRows>) =>
+            Object.fromEntries(
+              Object.entries(rows).map(([table, stored]) => [
+                table,
+                stored.filter((row) => Object.values(row).includes(PURGED_ID)),
+              ])
+            );
+          const before = ofPurged(storedItemRows(repo));
+
+          const outcome = await resolveLeftover(deps, leftover, 'adopt', as);
+
+          expect(outcome).toEqual({ done: true });
+          expect(askFresh).not.toHaveBeenCalled();
+          expect(purge).not.toHaveBeenCalled();
+          expect(vault.frontmatterOf('notes/a.md')).toEqual({
+            'ir-id': HOLDER_ID,
+            tags: retagged(tags, holderKind),
+            title: 'kept',
+          });
+          expect(ofPurged(storedItemRows(repo))).toEqual(before);
+        }
+      ),
+      { numRuns: 20 }
+    );
+  });
+
+  it('asks nothing when trashing or stripping such a note', async () => {
+    for (const action of ['trash', 'strip'] as const) {
+      vi.restoreAllMocks();
+      const { deps, leftover, askFresh } = await wirePurged({
+        kind: 'snippet',
+        path: `${DATA_DIRECTORY}/x/a.md`,
+      });
+
+      expect(await resolveLeftover(deps, leftover, action)).toEqual({
+        done: true,
+      });
+      expect(askFresh).not.toHaveBeenCalled();
+    }
+  });
+});
+
+describe('failureDetail of a note whose id belongs to a row deleted for good', () => {
+  it('names the row by its kind and short id', () => {
+    fc.assert(
+      fc.property(
+        typeArb,
+        fc.uuid(),
+        fc.nat(),
+        fc.string(),
+        (kind, id, erasedAt, erasedBy) => {
+          const detail = failureDetail({
+            reason: 'purged',
+            row: { kind, id, erasedAt, erasedBy },
+          });
+
+          expect(detail).toContain(id.slice(0, 8));
+          expect(detail).not.toContain(id.slice(0, 9));
+          expect(detail).toContain(
+            kind === 'article' ? 'an article' : `a ${kind}`
           );
         }
       )

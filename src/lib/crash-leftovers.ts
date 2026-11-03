@@ -1,6 +1,6 @@
 import type { ArticleManager } from '#/lib/items/ArticleManager';
 import type { CardManager } from '#/lib/items/CardManager';
-import { NOT_PURGED } from '#/lib/items/row-delete';
+import { NOT_PURGED, purgedReference } from '#/lib/items/row-delete';
 import type { SnippetManager } from '#/lib/items/SnippetManager';
 import type { ItemTable } from '#/lib/moved-note-scan';
 import type { App, TFile } from 'obsidian';
@@ -34,7 +34,9 @@ import type { NoteType, SQLiteRepository } from './types';
  * at the note's own path, tagged or not (see `ReviewManager.handleCreation`);
  * and one at a path a row holding another id
  * holds. The user may re-associate it with such a row (see
- * {@link findCandidates}); nothing pairs the two on its own.
+ * {@link findCandidates}); nothing pairs the two on its own. A note whose id
+ * only a row deleted for good holds is found too, and can only be imported
+ * fresh under a new id, should the user choose to (see {@link PurgedRow}).
  */
 
 /**
@@ -117,6 +119,23 @@ export interface MatchedRow extends PathHolder {
 export type Refusal = 'copy' | 'held';
 
 /**
+ * A row deleted for good holding a note's `ir-id`: gone, and never written
+ * again, nor brought back, and its id never taken by another row, so that
+ * every copy of the database comes to the same deletion. A note holding its
+ * id can only be saved as a new item under a new id (see
+ * {@link resolveLeftover}). What the user is told of it: what it was, and
+ * when, and on which device, it was erased (its last write's stamp).
+ */
+export interface PurgedRow {
+  kind: NoteType;
+  id: string;
+  /** When it was erased, in ms (`updated_at`); 0 when never stamped. */
+  erasedAt: number;
+  /** The device that erased it (`updated_by`); `''` when unknown. */
+  erasedBy: string;
+}
+
+/**
  * What a leftover may be re-associated with, from what holds its id and its
  * path (see {@link findCandidates}).
  */
@@ -146,6 +165,12 @@ export interface Plan {
   erase: boolean;
   /** The rows holding the note's id that can't be made its row, and why. */
   refused: { row: MatchedRow; why: Refusal }[];
+  /**
+   * A row deleted for good holding the note's id, the first by table
+   * (articles, snippets, cards), if any: the note can't be saved under that
+   * id, only imported fresh under a new one.
+   */
+  purged: PurgedRow | null;
 }
 
 /**
@@ -171,6 +196,8 @@ export type LeftoverFailure =
       row: MatchedRow;
       copy: boolean;
     }
+  /** A row deleted for good holds the note's id, which no row can take. */
+  | { reason: 'purged'; row: PurgedRow }
   | { reason: 'error'; message: string };
 
 /**
@@ -210,6 +237,12 @@ export interface LeftoverDeps {
      * {@link Plan}).
      */
     ask: (file: TFile, holder: PathHolder, plan?: Plan) => Promise<HeldChoice>;
+    /**
+     * Ask the user whether to import `file`, whose id `row`, a row deleted for
+     * good, held, as a new item of `as` under a new id. Without it, saving
+     * such a note fails, saying why.
+     */
+    askFresh?: (file: TFile, row: PurgedRow, as: NoteType) => Promise<boolean>;
     /** Erase the `table` row `id` for good (see `ReviewManager.deleteRow`). */
     purge: (table: ItemTable, id: string) => Promise<void>;
   };
@@ -457,7 +490,10 @@ export async function findCandidates(
   path: string,
   id: string
 ): Promise<Plan> {
-  const byId = await detailRows(repo, `id = $1 AND ${NOT_PURGED}`, [id]);
+  const rows = await detailRows(repo, 'id = $1', [id]);
+  const gone = (row: DetailRow) => row.reference === purgedReference(row.id);
+  const byId = rows.filter((row) => !gone(row));
+  const erased = rows.find(gone);
   // Another table may hold the id at this very path: that row is no holder
   const atPathRows = await detailRows(repo, 'reference = $1 AND id != $2', [
     path,
@@ -492,6 +528,14 @@ export async function findCandidates(
     evicts,
     erase: byId.length === 0 && holder !== null,
     refused,
+    purged: erased
+      ? {
+          kind: KIND_OF_TABLE[erased.item_table],
+          id: erased.id,
+          erasedAt: erased.updated_at,
+          erasedBy: erased.updated_by,
+        }
+      : null,
   };
 }
 
@@ -535,6 +579,14 @@ export function failureDetail(failure: LeftoverFailure): string {
     // Its first line with any text: a stack, say, can follow
     const line = failure.message.split('\n').find((text) => text.trim());
     return line?.trim() ?? '';
+  }
+  if (failure.reason === 'purged') {
+    const { kind, id } = failure.row;
+    return (
+      `This note holds the ID of ${kind === 'article' ? 'an' : 'a'} ${kind} that was erased for good, ` +
+      `id ${shortId(id)}, so it can't be saved under that ID. ` +
+      'Confirm again to import it fresh under a new ID.'
+    );
   }
   if (failure.reason === 'matched') {
     const { kind, id, deleted, reference } = failure.row;
@@ -670,8 +722,9 @@ async function adoptRow(
  * into it in place of its own with the type's tag in place of any other item
  * type's, as a fresh import does: for a note whose path an erased row held,
  * whose own id is no item's to keep, and may be one a row deleted for good
- * keeps. A row that can't be saved puts the note's id and tags back as they
- * were, so it is the same leftover still.
+ * keeps; or one whose own id only a row deleted for good holds (see
+ * {@link resolvePurged}). A row that can't be saved puts the note's id and
+ * tags back as they were, so it is the same leftover still.
  * @throws what the note's or the row's write threw, once undone
  */
 async function adoptFresh(
@@ -743,6 +796,9 @@ export async function resolveLeftover(
       action === 'adopt' ? await findCandidates(deps, file.path, id) : null;
     if (plan && as && hasCandidates(plan)) {
       return await resolveHeld(deps, leftover, plan, as);
+    }
+    if (plan?.purged && as) {
+      return await resolvePurged(deps, leftover, plan, plan.purged, as);
     }
     if (action === 'trash') {
       await app.fileManager.trashFile(file);
@@ -864,6 +920,49 @@ async function resolveHeld(
       );
     }
   }
+  return { done: true };
+}
+
+/**
+ * Import `leftover` fresh as `as`, though its id is held by `purged`, a row
+ * deleted for good, as `plan` has it, should the user choose to (see
+ * `conflicts.askFresh`): a new id in the note, and a new row (see
+ * {@link adoptFresh}). The row deleted for good is never written. With no
+ * answer, writes nothing and says nothing, answering that the user backed
+ * out; with no way to ask, fails at once, saying why.
+ *
+ * The user may take a while to choose, so before writing anything, checks
+ * again that saving is allowed, that the note is still a leftover, and that
+ * nothing but that row holds its id or its path; if any changed meanwhile,
+ * it is refused, saying so.
+ */
+async function resolvePurged(
+  deps: LeftoverDeps,
+  leftover: Leftover,
+  plan: Plan,
+  purged: PurgedRow,
+  as: NoteType
+): Promise<LeftoverOutcome> {
+  const { repo } = deps;
+  const { file } = leftover;
+  const what = DOING.adopt(`"${file.basename}"`);
+  const askFresh = deps.conflicts?.askFresh;
+  if (!askFresh) return failed(what, { reason: 'purged', row: purged });
+  if (!(await askFresh(file, purged, as)))
+    return { done: false, canceled: true };
+  if (await refusedWrite(repo, what)) return { done: false };
+  if (!(await isLeftover(deps, leftover))) return { done: false };
+  const now = await findCandidates(deps, file.path, leftover.id);
+  if (!samePlan(now, plan)) {
+    Obsidian.notify(
+      `Nothing was done to "${file.basename}": a row came to hold its ID or its path while you chose. Confirm again to see it as it is now.`,
+      { kind: 'error' }
+    );
+    return hasCandidates(now)
+      ? { done: false, failure: failureOfPlan(now) }
+      : { done: false };
+  }
+  await adoptFresh(deps, file, as);
   return { done: true };
 }
 

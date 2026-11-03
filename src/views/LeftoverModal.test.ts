@@ -2253,3 +2253,73 @@ describe('LeftoverModal Confirm with lines left be', () => {
     }
   );
 });
+
+describe('LeftoverWatch of a note whose id belongs to a row deleted for good', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** A tagged note holding the id of a snippet row deleted for good. */
+  async function wirePurgedWatch() {
+    const wired = await wireWatch({
+      'notes/a.md': { 'ir-id': 'gone-1234-abcd', tags: [ARTICLE_TAG] },
+    });
+    wired.repo.mutate(
+      `INSERT INTO snippet (id, reference, due, interval, priority, deleted) VALUES ('gone-1234-abcd', '/ir-deleted/gone-1234-abcd', 0, 1, 30, 1)`
+    );
+    const notify = vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
+    return { ...wired, notify };
+  }
+
+  it("asks whether to import the note fresh, telling it what was erased, the type chosen and this device's id, and once it is, saves it under a new id and lets go of it", async () => {
+    const wired = await wirePurgedWatch();
+    const ask = vi
+      .spyOn(ReassociatePrompt, 'askToImportFresh')
+      .mockResolvedValue(true);
+    await wired.watch.manage();
+    const modal = showModal(wired.opened[0]);
+    const file = wired.vault.files.get('notes/a.md')!;
+
+    choose(modal.contentEl, { action: 'adopt', as: 'article' });
+    confirmOf(modal).click();
+
+    await vi.waitFor(() => expect(wired.onResolved).toHaveBeenCalledOnce());
+    expect(ask).toHaveBeenCalledExactlyOnceWith(
+      wired.vault.app,
+      file,
+      expect.objectContaining({ kind: 'snippet', id: 'gone-1234-abcd' }),
+      'article',
+      getDeviceId(wired.vault.app as never)
+    );
+    const id = wired.vault.frontmatterOf('notes/a.md')?.['ir-id'];
+    expect(id).toEqual(expect.any(String));
+    expect(id).not.toBe('gone-1234-abcd');
+    expect(wired.adoptLeftover).toHaveBeenCalledExactlyOnceWith(file, id);
+    expect(wired.deleteRow).not.toHaveBeenCalled();
+    expect(wired.watch.current).toEqual([]);
+  });
+
+  it("leaves the line as it was before Confirm, with nothing written and nothing said, when the user doesn't import it fresh", async () => {
+    const wired = await wirePurgedWatch();
+    const ask = vi
+      .spyOn(ReassociatePrompt, 'askToImportFresh')
+      .mockResolvedValue(false);
+    await wired.watch.manage();
+    const modal = showModal(wired.opened[0]);
+
+    choose(modal.contentEl, { action: 'adopt', as: 'article' });
+    confirmOf(modal).click();
+
+    await vi.waitFor(() => expect(confirmOf(modal).disabled).toBe(false));
+    expect(ask).toHaveBeenCalledOnce();
+    expect(errorOf(modal.contentEl)).toBeNull();
+    expect(modal.contentEl.querySelectorAll('.setting-item')).toHaveLength(1);
+    expect(wired.notify).not.toHaveBeenCalled();
+    expect(wired.vault.frontmatterOf('notes/a.md')?.['ir-id']).toBe(
+      'gone-1234-abcd'
+    );
+    expect(wired.adoptLeftover).not.toHaveBeenCalled();
+    expect(wired.onResolved).not.toHaveBeenCalled();
+    expect(wired.watch.current.map(({ id }) => id)).toEqual(['gone-1234-abcd']);
+  });
+});

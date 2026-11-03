@@ -445,3 +445,125 @@ test.describe('A note moved outside Obsidian while it runs', () => {
     });
   }
 });
+
+test.describe('A leftover holding the id of an item erased for good', () => {
+  /** The question asked about the note. */
+  const question = () => window.locator('.modal-container.mod-confirmation');
+
+  /** The `ir-id` the note at `at` holds now, by the metadata cache. */
+  const idOf = (at: string) =>
+    window.evaluate((p) => {
+      const { app } = window as unknown as { app: PageApp };
+      const file = app.vault.getFileByPath(p);
+      const frontmatter = file
+        ? (app.metadataCache.getFileCache(file)?.frontmatter as
+            | Record<string, unknown>
+            | undefined)
+        : undefined;
+      return frontmatter?.['ir-id'] ?? null;
+    }, at);
+
+  /**
+   * A snippet `gone-snippet` erased for good, as deleting one for good leaves
+   * it, while its note, tagged as an article, stays at `at`; then open the
+   * leftover modal, save the note as an article, and wait for the question.
+   */
+  async function adoptPurged(at: string) {
+    // Leftovers are asked about only while the database holds an item
+    await writeVaultFile('articles/Held.md', articleNote('held', 'Held'));
+    await mutate(
+      `INSERT INTO article (id, reference, due, interval, priority)
+       VALUES ('held', 'articles/Held.md', $1, 86400000, 25)`,
+      [Date.now() + 1e9]
+    );
+    await mutate(
+      `INSERT INTO snippet (id, reference, due, interval, priority)
+       VALUES ('gone-snippet', 'gone.md', 0, 86400000, 25)`
+    );
+    await mutate(
+      `UPDATE snippet SET deleted = TRUE, reference = '/ir-deleted/' || id
+       WHERE id = 'gone-snippet'`
+    );
+    await writeVaultFile(at, articleNote('gone-snippet', 'Left over'));
+    await window.evaluate(() => {
+      const { app } = window as unknown as { app: PageApp };
+      void app.plugins.plugins['incremental-reading'].leftovers?.manage();
+    });
+    const name = path.basename(at, '.md');
+    await expect(lineOf(name).locator('.checkbox-container')).toHaveClass(
+      /\bis-enabled\b/
+    );
+    // Matched with no row, the erased snippet least of all: typed by its tag,
+    // and the type to save it as is still the user's to choose
+    const type = lineOf(name).locator('select.dropdown:not(.is-measuring)');
+    await expect(type).toHaveValue('article');
+    await expect(type).toBeEnabled();
+    await window
+      .locator('.ir-leftover-modal .modal-button-container .mod-cta')
+      .click();
+    await expect(question().last()).toBeVisible();
+  }
+
+  /**
+   * Click `button` in the open question until it goes away: Obsidian can take
+   * a click before a modal's button is wired.
+   */
+  async function answer(button: string) {
+    const target = question().locator(`.modal-button-container ${button}`);
+    await expect(async () => {
+      if (await target.isVisible()) await target.click();
+      await expect(target).toHaveCount(0, { timeout: 2_000 });
+    }).toPass();
+  }
+
+  test('Import fresh saves the note as a new article under a new id, and the leftover is gone', async () => {
+    await adoptPurged('notes/Erased.md');
+
+    // Nothing offered but importing it fresh, or not at all
+    await expect(
+      question().locator('.modal-button-container button')
+    ).toHaveCount(2);
+    await answer('.mod-cta');
+
+    await expect(window.locator('.ir-leftover-modal')).toHaveCount(0);
+    // A new id of its own, once Obsidian has parsed the note's write again
+    await expect
+      .poll(async () => {
+        const id = await idOf('notes/Erased.md');
+        return typeof id === 'string' && id !== 'gone-snippet';
+      })
+      .toBe(true);
+    await executeCommandById(window, 'incremental-reading:learn');
+    const rows = window.locator('.ir-queue-row').filter({ hasText: 'Erased' });
+    await expect(rows).toHaveCount(1);
+    await expect(rows).toHaveAttribute('data-type', 'article');
+    await expect(
+      window.locator('#manage-leftovers-button .ir-leftover-count')
+    ).toHaveCount(0);
+  });
+
+  test('Cancel writes nothing, shows no error, and the leftover stays listed', async () => {
+    await adoptPurged('notes/Erased.md');
+
+    await answer('.mod-cancel');
+
+    // The line stays as it was, with no error: backing out is no failure
+    await expect(
+      window.locator('.ir-leftover-modal .modal-button-container .mod-cta')
+    ).toBeEnabled();
+    await expect(lineOf('Erased')).toBeVisible();
+    await expect(lineOf('Erased').locator('.ir-leftover-error')).toHaveCount(0);
+    await window
+      .locator('.ir-leftover-modal .modal-button-container .mod-cancel')
+      .click();
+    await expect(window.locator('.ir-leftover-modal')).toHaveCount(0);
+    expect(await idOf('notes/Erased.md')).toBe('gone-snippet');
+    await executeCommandById(window, 'incremental-reading:learn');
+    await expect(
+      window.locator('.ir-queue-row').filter({ hasText: 'Erased' })
+    ).toHaveCount(0);
+    await expect(
+      window.locator('#manage-leftovers-button .ir-leftover-count')
+    ).toHaveText('1');
+  });
+});

@@ -13,7 +13,11 @@ import {
 import { getDeviceId } from '#/lib/device-id';
 import type ReviewManager from '#/lib/items/ReviewManager';
 import { notify } from '#/lib/notices';
-import { askToResolve, askToResolveHeld } from '#/lib/reassociate-prompt';
+import {
+  askToImportFresh,
+  askToResolve,
+  askToResolveHeld,
+} from '#/lib/reassociate-prompt';
 import type { NoteType, SQLiteRepository } from '#/lib/types';
 import { openModal } from '#/lib/ui-window';
 import {
@@ -701,14 +705,17 @@ export class LeftoverWatch {
       async (leftover, choice) => {
         const reviewManager = managers();
         const { articles, snippets, cards } = reviewManager;
-        // A row holding the note's path is asked about, one at a time, as the
-        // modal does each line after the one before
+        // A row holding the note's path or id, or one deleted for good holding
+        // its id, is asked about, one at a time, as the modal does each line
+        // after the one before
         let erased = false;
         const conflicts: LeftoverDeps['conflicts'] = {
           ask: (file, holder, plan) =>
             plan
               ? askToResolve(app, file, plan, getDeviceId(app))
               : askToResolveHeld(app, file, holder, getDeviceId(app)),
+          askFresh: (file, row, as) =>
+            askToImportFresh(app, file, row, as, getDeviceId(app)),
           purge: async (table, id) => {
             await reviewManager.deleteRow(table, id);
             erased = true;

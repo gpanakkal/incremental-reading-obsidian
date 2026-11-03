@@ -7,9 +7,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type {
   MatchedRow,
   Plan,
+  PurgedRow,
   PathHolder as RowAtPath,
 } from './crash-leftovers';
 import {
+  askToImportFresh,
   askToReassociate,
   askToResolve,
   askToResolveHeld,
@@ -67,6 +69,21 @@ const rowAtPathArb: fc.Arbitrary<RowAtPath> = fc.record({
     }),
     { nil: null }
   ),
+});
+
+/**
+ * A row deleted for good holding a note's id, of any table, erased at any
+ * moment or never stamped, by this device, another, or none known.
+ */
+const purgedArb: fc.Arbitrary<PurgedRow> = fc.record({
+  kind: fc.constantFrom(
+    'article' as const,
+    'snippet' as const,
+    'card' as const
+  ),
+  id: fc.uuid(),
+  erasedAt: fc.oneof(fc.constant(0), momentArb),
+  erasedBy: fc.oneof(fc.constant(''), fc.constant(THIS_DEVICE), fc.uuid()),
 });
 
 /** What the user answers the choice, and then the confirmation of an erase. */
@@ -307,6 +324,7 @@ describe('askToResolve', () => {
       target: matchedArb.map((row) => ({ by: 'id' as const, row })),
       evicts: fc.option(rowAtPathArb, { nil: null }),
       erase: fc.constant(false),
+      purged: fc.option(purgedArb, { nil: null }),
       refused: fc.array(
         fc.record({
           row: matchedArb,
@@ -319,6 +337,7 @@ describe('askToResolve', () => {
       target: rowAtPathArb.map((row) => ({ by: 'path' as const, row })),
       evicts: fc.constant(null),
       erase: fc.constant(false),
+      purged: fc.option(purgedArb, { nil: null }),
       refused: fc.array(
         fc.record({
           row: matchedArb,
@@ -393,12 +412,14 @@ describe('askToResolve', () => {
       evicts: null,
       erase: false,
       refused: [],
+      purged: null,
     });
     const refusing = (why: 'copy' | 'held'): Plan => ({
       target: { by: 'path', row: { ...row, kind: 'article', id: 'art-0000' } },
       evicts: null,
       erase: false,
       refused: [{ row, why }],
+      purged: null,
     });
 
     const deleted = await paragraphsOf(byId(row));
@@ -436,6 +457,7 @@ describe('askToResolve', () => {
             evicts: null,
             erase: true,
             refused: [],
+            purged: null,
           };
 
           const answer = await askToResolve(app, file, plan, THIS_DEVICE);
@@ -470,7 +492,13 @@ describe('askToResolve', () => {
     const answered = askToResolve(
       app,
       file,
-      { target: { by: 'id', row }, evicts: null, erase: false, refused: [] },
+      {
+        target: { by: 'id', row },
+        evicts: null,
+        erase: false,
+        refused: [],
+        purged: null,
+      },
       THIS_DEVICE
     );
 
@@ -489,12 +517,129 @@ describe('askToResolve', () => {
     const answer = await askToResolve(
       app,
       file,
-      { target: null, evicts: null, erase: false, refused: [] },
+      {
+        target: null,
+        evicts: null,
+        erase: false,
+        refused: [],
+        purged: null,
+      },
       THIS_DEVICE
     );
 
     expect(answer).toBeNull();
     expect(confirm).not.toHaveBeenCalled();
     expect(choose).not.toHaveBeenCalled();
+  });
+});
+
+describe('askToImportFresh', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const file = { path: 'notes/new.md', basename: 'new' } as TFile;
+  const app = {} as App;
+  const asArb = fc.constantFrom(
+    'article' as const,
+    'snippet' as const,
+    'card' as const
+  );
+
+  it('asks once, showing what was erased for good, by its id, and when and on which device it was, and answers whether the user confirmed, offering nothing to undo it', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        purgedArb,
+        asArb,
+        fc.boolean(),
+        async (row, as, confirmed) => {
+          const confirm = wirePrompt(confirmed);
+          const choose = vi.spyOn(ConfirmModalModule, 'promptForChoice');
+
+          const answer = await askToImportFresh(
+            app,
+            file,
+            row,
+            as,
+            THIS_DEVICE
+          );
+
+          expect(answer).toBe(confirmed);
+          expect(choose).not.toHaveBeenCalled();
+          expect(confirm).toHaveBeenCalledOnce();
+          const [asked, options] = confirm.mock.calls[0];
+          expect(asked).toBe(app);
+          expect(options.destructive).toBeFalsy();
+          expect(options).not.toHaveProperty('alternative');
+          const text = textOf(options);
+          expect(text).toContain(row.id);
+          expect(text).toContain(
+            row.kind === 'article' ? 'An article' : `A ${row.kind}`
+          );
+          expect(text).toContain(`"${file.basename}"`);
+          expect(text).toContain(as);
+          // When and where it was erased, from its stamp, where it has one
+          if (row.erasedAt > 0) expect(text).toContain(dayOf(row.erasedAt));
+          const other = row.erasedBy !== '' && row.erasedBy !== THIS_DEVICE;
+          if (row.erasedAt > 0 && other) {
+            expect(text).toContain(row.erasedBy.slice(0, 8));
+          }
+        }
+      ),
+      { numRuns: 60 }
+    );
+  });
+
+  it('opens in the window the plugin answers from, not over a settings window behind it', async () => {
+    const openModal = vi.spyOn(UiWindow, 'openModal');
+    const row: PurgedRow = {
+      kind: 'snippet',
+      id: 'gone-1234-abcd',
+      erasedAt: 0,
+      erasedBy: '',
+    };
+
+    const answered = askToImportFresh(app, file, row, 'article', THIS_DEVICE);
+
+    expect(openModal).toHaveBeenCalledOnce();
+    const [modal] = openModal.mock.calls[0];
+    expect(modal).toBeInstanceOf(ConfirmModalModule.ConfirmModal);
+    // As Escape or the close button closes it, which ends in `onClose`
+    modal.onClose();
+    await expect(answered).resolves.toBe(false);
+  });
+
+  it('tells a row erased on this device from one erased on another, and says nothing of when for a row never stamped', async () => {
+    const confirm = wirePrompt(false);
+    const row: PurgedRow = {
+      kind: 'card',
+      id: 'gone-1234-abcd',
+      erasedAt: 1_700_000_000_000,
+      erasedBy: THIS_DEVICE,
+    };
+    const textFor = async (r: PurgedRow) => {
+      confirm.mockClear();
+      await askToImportFresh(app, file, r, 'snippet', THIS_DEVICE);
+      return textOf(confirm.mock.calls[0][1]);
+    };
+
+    const linesOf = (text: string) => text.split('\n').length;
+    const here = await textFor(row);
+    const elsewhere = await textFor({ ...row, erasedBy: 'other-5678-efgh' });
+    const unknown = await textFor({ ...row, erasedBy: '' });
+    const never = await textFor({ ...row, erasedAt: 0 });
+
+    expect(here).not.toBe(elsewhere);
+    expect(here).not.toBe(unknown);
+    expect(elsewhere).not.toBe(unknown);
+    expect(here).toContain(dayOf(row.erasedAt));
+    // Of a device not known, nothing is said after the day
+    const day = dayOf(row.erasedAt);
+    expect(unknown.split('\n').find((line) => line.includes(day))).toMatch(
+      new RegExp(`${day}$`)
+    );
+    expect(never).not.toContain(dayOf(row.erasedAt));
+    // The line saying when, and on which device, is left out
+    expect(linesOf(never)).toBeLessThan(linesOf(here));
   });
 });
