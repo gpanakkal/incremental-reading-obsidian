@@ -40,6 +40,13 @@ function makeViewer(openResult: PdfOpenResult = 'loaded') {
 type ModifyHandler = (file: TFile) => void;
 
 /**
+ * Every position store a test wired. A view still mounted when its test ends
+ * leaves the store's storage write scheduled on a real timer, which would fire
+ * after the environment's `window` is gone and fail the whole run.
+ */
+const stores: PositionStore[] = [];
+
+/**
  * The review context the view reads, over a vault whose `modify` listeners
  * the test fires by hand, and a real position store over an item row holding
  * `saved` (`null`: `0`, nothing saved). `written` lists every position the
@@ -93,6 +100,7 @@ function wireContext(saved: number | null = null) {
     rows,
     deviceId: () => 'device',
   });
+  stores.push(positions);
   const written = () => rows.write.mock.calls.map(([, position]) => position);
   const plugin = { app, positions };
   vi.spyOn(ReviewContext, 'useReviewContext').mockReturnValue({
@@ -207,6 +215,7 @@ const subpathArb = fc.oneof(
 // #endregion
 
 afterEach(() => {
+  for (const store of stores.splice(0)) store.persist();
   document.body.innerHTML = '';
   vi.useRealTimers();
   vi.restoreAllMocks();
