@@ -22,7 +22,12 @@ import {
   refusedCharsIn,
   refusedPathWarning,
 } from '#/lib/item-path-guard';
-import { TAG_BY_TABLE } from '#/lib/item-tags';
+import {
+  matchFrontmatterTags,
+  TAG_BY_TABLE,
+  tagsKeyOf,
+  typeOfTags,
+} from '#/lib/item-tags';
 import {
   isCopyImportable,
   isImportable,
@@ -376,14 +381,17 @@ async function tagAsArticle(
 ): Promise<() => Promise<void>> {
   let was: { value: unknown } | null = null;
   let wrote: string | undefined;
+  // Where Obsidian reads tags from, or the note would still read as untagged
+  let key = 'tags';
   await Obsidian.updateFrontMatter(
     file,
     (frontmatter) => {
-      was = Object.hasOwn(frontmatter, 'tags')
-        ? { value: structuredClone(frontmatter.tags) }
+      key = tagsKeyOf(frontmatter);
+      was = Object.hasOwn(frontmatter, key)
+        ? { value: structuredClone(frontmatter[key]) }
         : null;
-      frontmatter.tags = Obsidian._mergeTags(frontmatter.tags, ARTICLE_TAG);
-      wrote = JSON.stringify(frontmatter.tags);
+      frontmatter[key] = Obsidian._mergeTags(frontmatter[key], ARTICLE_TAG);
+      wrote = JSON.stringify(frontmatter[key]);
     },
     app
   );
@@ -393,10 +401,10 @@ async function tagAsArticle(
     await Obsidian.updateFrontMatter(
       file,
       (frontmatter) => {
-        if (JSON.stringify(frontmatter.tags) !== wrote) {
+        if (JSON.stringify(frontmatter[key]) !== wrote) {
           stripFrontmatterTags(frontmatter, [ARTICLE_TAG]);
-        } else if (before) frontmatter.tags = before.value;
-        else delete frontmatter.tags;
+        } else if (before) frontmatter[key] = before.value;
+        else delete frontmatter[key];
       },
       app
     );
@@ -418,15 +426,15 @@ function relinkRow(file: TFile, id: string): MutationStatement {
 
 /**
  * Whether the frontmatter `frontmatter` types its note as an article, by the
- * tags review reads a note's type from (`ObsidianHelpers.typeOfTags`).
+ * tags review reads a note's type from (`typeOfTags`).
  *
  * Tag-only by design: the tag is what this check is about. A note its live
  * article row holds is an article without it (`ItemManager.getItemType`); an
  * import of one only puts the tag back, which Obsidian's tag search and
  * Properties show the item by.
  */
-function typedAsArticle(frontmatter: { tags?: unknown } | undefined): boolean {
-  return Obsidian.typeOfTags(frontmatter?.tags) === 'article';
+function typedAsArticle(frontmatter: unknown): boolean {
+  return typeOfTags(frontmatter) === 'article';
 }
 
 /** How `nameForCopy` names a copy. */
@@ -930,7 +938,7 @@ export class ArticleManager extends ItemManager {
     if (holders.length > 0) {
       return this.reassociateOrRefuse(file, holders, report);
     }
-    if (frontmatter?.tags?.some((tag) => IMPORT_BLOCKED_TAGS.has(tag))) {
+    if (matchFrontmatterTags(frontmatter, IMPORT_BLOCKED_TAGS).length > 0) {
       report.refuse(snippetOrCardNote());
       return null;
     }
@@ -960,7 +968,7 @@ export class ArticleManager extends ItemManager {
         Boolean(refMatch.deleted),
         refMatch.deleted
           ? `Restored "${title}" as an article`
-          : `Repaired "${title}": it's an article again`,
+          : `Put the article tag back on "${title}"`,
         report,
         writer
       );
@@ -1797,7 +1805,7 @@ export class ArticleManager extends ItemManager {
     // import in place refuses one; only that import offers to make a stray
     // note the item's note again (see `reassociateOrRefuse`)
     if (
-      frontmatter?.tags?.some((tag) => IMPORT_BLOCKED_TAGS.has(tag)) ||
+      matchFrontmatterTags(frontmatter, IMPORT_BLOCKED_TAGS).length > 0 ||
       (await this.snippetOrCardHolders(file, existingId)).length > 0
     ) {
       report.refuse(snippetOrCardNote());

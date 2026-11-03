@@ -12,7 +12,14 @@ import {
   MAX_SQL_QUERY_PARAMS,
   SNIPPET_TAG,
 } from './constants';
-import { hasTag, tagEntries, withTag } from './item-tags';
+import {
+  hasTag,
+  isTag,
+  tagEntries,
+  tagsKeyOf,
+  typeOfTags,
+  withTag,
+} from './item-tags';
 import { ObsidianHelpers as Obsidian } from './ObsidianHelpers';
 import { stripFrontmatterTags } from './tags';
 import type { NoteType, SQLiteRepository } from './types';
@@ -276,7 +283,7 @@ function claimOf(
 ): { id: string; type: NoteType | null } | null {
   const frontmatter = app.metadataCache.getFileCache(file)?.frontmatter;
   const id: unknown = frontmatter?.['ir-id'];
-  const type = Obsidian.typeOfTags(frontmatter?.tags);
+  const type = typeOfTags(frontmatter);
   return typeof id === 'string' ? { id, type } : null;
 }
 
@@ -684,18 +691,20 @@ async function adopt(
   type: NoteType
 ): Promise<void> {
   const tag = TAG_OF[type];
-  const others: unknown[] = Object.values(TAG_OF).filter((t) => t !== tag);
-  const isOther = (entry: unknown) => others.includes(entry);
-  const tags: unknown =
-    deps.app.metadataCache.getFileCache(file)?.frontmatter?.tags;
-  if (!hasTag(tags, tag) || tagEntries(tags).some(isOther)) {
+  const others = Object.values(TAG_OF).filter((t) => t !== tag);
+  const isOther = (entry: unknown) =>
+    others.some((other) => isTag(entry, other));
+  const cached = deps.app.metadataCache.getFileCache(file)?.frontmatter;
+  if (!hasTag(cached, tag) || others.some((other) => hasTag(cached, other))) {
     await Obsidian.updateFrontMatter(
       file,
       (frontmatter) => {
-        const entries = tagEntries(frontmatter.tags);
+        // Where Obsidian reads tags from, which is where it reads the others
+        const key = tagsKeyOf(frontmatter);
+        const entries = tagEntries(frontmatter[key]);
         const kept = entries.filter((entry) => !isOther(entry));
-        frontmatter.tags = withTag(
-          kept.length < entries.length ? kept : frontmatter.tags,
+        frontmatter[key] = withTag(
+          kept.length < entries.length ? kept : frontmatter[key],
           tag
         );
       },
@@ -810,12 +819,19 @@ export async function resolveLeftover(
           // Every item type's tag: one typed by the row holding its id may
           // carry another type's. A note typed by its folder alone has no
           // type tag to take off, and its tags are left as they are
-          const typeTags: unknown[] = Object.values(TAG_OF);
-          const tags = tagEntries(frontmatter.tags);
-          if (!tags.some((tag) => typeTags.includes(tag))) return;
-          const kept = tags.filter((tag) => !typeTags.includes(tag));
-          if (kept.length > 0) frontmatter.tags = kept;
-          else delete frontmatter.tags;
+          const typeTags = Object.values(TAG_OF);
+          const isTypeTag = (tag: unknown) =>
+            typeTags.some((typeTag) => isTag(tag, typeTag));
+          // Off the key Obsidian reads tags from; one dropped for holding
+          // nothing else hands that role to the next, so on to that one
+          while (typeTags.some((typeTag) => hasTag(frontmatter, typeTag))) {
+            const key = tagsKeyOf(frontmatter);
+            const kept = tagEntries(frontmatter[key]).filter(
+              (tag) => !isTypeTag(tag)
+            );
+            if (kept.length > 0) frontmatter[key] = kept;
+            else delete frontmatter[key];
+          }
         },
         app as App
       );

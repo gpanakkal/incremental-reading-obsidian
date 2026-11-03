@@ -9,6 +9,12 @@ import {
 import { SnippetManager } from '#/lib/items/SnippetManager';
 import { evictedSpot } from '#/lib/moved-note-scan';
 import { makeItemVault, TestRepository } from '#/test/item-vault';
+import {
+  frontmatterArb,
+  obsidianCarries,
+  obsidianTypeOf,
+  tagsValueArb,
+} from '#/test/obsidian-tags';
 import fc from 'fast-check';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
@@ -33,6 +39,7 @@ import {
   leftoversMessage,
   resolveLeftover,
 } from './crash-leftovers';
+import { typeOfTags } from './item-tags';
 import { ObsidianHelpers as Obsidian } from './ObsidianHelpers';
 
 import type { NoteType } from './types';
@@ -119,7 +126,7 @@ const pathOf = (note: NoteCase, i: number) => `${note.folder}notes/n${i}.md`;
 
 /** The type a note's tags name, as `typeOfTags` ranks them. */
 const typeOf = (note: NoteCase): NoteType | null =>
-  note.type && Obsidian.typeOfTags(tagsOf(note));
+  note.type && typeOfTags({ tags: tagsOf(note) });
 
 function tagsOf(note: NoteCase): string | string[] | undefined {
   if (!note.type) return undefined;
@@ -224,10 +231,13 @@ async function wireLeftover(
   type: NoteType | null,
   path: string,
   id = 'left-1',
-  { tags = type ? ['other', TAG_OF[type]] : ['other'] }: { tags?: unknown } = {}
+  {
+    tags = type ? ['other', TAG_OF[type]] : ['other'],
+    frontmatter = { tags },
+  }: { tags?: unknown; frontmatter?: Record<string, unknown> | null } = {}
 ) {
   const vault = makeItemVault({
-    [path]: { 'ir-id': id, tags, title: 'kept' },
+    [path]: { 'ir-id': id, ...frontmatter, title: 'kept' },
   });
   const repo = await TestRepository.create();
   const plugin = { app: vault.app, settings: {} } as never;
@@ -1179,6 +1189,78 @@ describe('resolveLeftover', () => {
     }
   );
 
+  it('leaves a note it adopts read by Obsidian as the type it was adopted as, however its tags were written', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        tagsValueArb,
+        fc.constantFrom<NoteType>('article', 'snippet'),
+        async (tags, as) => {
+          vi.restoreAllMocks();
+          const path = 'notes/a.md';
+          const { vault, deps, leftover } = await wireLeftover(
+            null,
+            path,
+            'left-1',
+            { tags }
+          );
+
+          expect(await resolveLeftover(deps, leftover, 'adopt', as)).toEqual({
+            done: true,
+          });
+
+          expect(obsidianTypeOf(vault.frontmatterOf(path))).toBe(as);
+        }
+      ),
+      { numRuns: 40 }
+    );
+  });
+
+  it('tags a note it adopts, and takes the tag off one it strips, where Obsidian reads tags, whatever key the note keeps them under', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        frontmatterArb.map((frontmatter) => {
+          // The note's own id and title are the ones the leftover is made with
+          const { 'ir-id': _id, title: _title, ...rest } = frontmatter ?? {};
+          return rest;
+        }),
+        typeArb,
+        fc.constantFrom<'adopt' | 'strip'>('adopt', 'strip'),
+        async (frontmatter, type, action) => {
+          vi.restoreAllMocks();
+          // Typed by its folder, so even a note Obsidian reads no tag on is one
+          const path = `${Obsidian.getDirectory(type)}/a.md`;
+          const { vault, deps, leftover } = await wireLeftover(
+            null,
+            path,
+            'left-1',
+            { frontmatter }
+          );
+
+          expect(
+            await resolveLeftover(deps, leftover, action, leftover.type)
+          ).toEqual({ done: true });
+
+          const after = vault.frontmatterOf(path);
+          if (action === 'adopt') {
+            expect(obsidianTypeOf(after)).toBe(leftover.type);
+          } else if (leftover.type) {
+            expect(obsidianCarries(after, TAG_OF[leftover.type])).toBe(false);
+          }
+        }
+      ),
+      {
+        numRuns: 60,
+        examples: [
+          [{ Tags: ['mine'] }, 'article', 'adopt'],
+          [{ TAGS: 'mine', tags: ['other'] }, 'snippet', 'adopt'],
+          [{ Tags: [CARD_TAG, 'mine'] }, 'article', 'adopt'],
+          [{ Tags: [ARTICLE_TAG, 'mine'] }, 'article', 'strip'],
+          [{ Tags: ARTICLE_TAG, tags: [ARTICLE_TAG] }, 'article', 'strip'],
+        ],
+      }
+    );
+  });
+
   it.each(['article', 'snippet'] as const)(
     'adopts a leftover of no known type as the %s the user chose, tagging it so',
     async (as) => {
@@ -1224,13 +1306,18 @@ describe('resolveLeftover', () => {
     await fc.assert(
       fc.asyncProperty(
         fc.option(
-          fc.oneof(fc.string(), fc.array(fc.string(), { maxLength: 3 })),
+          fc.oneof(
+            fc.string(),
+            fc.array(fc.string(), { maxLength: 3 }),
+            // Type tags Obsidian reads no tag from, a lone string of words say
+            tagsValueArb
+          ),
           { nil: undefined }
         ),
         fc.constantFrom(...FOLDERS),
         async (tags, folder) => {
           // Tags naming no item type, or the note would be typed by them
-          fc.pre(Obsidian.typeOfTags(tags) === null);
+          fc.pre(typeOfTags({ tags }) === null);
           vi.restoreAllMocks();
           const path = `${folder}a.md`;
           const vault = makeItemVault({
@@ -1257,6 +1344,20 @@ describe('resolveLeftover', () => {
       ),
       { numRuns: 40 }
     );
+  });
+
+  it('strips no type tag from a lone string Obsidian reads no tag from, typed by its folder', async () => {
+    const path = `${Obsidian.getDirectory('article')}/a.md`;
+    const tags = `${ARTICLE_TAG} other`;
+    const { vault, deps, leftover } = await wireLeftover(null, path, 'left-1', {
+      tags,
+    });
+
+    expect(await resolveLeftover(deps, leftover, 'strip')).toEqual({
+      done: true,
+    });
+
+    expect(vault.frontmatterOf(path)).toEqual({ tags, title: 'kept' });
   });
 
   it('trashes a leftover with no type tag that the plugin made', async () => {
@@ -1765,7 +1866,7 @@ describe('resolveLeftover at a held path', () => {
           expect(id).not.toBe(HOLDER_ID);
           const frontmatter = vault.frontmatterOf(path);
           expect(frontmatter?.['ir-id']).toBe(id);
-          expect(Obsidian.typeOfTags(frontmatter?.tags)).toBe(as);
+          expect(typeOfTags(frontmatter)).toBe(as);
           expect(frontmatter?.title).toBe('kept');
         }
       ),
@@ -2131,7 +2232,7 @@ describe('findLeftovers of moved notes', () => {
               // unless a card's: saved as a new item, it is no card's note
               type:
                 match?.kind ??
-                Obsidian.typeOfTags(note.tags) ??
+                typeOfTags({ tags: note.tags }) ??
                 (holder?.kind === 'card' ? null : holder?.kind) ??
                 null,
               match: match && { id: match.id, reference: match.reference },
@@ -2169,7 +2270,7 @@ describe('findLeftovers of moved notes', () => {
             choice: null,
           });
 
-          const typed = Obsidian.typeOfTags(tags);
+          const typed = typeOfTags({ tags });
           expect(leftover).toMatchObject({
             id: 'left-1',
             type: typed ?? (kind === 'card' ? null : kind),

@@ -18,6 +18,7 @@ import {
   DATA_DIRECTORY,
   IMPORT_BLOCKED_TAGS,
 } from './constants';
+import { matchFrontmatterTags } from './item-tags';
 import { isImportable, supportsFrontmatter } from './mime';
 import { notify } from './notices';
 import type { SyncGate } from './obsidian-sync';
@@ -25,7 +26,6 @@ import {
   loadAutoImportWatermark,
   saveAutoImportWatermark,
 } from './plugin-data';
-import { matchFrontmatterTags } from './tags';
 import {
   ledgerArrivals,
   loadWatchedFolderLedger,

@@ -17,9 +17,7 @@ import {
 } from 'obsidian';
 import {
   ARTICLE_DIRECTORY,
-  ARTICLE_TAG,
   CARD_DIRECTORY,
-  CARD_TAG,
   CONTENT_TITLE_MAX_BYTES,
   CONTENT_TITLE_SLICE_LENGTH,
   CONTROL_TITLE_CHARS,
@@ -29,10 +27,10 @@ import {
   FRONTMATTER_PATTERN,
   INVALID_TITLE_MESSAGE,
   SNIPPET_DIRECTORY,
-  SNIPPET_TAG,
   SOURCE_PROPERTY_NAME,
   SOURCE_TAG,
 } from './constants';
+import { hasTag, isTagsKey, tagsKeyOf, typeOfTags } from './item-tags';
 import { Markdown } from './Markdown';
 import { isEditableText, supportsFrontmatter } from './mime';
 import { isNestedEditor } from './nested-editor';
@@ -401,22 +399,8 @@ export class ObsidianHelpers {
   }
 
   /**
-   * The note type a frontmatter `tags` value names, the article tag ranking
-   * over the snippet tag over the card tag; null when it names none, or isn't a
-   * list or a string. A lone string is searched rather than compared, as it
-   * always has been, so `ir-article, other` names an article.
-   */
-  static typeOfTags(tags: unknown): NoteType | null {
-    if (!Array.isArray(tags) && typeof tags !== 'string') return null;
-    if (tags.includes(ARTICLE_TAG)) return 'article';
-    if (tags.includes(SNIPPET_TAG)) return 'snippet';
-    if (tags.includes(CARD_TAG)) return 'card';
-    return null;
-  }
-
-  /**
-   * Gets the type of a note based on its tags, without writing the note (see
-   * {@link readFrontMatter}).
+   * Gets the type of a note based on its tags, as `typeOfTags` reads them,
+   * without writing the note (see {@link readFrontMatter}).
    *
    * Notes only: a file with no frontmatter, a PDF say, has no tags to go by and
    * is never read, so it answers `null` here even when it is an item. Code that
@@ -446,7 +430,7 @@ export class ObsidianHelpers {
     }
     // Deleted once the vault reports it, though its text may still be cached
     if (app.vault.getFileByPath(note.path) !== note) return null;
-    return this.typeOfTags(frontmatter.tags);
+    return typeOfTags(frontmatter);
   }
 
   /**
@@ -467,7 +451,7 @@ export class ObsidianHelpers {
     app: App
   ): NoteType | null {
     if (app.vault.getFileByPath(note.path) !== note) return null;
-    return this.typeOfTags(cache?.frontmatter?.tags);
+    return typeOfTags(cache?.frontmatter);
   }
 
   /**
@@ -518,12 +502,11 @@ export class ObsidianHelpers {
   }
 
   /**
-   * Check if a file has the ir-source tag
+   * Whether a file's cached frontmatter carries the ir-source tag (see
+   * `hasTag`)
    */
   static isSourceNote(file: TFile, app: App): boolean {
-    const { tags } = this.getFrontMatter(file, app) ?? {};
-    if (!tags) return false;
-    return tags.includes(SOURCE_TAG);
+    return hasTag(this.getFrontMatter(file, app), SOURCE_TAG);
   }
 
   /**
@@ -763,7 +746,8 @@ export class ObsidianHelpers {
           Object.assign(frontmatter, rest);
           // An update without tags leaves the note's tags as they are
           if (tags !== undefined) {
-            frontmatter.tags = this._mergeTags(frontmatter.tags, tags);
+            const key = tagsKeyOf(frontmatter);
+            frontmatter[key] = this._mergeTags(frontmatter[key], tags);
           }
         }
       );
@@ -787,7 +771,14 @@ export class ObsidianHelpers {
     // What each key held, once the update has read the note
     const before: { keys?: [string, { value: unknown } | null][] } = {};
     await this.updateFrontMatter(file, updates, app, (frontmatter) => {
-      before.keys = Object.keys(updates).map((key) => [
+      // Tags go under whichever key Obsidian reads them from once the edit
+      // has run, and the edit may drop one, so every key that could be it
+      const keys = Object.keys(updates).flatMap((key) =>
+        key === 'tags'
+          ? [...new Set([...Object.keys(frontmatter).filter(isTagsKey), key])]
+          : [key]
+      );
+      before.keys = keys.map((key) => [
         key,
         Object.hasOwn(frontmatter, key)
           ? { value: structuredClone(frontmatter[key]) }

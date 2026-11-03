@@ -420,9 +420,9 @@ describe('readsAsTampering', () => {
 describe('classifyTag', () => {
   /** `tags` lacking `tag`, as a list or a lone string. */
   const tagsLackingArb = (tag: string) =>
-    tagsArb.filter((tags) => !hasTag(tags, tag));
+    tagsArb.filter((tags) => !hasTag({ tags }, tag));
 
-  /** `tags` carrying `tag` as an entry, as a list or a lone string. */
+  /** `tags` carrying `tag`, as a list or a lone string, spelled as Obsidian reads it. */
   const tagsCarryingArb = (tag: string) =>
     fc.oneof(
       fc
@@ -432,7 +432,7 @@ describe('classifyTag', () => {
           tags.splice(at % (others.length + 1), 0, tag);
           return tags as unknown;
         }),
-      fc.constantFrom(`${tag}`, `other, ${tag}`, `${tag} other`)
+      fc.constantFrom(tag, `#${tag}`, ` ${tag.toUpperCase()} `)
     );
 
   /**
@@ -510,7 +510,7 @@ describe('classifyTag', () => {
           }))
         ),
         ({ path, owner, irId, holders, tags }) => {
-          expect(classifyTag({ path, irId }, tags, holders)).toStrictEqual({
+          expect(classifyTag({ path, irId }, { tags }, holders)).toStrictEqual({
             row: { table: owner.table, id: owner.id },
             path,
             tag: TAG_BY_TABLE[owner.table],
@@ -530,7 +530,7 @@ describe('classifyTag', () => {
           }))
         ),
         ({ path, irId, holders, tags }) => {
-          expect(classifyTag({ path, irId }, tags, holders)).toBeNull();
+          expect(classifyTag({ path, irId }, { tags }, holders)).toBeNull();
         }
       )
     );
@@ -539,7 +539,7 @@ describe('classifyTag', () => {
   it('finds no tag lost from a note no single live row at its path answers to, whatever its tags', () => {
     fc.assert(
       fc.property(unownedArb, tagsArb, ({ path, irId, holders }, tags) => {
-        expect(classifyTag({ path, irId }, tags, holders)).toBeNull();
+        expect(classifyTag({ path, irId }, { tags }, holders)).toBeNull();
       })
     );
   });
@@ -557,13 +557,13 @@ describe('classifyTag', () => {
             ...tombstones.map((row) => holder(row.table, row.id, true)),
             holder(table, id),
           ];
-          expect(classifyTag({ path, irId }, ['other'], holders)).toStrictEqual(
-            {
-              row: { table, id },
-              path,
-              tag: TAG_BY_TABLE[table],
-            }
-          );
+          expect(
+            classifyTag({ path, irId }, { tags: ['other'] }, holders)
+          ).toStrictEqual({
+            row: { table, id },
+            path,
+            tag: TAG_BY_TABLE[table],
+          });
         }
       )
     );
@@ -571,47 +571,42 @@ describe('classifyTag', () => {
 
   it('leaves a note alone that claims an id no live row at its path holds', () => {
     expect(
-      classifyTag(
-        { path: 'a.md', irId: 'typed-over' },
-        [],
-        [holder('article', 'a1')]
-      )
+      classifyTag({ path: 'a.md', irId: 'typed-over' }, {}, [
+        holder('article', 'a1'),
+      ])
     ).toBeNull();
     expect(
-      classifyTag(
-        { path: 'a.md', irId: 'a1' },
-        [],
-        [holder('article', 'a1', true)]
-      )
+      classifyTag({ path: 'a.md', irId: 'a1' }, {}, [
+        holder('article', 'a1', true),
+      ])
     ).toBeNull();
-    expect(classifyTag({ path: 'a.md', irId: undefined }, [], [])).toBeNull();
+    expect(classifyTag({ path: 'a.md', irId: undefined }, {}, [])).toBeNull();
   });
 
   it('leaves a note alone that more than one live row could own', () => {
     const holders = [holder('article', 'a1'), holder('snippet', 's1')];
     expect(
-      classifyTag({ path: 'a.md', irId: undefined }, [], holders)
+      classifyTag({ path: 'a.md', irId: undefined }, {}, holders)
     ).toBeNull();
     expect(
-      classifyTag(
-        { path: 'a.md', irId: 'a1' },
-        [],
-        [holder('article', 'a1'), holder('snippet', 'a1')]
-      )
+      classifyTag({ path: 'a.md', irId: 'a1' }, {}, [
+        holder('article', 'a1'),
+        holder('snippet', 'a1'),
+      ])
     ).toBeNull();
   });
 
-  it('reads a lone string of tags as a list of them', () => {
+  it('reads a lone string as one tag, as Obsidian does', () => {
     const holders = [holder('snippet', 's1')];
+    expect(
+      classifyTag({ path: 'a.md', irId: 's1' }, { tags: SNIPPET_TAG }, holders)
+    ).toBeNull();
     expect(
       classifyTag(
         { path: 'a.md', irId: 's1' },
-        'other ir-text-snippet',
+        { tags: 'other ir-text-snippet' },
         holders
       )
-    ).toBeNull();
-    expect(
-      classifyTag({ path: 'a.md', irId: 's1' }, 'ir-text-snippet-x', holders)
     ).toStrictEqual({
       row: { table: 'snippet', id: 's1' },
       path: 'a.md',
@@ -631,10 +626,14 @@ describe('classifyTag', () => {
           )
         ),
         ({ path, irId, holders, tags }) => {
-          const first = classifyTag({ path, irId }, tags, holders);
+          const first = classifyTag({ path, irId }, { tags }, holders);
           fc.pre(first !== null);
           expect(
-            classifyTag({ path, irId }, withTag(tags, first.tag), holders)
+            classifyTag(
+              { path, irId },
+              { tags: withTag(tags, first.tag) },
+              holders
+            )
           ).toBeNull();
         }
       )
@@ -705,35 +704,37 @@ describe('settleAfterSync', () => {
 
   it('waits its wait out, then any merge under way by then, for at most as long again', async () => {
     await fc.assert(
-      fc.asyncProperty(
-        // Not 0: the fake clock runs a 0ms timer set inside another one a
-        // millisecond late (`duringTick` in @sinonjs/fake-timers)
-        fc.option(fc.integer({ min: 1, max: 5000 }), { nil: undefined }),
-        // When a merge starts and ends, from the call
-        fc
-          .tuple(fc.nat({ max: 15_000 }), fc.nat({ max: 15_000 }))
-          .map(([x, y]) => ({ start: Math.min(x, y), end: Math.max(x, y) })),
-        async (waitMs, merge) => {
-          vi.useFakeTimers();
-          const wait = waitMs ?? MERGE_WAIT_MS;
-          const repo = makeReadiness();
-          // Set before the wait's own timer, so these win a tie with it
-          setTimeout(() => repo.set('merging'), merge.start);
-          setTimeout(() => repo.set('ready'), merge.end);
-          const started = Date.now();
-          let settledAfter: number | null = null;
-          void settleAfterSync(repo, waitMs).then(() => {
-            settledAfter = Date.now() - started;
-          });
+      fc
+        .asyncProperty(
+          // Not 0: the fake clock runs a 0ms timer set inside another one a
+          // millisecond late (`duringTick` in @sinonjs/fake-timers)
+          fc.option(fc.integer({ min: 1, max: 5000 }), { nil: undefined }),
+          // When a merge starts and ends, from the call
+          fc
+            .tuple(fc.nat({ max: 15_000 }), fc.nat({ max: 15_000 }))
+            .map(([x, y]) => ({ start: Math.min(x, y), end: Math.max(x, y) })),
+          async (waitMs, merge) => {
+            vi.useFakeTimers();
+            const wait = waitMs ?? MERGE_WAIT_MS;
+            const repo = makeReadiness();
+            // Set before the wait's own timer, so these win a tie with it
+            setTimeout(() => repo.set('merging'), merge.start);
+            setTimeout(() => repo.set('ready'), merge.end);
+            const started = Date.now();
+            let settledAfter: number | null = null;
+            void settleAfterSync(repo, waitMs).then(() => {
+              settledAfter = Date.now() - started;
+            });
 
-          await vi.advanceTimersByTimeAsync(4 * wait + 20_000);
+            await vi.advanceTimersByTimeAsync(4 * wait + 20_000);
 
-          const mergingAtWait = merge.start <= wait && wait < merge.end;
-          expect(settledAfter).toBe(
-            mergingAtWait ? Math.min(merge.end, 2 * wait) : wait
-          );
-        }
-      ).afterEach(() => vi.useRealTimers())
+            const mergingAtWait = merge.start <= wait && wait < merge.end;
+            expect(settledAfter).toBe(
+              mergingAtWait ? Math.min(merge.end, 2 * wait) : wait
+            );
+          }
+        )
+        .afterEach(() => vi.useRealTimers())
     );
   });
 });
@@ -1100,7 +1101,10 @@ describe('createIrIdWatch', () => {
                   [purgedReference(id), id]
                 );
               } else if (fate === 'restored') {
-                vault.notes.set(reference, { 'ir-id': id, tags: [ARTICLE_TAG] });
+                vault.notes.set(reference, {
+                  'ir-id': id,
+                  tags: [ARTICLE_TAG],
+                });
               } else if (fate === 'retagged') {
                 vault.notes.set(reference, { tags: [ARTICLE_TAG, 'x'] });
               } else if (fate === 'removed') {
@@ -1291,7 +1295,7 @@ describe('createIrIdWatch', () => {
               return (
                 shown.has(path) &&
                 (readsAsTampering({ path, irId }, holders) ||
-                  classifyTag({ path, irId }, tags, holders) !== null)
+                  classifyTag({ path, irId }, { tags }, holders) !== null)
               );
             })
             .map(({ path }) => path);

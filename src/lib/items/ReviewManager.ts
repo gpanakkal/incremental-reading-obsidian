@@ -13,6 +13,7 @@ import type {
   ImportedArticle,
 } from '#/lib/bulk-import/types';
 import { refusedCharsIn } from '#/lib/item-path-guard';
+import { typeOfTags } from '#/lib/item-tags';
 import { batchAfterLinkUpdates } from '#/lib/link-update-queue';
 import { appendLog } from '#/lib/log-file';
 import {
@@ -1088,7 +1089,7 @@ export default class ReviewManager {
     // Tag-only by design: the item resolver needs the row's reference to be
     // the note's path, which is what a move changes; an untagged note follows
     // only from its own reference (see `#followUntagged`)
-    const type = Obsidian.typeOfTags(frontmatter.tags);
+    const type = typeOfTags(frontmatter);
     let rowId = irIdOf(frontmatter);
     this.snippets.offsetTracker.renameFile(oldPath, file.path);
     if (!type) {

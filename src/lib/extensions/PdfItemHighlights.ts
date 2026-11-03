@@ -1,4 +1,5 @@
 import { CARD_TAG } from '#/lib/constants';
+import { hasTag } from '#/lib/item-tags';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import { isPdfView, pdfTabSelection } from '#/lib/pdf/obsidian-pdf';
 import { createPdfHighlightHover } from '#/lib/pdf/pdf-highlight-hover';
@@ -195,7 +196,7 @@ export function showPdfItemHighlights(
    * re-read through `onDataChange`.
    */
   const linksHere = (note: TFile) =>
-    Obsidian.getFrontMatter(note, plugin.app)?.tags?.includes(CARD_TAG) &&
+    hasTag(Obsidian.getFrontMatter(note, plugin.app), CARD_TAG) &&
     Obsidian.sourceIs(note, file, plugin.app);
 
   const unsubscribe = reviewManager.repo.onDataChange((event) => {

@@ -1,5 +1,6 @@
 import type { CachedMetadata } from 'obsidian';
 import { ARTICLE_TAG, CARD_TAG, SNIPPET_TAG } from './constants';
+import { frontmatterTags } from './item-tags';
 
 /**
  * Tags as the user types a list of them and as a note's frontmatter holds
@@ -16,7 +17,10 @@ import { ARTICLE_TAG, CARD_TAG, SNIPPET_TAG } from './constants';
  */
 const TAG_SEPARATORS = /[\s,#]+/;
 
-/** The frontmatter keys Obsidian reads tags from: `tags`, or the older `tag`. */
+/**
+ * The frontmatter keys tags are taken off: `tags`, which Obsidian reads, and
+ * the older `tag`, which only its format converter still knows.
+ */
 const TAG_KEY = /^tags?$/i;
 
 /** A tag as compared: no leading `#`, in lower case. */
@@ -44,43 +48,9 @@ export function formatTagList(tags: readonly string[]): string {
 }
 
 /**
- * Those of `tags` that `frontmatter` carries, in the order given.
- *
- * Reads every key Obsidian reads tags from, whatever its case. A key's value
- * can be one string or a list, and any string can hold several tags, read as
- * {@link parseTagList} reads them; anything else in it is ignored. Returns
- * which tags matched rather than whether any did, so a caller can act on
- * exactly those.
- *
- * Never writes to `frontmatter`, which is the metadata cache's own object.
- */
-export function matchFrontmatterTags(
-  frontmatter: Readonly<Record<string, unknown>> | null | undefined,
-  tags: Iterable<string>
-): string[] {
-  const carried = frontmatterTags(frontmatter);
-  return [...tags].filter((tag) => carried.has(normalizeTag(tag)));
-}
-
-/** The tags `frontmatter` carries, as compared (see {@link matchFrontmatterTags}). */
-function frontmatterTags(
-  frontmatter: Readonly<Record<string, unknown>> | null | undefined
-): Set<string> {
-  const carried = new Set<string>();
-  for (const [key, value] of Object.entries(frontmatter ?? {})) {
-    if (!TAG_KEY.test(key)) continue;
-    for (const entry of Array.isArray(value) ? value : [value]) {
-      if (typeof entry !== 'string') continue;
-      for (const tag of parseTagList(entry)) carried.add(tag);
-    }
-  }
-  return carried;
-}
-
-/**
  * Those of `tags` that the note `cache` describes carries, in the order
  * given, as Obsidian's tag search finds them: in its frontmatter (read as
- * {@link matchFrontmatterTags} reads it) or in its body (`cache.tags`), in
+ * `frontmatterTags` reads it) or in its body (`cache.tags`), in
  * any case, `#` optional, and a nested tag counting as each tag it is nested
  * in, so `tag` matches `#tag/sub` but not `#tags` nor `#other/tag`. A tag
  * that is nothing but `#`s matches nothing.
@@ -94,7 +64,7 @@ export function matchAnyTags(
     | undefined,
   tags: Iterable<string>
 ): string[] {
-  const carried = frontmatterTags(cache?.frontmatter);
+  const carried = new Set(frontmatterTags(cache?.frontmatter));
   for (const { tag } of cache?.tags ?? []) carried.add(normalizeTag(tag));
   return [...tags].filter((asked) => {
     const tag = normalizeTag(asked);
@@ -113,9 +83,10 @@ const isBlank = (entry: unknown) =>
   (typeof entry === 'string' && entry.trim() === '');
 
 /**
- * Take `tags` off `frontmatter`, compared as {@link matchFrontmatterTags}
- * compares them, from every key Obsidian reads tags from, leaving every other
- * tag where it was.
+ * Take `tags` off `frontmatter`, in any case, `#`s optional, from every key
+ * tags are written under (see {@link TAG_KEY}), leaving every other tag where
+ * it was. A string is split as {@link parseTagList} splits one, so this takes
+ * off more than `hasTag` finds, never less.
  *
  * A key holding none of them is left exactly as it is. One that held any
  * becomes the list of what is left of it, each tag as it was spelled, less

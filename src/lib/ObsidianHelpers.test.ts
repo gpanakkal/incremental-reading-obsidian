@@ -13,7 +13,7 @@ import {
   SOURCE_PROPERTY_NAME,
   SOURCE_TAG,
 } from '#/lib/constants';
-import { hasTag } from '#/lib/item-tags';
+import { hasTag, tagEntries } from '#/lib/item-tags';
 import { ObsidianHelpers } from '#/lib/ObsidianHelpers';
 import { stripFrontmatterTags } from '#/lib/tags';
 import type { NoteType } from '#/lib/types';
@@ -21,6 +21,12 @@ import { Notice } from '#/test/__mocks__/obsidian';
 import { makeWindow } from '#/test/fake-window';
 import { makeItemVault } from '#/test/item-vault';
 import { noteText } from '#/test/note-text';
+import {
+  frontmatterArb,
+  obsidianCarries,
+  obsidianTypeOf,
+  PLUGIN_TAGS,
+} from '#/test/obsidian-tags';
 import type { EditorState } from '@codemirror/state';
 import fc from 'fast-check';
 import {
@@ -881,24 +887,6 @@ const tagsValueArb = fc.oneof(
   jsonRoundTripArb,
   fc.constant(undefined)
 );
-
-/** The type the highest-ranked type tag in `has` names. */
-function rankedType(has: (tag: string) => boolean): NoteType | null {
-  if (has(ARTICLE_TAG)) return 'article';
-  if (has(SNIPPET_TAG)) return 'snippet';
-  if (has(CARD_TAG)) return 'card';
-  return null;
-}
-
-/**
- * The type a `tags` value names, worked out apart from the code under test: a
- * list holds its tags as entries, a lone string anywhere in its text.
- */
-function expectedTypeOf(tags: unknown): NoteType | null {
-  if (Array.isArray(tags)) return rankedType((tag) => tags.includes(tag));
-  if (typeof tags === 'string') return rankedType((tag) => tags.includes(tag));
-  return null;
-}
 
 /** The error the `parseYaml` stub throws for `block`, to compare a rejection to. */
 function parseErrorOf(block: string): unknown {
@@ -3587,55 +3575,6 @@ describe('readFrontMatter', () => {
 });
 
 // ---------------------------------------------------------------------------
-// typeOfTags
-// ---------------------------------------------------------------------------
-describe('typeOfTags', () => {
-  it('names the type of the highest-ranked type tag in a list', () => {
-    fc.assert(
-      fc.property(fc.array(typedTagEntryArb), (tags) => {
-        expect(ObsidianHelpers.typeOfTags(tags)).toBe(
-          rankedType((tag) => tags.includes(tag))
-        );
-      })
-    );
-  });
-
-  it('reads a lone type tag as that type', () => {
-    expect(ObsidianHelpers.typeOfTags(ARTICLE_TAG)).toBe('article');
-    expect(ObsidianHelpers.typeOfTags(SNIPPET_TAG)).toBe('snippet');
-    expect(ObsidianHelpers.typeOfTags(CARD_TAG)).toBe('card');
-  });
-
-  it('names the type of any type tag a lone string holds, ranked as in a list', () => {
-    // As before this was its own function: a lone string is searched, not
-    // compared, so `ir-article, ir-card` reads as both tags
-    fc.assert(
-      fc.property(loneTagStringArb, (tags) => {
-        expect(ObsidianHelpers.typeOfTags(tags)).toBe(
-          rankedType((tag) => tags.includes(tag))
-        );
-      })
-    );
-  });
-
-  it('answers null for tags that are neither a list nor a string', () => {
-    fc.assert(
-      fc.property(
-        fc.oneof(
-          fc.constant(undefined),
-          jsonRoundTripArb.filter(
-            (value) => typeof value !== 'string' && !Array.isArray(value)
-          )
-        ),
-        (tags) => {
-          expect(ObsidianHelpers.typeOfTags(tags)).toBeNull();
-        }
-      )
-    );
-  });
-});
-
-// ---------------------------------------------------------------------------
 // getNoteType
 // ---------------------------------------------------------------------------
 describe('getNoteType', () => {
@@ -3716,8 +3655,9 @@ describe('getNoteType', () => {
           const { app, file, writes } = makeNoteApp(
             noteText(frontmatter, body)
           );
+          // As YAML hands it back: a key with no value is not written
           await expect(ObsidianHelpers.getNoteType(file, app)).resolves.toBe(
-            expectedTypeOf(tags)
+            obsidianTypeOf(JSON.parse(JSON.stringify(frontmatter)))
           );
           expectNoWrites(writes);
         }
@@ -3798,7 +3738,7 @@ describe('getNoteType', () => {
       fc.asyncProperty(handWrittenTagsArb, async ({ tags, yaml }) => {
         const { app, file, writes } = makeNoteApp(`---\n${yaml}\n---\nbody`);
         await expect(ObsidianHelpers.getNoteType(file, app)).resolves.toBe(
-          rankedType((tag) => tags.includes(tag))
+          obsidianTypeOf({ tags })
         );
         expectNoWrites(writes);
       })
@@ -3841,7 +3781,7 @@ describe('noteTypeFromCache', () => {
           const frontmatter = { ...rest, tags };
           expect(
             ObsidianHelpers.noteTypeFromCache(file, { frontmatter }, app)
-          ).toBe(expectedTypeOf(tags));
+          ).toBe(obsidianTypeOf(frontmatter));
           expect(cachedRead).not.toHaveBeenCalled();
           expectNoWrites(writes);
         }
@@ -6054,16 +5994,49 @@ describe('updateFrontMatterUndoably', () => {
           expect(vault.processFrontMatter).toHaveBeenCalledOnce();
           const after = vault.frontmatterOf(path)!;
           expect(after['ir-id']).toBe('i');
-          expect(hasTag(after.tags, SNIPPET_TAG)).toBe(true);
+          expect(hasTag(after, SNIPPET_TAG)).toBe(true);
           for (const key of ['tags', 'tag', 'Tags']) {
             for (const tag of dropped)
-              expect(hasTag(after[key], tag)).toBe(false);
+              expect(tagEntries(after[key])).not.toContain(tag);
           }
           expect(after.title).toEqual(frontmatter.title);
           await undo();
           expect(vault.frontmatterOf(path) ?? {}).toEqual(frontmatter);
         }
       )
+    );
+  });
+
+  it('writes the tags where Obsidian reads them, whatever key a note keeps them under, and its undo puts the note back as it was', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        frontmatterArb,
+        fc.subarray([...PLUGIN_TAGS], { minLength: 1 }),
+        async (frontmatter, tags) => {
+          const path = 'notes/a.md';
+          const vault = makeItemVault({ [path]: structuredClone(frontmatter) });
+
+          const undo = await ObsidianHelpers.updateFrontMatterUndoably(
+            vault.files.get(path)!,
+            { 'ir-id': 'i', tags },
+            vault.app as never
+          );
+
+          const after = vault.frontmatterOf(path);
+          for (const tag of tags) {
+            expect(obsidianCarries(after, tag)).toBe(true);
+          }
+          await undo();
+          expect(vault.frontmatterOf(path) ?? {}).toEqual(frontmatter ?? {});
+        }
+      ),
+      {
+        examples: [
+          [{ Tags: 'mine' }, [ARTICLE_TAG]],
+          [{ TAGS: ['mine'], tags: ['other'] }, [SNIPPET_TAG, SOURCE_TAG]],
+          [{ Tags: null, tags: [ARTICLE_TAG] }, [ARTICLE_TAG]],
+        ],
+      }
     );
   });
 

@@ -27,6 +27,7 @@ import {
   REFUSED_PATH_CHARS,
   refusedPathsWarning,
 } from '#/lib/item-path-guard';
+import { typeOfTags } from '#/lib/item-tags';
 import { configureSuccessNotices, type NotifyOptions } from '#/lib/notices';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import { refusalReason } from '#/lib/readiness';
@@ -62,6 +63,11 @@ import {
 } from '#/test/item-vault';
 import { cachePosition, makeLinkVault, sectionsOf } from '#/test/link-vault';
 import { noteText } from '#/test/note-text';
+import {
+  frontmatterArb,
+  obsidianCarries,
+  obsidianTypeOf,
+} from '#/test/obsidian-tags';
 import {
   showSuccessNotices,
   SUCCESS_NOTICE_LEVELS,
@@ -10864,9 +10870,7 @@ describe('importing a note an article row already answers to (0228)', () => {
           ]);
           const again = await importOnce(manager, file, batch);
           expect(again).toMatchObject({ articleId: 'x', effect: 'restored' });
-          expect(Obsidian.typeOfTags(vault.frontmatterOf(PATH)?.tags)).toBe(
-            'article'
-          );
+          expect(typeOfTags(vault.frontmatterOf(PATH))).toBe('article');
           repo.dispose();
         }
       ),
@@ -11937,5 +11941,147 @@ describe('reassociateNote from where the row last had its note', () => {
       })
     );
     expect(error).toHaveBeenCalledExactlyOnceWith(new Error('read failed'));
+  });
+});
+
+describe("reading a note's tags as Obsidian does", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const PATH = 'notes/N.md';
+
+  /** `frontmatter` less any `ir-id`, so the note claims no item. */
+  const unclaimed = (frontmatter: Record<string, unknown> | null) => {
+    if (!frontmatter) return frontmatter;
+    const { 'ir-id': _id, ...rest } = frontmatter;
+    return rest;
+  };
+
+  /** Whether Obsidian reads `frontmatter` as carrying a snippet or card tag. */
+  const snippetOrCard = (frontmatter: unknown) =>
+    obsidianCarries(frontmatter, SNIPPET_TAG) ||
+    obsidianCarries(frontmatter, CARD_TAG);
+
+  it('refuses a note Obsidian reads as tagged a snippet or card, in place or as a copy, and imports any other note as an article', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        frontmatterArb.map(unclaimed),
+        fc.boolean(),
+        async (frontmatter, makeCopy) => {
+          vi.restoreAllMocks();
+          const { vault, repo, manager } = await wireArticles(
+            { [PATH]: frontmatter },
+            null
+          );
+          const blocked = snippetOrCard(frontmatter);
+
+          const article = await manager.import(
+            vault.files.get(PATH)!,
+            DEFAULT_PRIORITY,
+            null,
+            makeCopy
+          );
+
+          expect(article === null).toBe(blocked);
+          expect(repo.rows('article')).toHaveLength(blocked ? 0 : 1);
+          // Tagged where Obsidian reads it, whatever key the note uses
+          if (!blocked && !makeCopy) {
+            expect(
+              obsidianCarries(vault.frontmatterOf(PATH), ARTICLE_TAG)
+            ).toBe(true);
+          }
+        }
+      ),
+      {
+        numRuns: 60,
+        examples: [
+          [{ Tags: 'mine' }, false],
+          [{ TAGS: [SNIPPET_TAG] }, false],
+          [{ Tags: null, tags: [ARTICLE_TAG] }, false],
+        ],
+      }
+    );
+  });
+
+  it('puts the article tag back on a note its live row answers to only when Obsidian reads no article tag there, and else has nothing to import', async () => {
+    await fc.assert(
+      fc.asyncProperty(frontmatterArb.map(unclaimed), async (rest) => {
+        fc.pre(!snippetOrCard(rest));
+        vi.restoreAllMocks();
+        const frontmatter = { ...rest, 'ir-id': 'x' };
+        const { vault, repo, manager, before } = await wireArticles(
+          { [PATH]: frontmatter },
+          null
+        );
+        repo.mutate(
+          `INSERT INTO article (id, reference, due, interval, priority, deleted)
+           VALUES ('x', $1, 0, 1, 10, FALSE)`,
+          [PATH]
+        );
+        // Read first: the import writes to the very object it was given
+        const tagged = obsidianTypeOf(frontmatter) === 'article';
+
+        const article = await manager.import(
+          vault.files.get(PATH)!,
+          DEFAULT_PRIORITY,
+          null,
+          false
+        );
+
+        if (tagged) {
+          expect(article).toBeNull();
+          expect(vault.frontmatterOf(PATH)).toEqual(before[PATH]);
+        } else {
+          expect(article).toMatchObject({ articleId: 'x', effect: 'linked' });
+          // Written where Obsidian reads it, whatever key the note uses
+          expect(obsidianCarries(vault.frontmatterOf(PATH), ARTICLE_TAG)).toBe(
+            true
+          );
+        }
+        expect(repo.rows('article')).toHaveLength(1);
+      }),
+      {
+        numRuns: 60,
+        examples: [
+          [{ Tags: 'mine' }],
+          [{ TAGS: ['mine'], tags: [ARTICLE_TAG] }],
+          [{ Tags: null, tags: [ARTICLE_TAG] }],
+        ],
+      }
+    );
+  });
+
+  it("leaves a note it put the article tag back on as it was when the article's row can't be saved", async () => {
+    await fc.assert(
+      fc.asyncProperty(frontmatterArb.map(unclaimed), async (rest) => {
+        fc.pre(!snippetOrCard(rest) && obsidianTypeOf(rest) !== 'article');
+        vi.restoreAllMocks();
+        const { vault, repo, manager, before } = await wireArticles(
+          { [PATH]: { ...rest, 'ir-id': 'x' } },
+          null
+        );
+        repo.mutate(
+          `INSERT INTO article (id, reference, due, interval, priority, deleted)
+           VALUES ('x', $1, 0, 1, 10, FALSE)`,
+          [PATH]
+        );
+        repo.failWrite((query) => query.startsWith('UPDATE article'));
+
+        const article = await manager.import(
+          vault.files.get(PATH)!,
+          DEFAULT_PRIORITY,
+          null,
+          false
+        );
+
+        expect(article).toBeNull();
+        expect(vault.frontmatterOf(PATH)).toEqual(before[PATH]);
+      }),
+      {
+        numRuns: 40,
+        examples: [[{ Tags: 'mine' }], [{ TAGS: ['mine'], tags: ['other'] }]],
+      }
+    );
   });
 });

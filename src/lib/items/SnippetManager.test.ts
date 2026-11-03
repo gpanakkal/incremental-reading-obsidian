@@ -16,6 +16,7 @@ import {
   TEXT_BASE_REVIEW_INTERVAL,
 } from '#/lib/constants';
 import IRScheduler from '#/lib/IRScheduler';
+import { typeOfTags } from '#/lib/item-tags';
 import { Markdown } from '#/lib/Markdown';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import { encodeAnchor, MAX_ANCHOR_PAGE } from '#/lib/pdf/pdf-anchor';
@@ -531,7 +532,7 @@ const plainFrontmatterArb = fc
   )
   // A note tagged as an item is one; one with no row behind it has its own
   // test, below
-  .filter((fm) => Obsidian.typeOfTags(fm?.tags) === null);
+  .filter((fm) => typeOfTags(fm) === null);
 
 /** Where a snippet's making can fail, if anywhere. */
 type Failure = 'note' | 'frontmatter' | 'source tag' | 'row' | null;

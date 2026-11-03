@@ -1,11 +1,12 @@
+import { obsidianFrontmatterTags } from '#/test/obsidian-tags';
 import * as fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 import { ARTICLE_TAG, CARD_TAG, SNIPPET_TAG } from './constants';
+import { matchFrontmatterTags } from './item-tags';
 import {
   formatTagList,
   isItemTypeTag,
   matchAnyTags,
-  matchFrontmatterTags,
   parseTagList,
   stripFrontmatterTags,
 } from './tags';
@@ -88,7 +89,10 @@ const writtenListArb = fc
 /** Each of `items` once, where it first appears. */
 const firstOfEach = (items: readonly string[]) => [...new Set(items)];
 
-/** A tag key, as Obsidian reads it: `tags`, or the older `tag`, in any case. */
+/**
+ * A key tags are written under: `tags`, which Obsidian reads, or the older
+ * `tag`, in any case.
+ */
 const tagKeyArb = fc.constantFrom('tags', 'tag', 'Tags', 'TAG', 'tAgS');
 
 /** Keys that are not tag keys, though some come close. */
@@ -134,7 +138,8 @@ const tagValueArb: fc.Arbitrary<{ value: unknown; carried: string[] }> =
 /**
  * Frontmatter with tags under any number of tag keys, and other keys holding
  * the same kinds of values, which carry no tags. Returns it with the tags its
- * tag keys carry.
+ * tag keys hold as {@link stripFrontmatterTags} reads them: every tag key,
+ * each string split into tags.
  */
 const frontmatterArb = fc
   .tuple(
@@ -154,6 +159,34 @@ const frontmatterArb = fc
     ]) as Record<string, unknown>,
     carried: new Set(tagEntries.flatMap(([, { carried }]) => carried)),
   }));
+
+/**
+ * Those of `tags` that `frontmatter`'s tag keys hold, in the order asked, as
+ * {@link stripFrontmatterTags} reads them: any tag key, every string split as
+ * {@link parseTagList} splits it.
+ */
+function heldTags(
+  frontmatter: Readonly<Record<string, unknown>>,
+  tags: Iterable<string>
+): string[] {
+  const held = new Set<string>();
+  for (const [key, value] of Object.entries(frontmatter)) {
+    if (!/^tags?$/i.test(key)) continue;
+    for (const entry of Array.isArray(value) ? value : [value]) {
+      if (typeof entry === 'string')
+        parseTagList(entry).forEach((tag) => held.add(tag));
+    }
+  }
+  return [...tags].filter((tag) =>
+    held.has(tag.replace(/^#+/, '').toLowerCase())
+  );
+}
+
+/** The tags Obsidian reads off `frontmatter`, as compared: no `#`, lower case. */
+const obsidianTags = (frontmatter: unknown) =>
+  (obsidianFrontmatterTags(frontmatter) ?? []).map((tag) =>
+    tag.slice(1).toLowerCase()
+  );
 
 /** Freeze `value` and everything inside it. */
 function deepFreeze<T>(value: T): T {
@@ -206,7 +239,10 @@ const cacheArb = fc
       ...(inline && { tags: inline.tags }),
       links: [{ link: 'tag', original: '[[tag]]', displayText: 'tag' }],
     } as TagCache,
-    carried: new Set([...(fm?.carried ?? []), ...(inline?.carried ?? [])]),
+    carried: new Set([
+      ...obsidianTags(fm?.frontmatter),
+      ...(inline?.carried ?? []),
+    ]),
   }));
 
 /**
@@ -346,129 +382,6 @@ describe('formatTagList', () => {
   });
 });
 
-describe('matchFrontmatterTags', () => {
-  it('returns the tags asked for that any tag key carries, in the order asked', () => {
-    fc.assert(
-      fc.property(
-        frontmatterArb,
-        fc.array(writtenTagArb, { maxLength: 6 }),
-        ({ frontmatter, carried }, asked) => {
-          // Some of what is asked for is carried, written its own way
-          const fromCarried = [...carried].map(
-            (tag, i) =>
-              [`#${tag}`, `##${tag.toUpperCase()}`, tag.toUpperCase()][i % 3]
-          );
-          const tags = [...asked.map(({ written }) => written), ...fromCarried];
-
-          expect(matchFrontmatterTags(frontmatter, tags)).toEqual(
-            tags.filter((tag) =>
-              carried.has(tag.replace(/^#+/, '').toLowerCase())
-            )
-          );
-        }
-      )
-    );
-  });
-
-  it('never matches a tag asked for with a # inside it to the tag it would be without that #', () => {
-    fc.assert(
-      fc.property(
-        tagCoreArb,
-        tagCoreArb,
-        fc.nat({ max: 2 }),
-        (left, right, hashes) => {
-          const asked = `${'#'.repeat(hashes)}${left}#${right}`;
-
-          expect(
-            matchFrontmatterTags({ tags: `${left}${right}` }, [asked])
-          ).toEqual([]);
-        }
-      )
-    );
-  });
-
-  it('matches a tag key whatever the case of the tag and of the key', () => {
-    fc.assert(
-      fc.property(
-        tagKeyArb,
-        writtenTagArb,
-        fc.boolean(),
-        (key, { written, tag }, asList) => {
-          const frontmatter = { [key]: asList ? [written] : written };
-
-          expect(matchFrontmatterTags(frontmatter, [tag])).toEqual([tag]);
-          expect(matchFrontmatterTags(frontmatter, [`#${tag}`])).toEqual([
-            `#${tag}`,
-          ]);
-        }
-      )
-    );
-  });
-
-  it('matches every tag in a string or list entry holding several, split by commas, whitespace or #s', () => {
-    const frontmatter = {
-      tags: 'one, #Two three#nine',
-      tag: ['four,five', 'six\tseven', 7, null],
-    };
-
-    expect(
-      matchFrontmatterTags(frontmatter, [
-        'seven',
-        'one',
-        'two',
-        'three',
-        'four',
-        'five',
-        'six',
-        '7',
-        'eight',
-        '#nine',
-      ])
-    ).toEqual(['seven', 'one', 'two', 'three', 'four', 'five', 'six', '#nine']);
-  });
-
-  it('ignores tags under any other key', () => {
-    fc.assert(
-      fc.property(otherKeyArb, writtenTagArb, (key, { written, tag }) => {
-        expect(matchFrontmatterTags({ [key]: written }, [tag])).toEqual([]);
-        expect(matchFrontmatterTags({ [key]: [written] }, [tag])).toEqual([]);
-      })
-    );
-  });
-
-  it('matches nothing without frontmatter or without tags to look for', () => {
-    fc.assert(
-      fc.property(frontmatterArb, ({ frontmatter }) => {
-        expect(matchFrontmatterTags(frontmatter, [])).toEqual([]);
-      })
-    );
-    expect(matchFrontmatterTags(null, ['a'])).toEqual([]);
-    expect(matchFrontmatterTags(undefined, ['a'])).toEqual([]);
-  });
-
-  it('takes the tags to look for from any iterable, a set included', () => {
-    expect(
-      matchFrontmatterTags({ tags: ['b', 'c'] }, new Set(['a', 'b', 'c']))
-    ).toEqual(['b', 'c']);
-  });
-
-  it('leaves the frontmatter it reads as it was', () => {
-    fc.assert(
-      fc.property(
-        frontmatterArb,
-        fc.array(fc.string()),
-        ({ frontmatter }, tags) => {
-          const before = structuredClone(frontmatter);
-
-          matchFrontmatterTags(deepFreeze(frontmatter), tags);
-
-          expect(frontmatter).toEqual(before);
-        }
-      )
-    );
-  });
-});
-
 describe('stripFrontmatterTags', () => {
   /**
    * Tags to take off: some the frontmatter carries, written any way that
@@ -509,8 +422,8 @@ describe('stripFrontmatterTags', () => {
 
         stripFrontmatterTags(frontmatter, stripped);
 
-        expect(matchFrontmatterTags(frontmatter, stripped)).toEqual([]);
-        expect(matchFrontmatterTags(frontmatter, carried)).toEqual(
+        expect(heldTags(frontmatter, stripped)).toEqual([]);
+        expect(heldTags(frontmatter, carried)).toEqual(
           [...carried].filter((tag) => !gone.has(tag))
         );
       })
@@ -528,9 +441,7 @@ describe('stripFrontmatterTags', () => {
         for (const [key, value] of Object.entries(before)) {
           if (Object.hasOwn(changed, key)) {
             expect(changed[key]).toBe(value);
-            expect(
-              matchFrontmatterTags({ [key]: value }, stripped)
-            ).not.toEqual([]);
+            expect(heldTags({ [key]: value }, stripped)).not.toEqual([]);
           } else {
             expect(frontmatter[key]).toBe(value);
           }
@@ -641,7 +552,8 @@ describe('matchAnyTags', () => {
         casingArb,
         fc.nat({ max: 2 }),
         fc.constantFrom('string', 'list', 'body'),
-        tagKeyArb,
+        // The key Obsidian reads tags from, in any case
+        fc.constantFrom('tags', 'Tags', 'tAgS'),
         (levels, cut, carriedCase, askedCase, hashes, where, key) => {
           const depth = (cut % levels.length) + 1;
           const asked = levels.slice(0, depth).map(askedCase);
@@ -658,7 +570,7 @@ describe('matchAnyTags', () => {
               ? { tags: [{ tag: `#${written}` }] as TagCache['tags'] }
               : {
                   frontmatter: {
-                    [key]: where === 'list' ? [written] : `x, ${written}`,
+                    [key]: where === 'list' ? ['x', written] : written,
                   },
                 };
           const tag = '#'.repeat(hashes) + asked.join('/');

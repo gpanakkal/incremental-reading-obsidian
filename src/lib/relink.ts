@@ -220,9 +220,10 @@ export function vaultReader(app: App): RelinkVault<TFile> {
       return typeof irId === 'string' ? irId : undefined;
     },
     taggedTableOf: (file) => {
-      const tags = frontmatterOf(file)?.tags;
+      const frontmatter = frontmatterOf(file);
       return (
-        ITEM_TABLES.find((table) => hasTag(tags, TAG_BY_TABLE[table])) ?? null
+        ITEM_TABLES.find((table) => hasTag(frontmatter, TAG_BY_TABLE[table])) ??
+        null
       );
     },
     hasFileAt: (path) => Obsidian.getNote(path, app) !== null,

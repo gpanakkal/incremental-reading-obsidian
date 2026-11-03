@@ -1,5 +1,6 @@
 import { SQLJSRepository } from '#/lib/repository/SQLJSRepository';
 import { Notice } from '#/test/__mocks__/obsidian';
+import { obsidianCarries } from '#/test/obsidian-tags';
 import {
   SUCCESS_NOTICE_LEVELS,
   showSuccessNotices,
@@ -1006,7 +1007,7 @@ describe('relinkItem', () => {
   );
   it.each([
     ['a list', ['mine', ARTICLE_TAG]],
-    ['a string', `mine, ${ARTICLE_TAG}`],
+    ['a string', ARTICLE_TAG],
   ])(
     'refuses a note tagged as another kind of item, its tags written as %s',
     async (_form, tags) => {
@@ -1269,11 +1270,12 @@ describe('vaultReader', () => {
     fc.string()
   );
 
-  it('types a note tagged by list by its exact entries, the first item table found winning', () => {
+  it('types a note tagged by list by the entries Obsidian reads as tags, the first item table found winning', () => {
     fc.assert(
       fc.property(fc.array(tagLike), (tags) => {
         const expected =
-          TABLE_TAGS.find(({ tag }) => tags.includes(tag))?.table ?? null;
+          TABLE_TAGS.find(({ tag }) => obsidianCarries({ tags }, tag))?.table ??
+          null;
         expect(readerFor(tags).taggedTableOf(makeFile('n.md') as TFile)).toBe(
           expected
         );
@@ -1281,7 +1283,7 @@ describe('vaultReader', () => {
     );
   });
 
-  it('types a note tagged by string by its words, split on spaces and commas', () => {
+  it('types a note tagged by string as Obsidian reads one: as a single tag', () => {
     fc.assert(
       fc.property(
         fc.array(
@@ -1293,9 +1295,9 @@ describe('vaultReader', () => {
         fc.stringMatching(/^[\s,]*$/),
         (parts, tail) => {
           const tags = parts.map(([sep, word]) => sep + word).join('') + tail;
-          const words = tags.split(/[\s,]+/);
           const expected =
-            TABLE_TAGS.find(({ tag }) => words.includes(tag))?.table ?? null;
+            TABLE_TAGS.find(({ tag }) => obsidianCarries({ tags }, tag))
+              ?.table ?? null;
           expect(readerFor(tags).taggedTableOf(makeFile('n.md') as TFile)).toBe(
             expected
           );
@@ -1306,7 +1308,8 @@ describe('vaultReader', () => {
 
   it.each([
     [[SNIPPET_TAG, ARTICLE_TAG], 'article'],
-    [`${CARD_TAG},${SNIPPET_TAG}`, 'snippet'],
+    [`${CARD_TAG},${SNIPPET_TAG}`, null],
+    [` #${SNIPPET_TAG.toUpperCase()} `, 'snippet'],
     [[1, ARTICLE_TAG, null], 'article'],
     [[1, null, { tag: ARTICLE_TAG }], null],
     [42, null],

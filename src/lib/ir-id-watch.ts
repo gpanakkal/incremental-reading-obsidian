@@ -74,11 +74,12 @@ export interface TagLoss {
  * A note belongs to the live row at its path that its `ir-id` names or, making
  * no claim, to the one live row at its path. A note no single live row answers
  * to (a plain note, an id typed over, a copy, a tombstone's old path, or one two
- * live rows could own) has no tag to have lost.
+ * live rows could own) has no tag to have lost. The tag is read from the
+ * note's `frontmatter` as `hasTag` reads it.
  */
 export function classifyTag(
   { path, irId }: NoteClaim,
-  tags: unknown,
+  frontmatter: unknown,
   holders: readonly Holder[]
 ): TagLoss | null {
   const live = holders.filter((holder) => !holder.deleted);
@@ -88,7 +89,7 @@ export function classifyTag(
   if (owners.length !== 1) return null;
   const [{ table, id }] = owners;
   const tag = TAG_BY_TABLE[table];
-  if (hasTag(tags, tag)) return null;
+  if (hasTag(frontmatter, tag)) return null;
   return { row: { table, id }, path, tag };
 }
 
@@ -289,7 +290,7 @@ export function createIrIdWatch({
   let chain: Promise<unknown> = Promise.resolve();
 
   /**
-   * What the note at `path` claims, and its tags, or null when there is
+   * What the note at `path` claims, and its frontmatter, or null when there is
    * nothing to judge yet: no note there, or one the metadata cache is part way
    * through re-reading.
    *
@@ -303,7 +304,7 @@ export function createIrIdWatch({
    */
   const claimAt = (
     path: string
-  ): { claim: NoteClaim; tags: unknown } | null => {
+  ): { claim: NoteClaim; frontmatter: unknown } | null => {
     // Normalized as `ObsidianHelpers.getNote` does it, or this disagrees with
     // every other reader about what a `reference` points at
     const file = vault.getFileByPath(normalizePath(path));
@@ -311,7 +312,7 @@ export function createIrIdWatch({
     const cache = metadataCache.getFileCache(file);
     if (!cache) return null;
     const irId: unknown = cache.frontmatter?.['ir-id'];
-    return { claim: { path, irId }, tags: cache.frontmatter?.tags };
+    return { claim: { path, irId }, frontmatter: cache.frontmatter };
   };
 
   /** Damaged notes already told of, until a pass finds them whole again. */
@@ -334,12 +335,12 @@ export function createIrIdWatch({
       found.map(({ claim }) => claim.path)
     );
     const losses = new Map<string, boolean>();
-    for (const { claim, tags } of found) {
+    for (const { claim, frontmatter } of found) {
       const atPath = holders.get(claim.path) ?? [];
       losses.set(
         claim.path,
         readsAsTampering(claim, atPath) ||
-          classifyTag(claim, tags, atPath) !== null
+          classifyTag(claim, frontmatter, atPath) !== null
       );
     }
     return losses;

@@ -653,10 +653,14 @@ describe('AutoImportWatcher.consider', () => {
     expect(importMany).not.toHaveBeenCalled();
   });
 
-  it('reads the trigger tag from frontmatter however it is written', async () => {
+  it('reads the trigger tag from frontmatter as Obsidian does', async () => {
     const { vault, change, importMany } = makeWatcher();
     change(vault.add('a.md', { tags: `#${TRIGGER.toUpperCase()}` }));
-    change(vault.add('b.md', { tag: `reading, ${TRIGGER}` }));
+    change(vault.add('b.md', { Tags: ['reading', ` #${TRIGGER} `] }));
+    // Obsidian reads no tag from either: `tag` is no tags key, and one
+    // string with a space in it is no tag
+    change(vault.add('c.md', { tag: TRIGGER }));
+    change(vault.add('d.md', { tags: `reading, ${TRIGGER}` }));
 
     await settle();
 
