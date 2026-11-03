@@ -877,6 +877,42 @@ export class Component {
   unload(): void {}
 }
 /**
+ * MathJax's output as far as tests need it: each `\class{c}{…}` an element of
+ * class `c` holding what it wraps, each other visible character an element
+ * holding it, braces dropped.
+ */
+export function renderMath(source: string, _display: boolean): HTMLElement {
+  const container = document.createElement('mjx-container');
+  container.className = 'MathJax';
+  let node: Element = container;
+  const opened: boolean[] = [];
+  for (let i = 0; i < source.length; i += 1) {
+    const wrapper = /^\\class\{([^}]*)\}\{/.exec(source.slice(i));
+    if (wrapper) {
+      const el = document.createElement('mjx-mrow');
+      el.className = wrapper[1];
+      node.appendChild(el);
+      node = el;
+      opened.push(true);
+      i += wrapper[0].length - 1;
+    } else if (source[i] === '{') {
+      opened.push(false);
+    } else if (source[i] === '}') {
+      if (opened.pop()) node = node.parentElement!;
+    } else if (/\S/.test(source[i])) {
+      const glyph = document.createElement('mjx-c');
+      glyph.textContent = source[i];
+      node.appendChild(glyph);
+    }
+  }
+  return container;
+}
+
+export async function finishRenderMath(): Promise<void> {}
+
+export async function loadMathJax(): Promise<void> {}
+
+/**
  * Renders the markdown as plain text in a `div.mock-rendered`, appended to
  * `el` as Obsidian's appends its output (read from obsidian.asar: it never
  * empties `el`). Tests spy on `render` to read its arguments, or to put markup

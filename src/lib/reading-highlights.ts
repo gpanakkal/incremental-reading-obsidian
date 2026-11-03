@@ -52,10 +52,11 @@ const MARKER = new RegExp(
 /**
  * Text that isn't the note's own, as it shows in the section: an embed's,
  * which is another note's and loads on its own time, so a section can be
- * painted with or without it; and a footnote reference's number, which
- * counts the note's footnotes, not the section's.
+ * painted with or without it; a footnote reference's number, which counts
+ * the note's footnotes, not the section's; and the glyphs of `$$ … $$` math,
+ * drawn from its TeX, which `math-highlights.ts` paints.
  */
-const SKIPPED = '.internal-embed, [data-footnote-id]';
+const SKIPPED = '.internal-embed, [data-footnote-id], .math-block';
 
 /**
  * Paint each highlight's text in a reading-mode section with

@@ -1,3 +1,4 @@
+import { paintSectionMath } from '#/lib/math-highlights';
 import { ObsidianHelpers } from '#/lib/ObsidianHelpers';
 import { rerenderInPlace } from '#/lib/preview-rerender';
 import {
@@ -9,6 +10,9 @@ import {
   Component,
   MarkdownRenderer,
   MarkdownView,
+  finishRenderMath,
+  loadMathJax,
+  renderMath,
   type MarkdownPostProcessorContext,
 } from 'obsidian';
 
@@ -76,6 +80,14 @@ export function registerSnippetHighlightPostProcessor(
       } finally {
         component.unload();
       }
+
+      if (!el.querySelector('.math-block')) return;
+      // Undocumented (seen in Obsidian 1.14.5): reading mode renders $$ … $$
+      // as .math.math-block, drawn by Obsidian's own post-processor as soon
+      // as MathJax is loaded, which it may not be yet
+      await loadMathJax();
+      paintSectionMath(el, section, highlights, (tex) => renderMath(tex, true));
+      void finishRenderMath();
     }
   );
 }

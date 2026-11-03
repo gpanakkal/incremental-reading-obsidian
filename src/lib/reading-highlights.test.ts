@@ -787,6 +787,31 @@ describe('paintSectionHighlights', () => {
     expect(painted(el)).toEqual({ 'snippet-1': 'urn y' });
   });
 
+  it('leaves the glyphs of display math out, counting none of them', async () => {
+    const source = 'Sum $$x + y$$ is here';
+    const math = (into: HTMLElement, tex: string) => {
+      into.innerHTML = `<p>Sum <span class="math math-block"><mjx-container><mjx-c>${tex}</mjx-c></mjx-container></span> is here</p>`;
+    };
+    const el = document.createElement('div');
+    math(el, 'x+y');
+    await paintSectionHighlights(
+      el,
+      { source, bodyOffset: 0 },
+      [makeHighlight({ start_offset: 0, end_offset: source.indexOf(' here') })],
+      (marked, into) => {
+        // The markers land in the paragraph's text around the math
+        const [before, after] = marked.split(/\$\$.*\$\$/);
+        math(into, 'x+y');
+        const p = into.querySelector('p')!;
+        p.firstChild!.textContent = before;
+        p.lastChild!.textContent = after;
+        return Promise.resolve();
+      }
+    );
+    expect(painted(el)).toEqual({ 'snippet-1': 'Sum  is' });
+    expect(el.querySelector('mjx-container .ir-snippet-highlight')).toBeNull();
+  });
+
   it('paints nothing, and does not throw, when the render drops the markers', async () => {
     const source = 'The quick brown fox';
     const el = sectionEl(source);

@@ -1,3 +1,14 @@
+import { openBlockAtEnd } from '#/lib/block-delimiters';
+import {
+  clearMath,
+  displayMath,
+  mathMarkCount,
+  paintMath,
+  paintSectionMath,
+  type MathHighlight,
+  type MathSpan,
+  type RenderMath,
+} from '#/lib/math-highlights';
 import { isNestedEditor } from '#/lib/nested-editor';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import {
@@ -12,7 +23,13 @@ import {
   type PluginValue,
   type ViewUpdate,
 } from '@codemirror/view';
-import { Component, MarkdownRenderer, editorInfoField } from 'obsidian';
+import {
+  Component,
+  MarkdownRenderer,
+  editorInfoField,
+  finishRenderMath,
+  renderMath,
+} from 'obsidian';
 import { irPluginFacet } from './irPluginFacet';
 import {
   MIDDLE_MOUSE_BUTTON,
@@ -35,8 +52,19 @@ const CALLOUT_WIDGET = '.cm-embed-block.cm-callout';
 const TABLE_WIDGET = '.cm-embed-block.cm-table-widget';
 const WIDGET = `${CALLOUT_WIDGET}, ${TABLE_WIDGET}`;
 const CELL_CONTENT = 'table-cell-wrapper';
+/*
+ * Undocumented (seen in Obsidian 1.14.5): `$$ … $$` math the cursor is out
+ * of is a widget, div.math.math-block.cm-embed-block, over the lines from one
+ * `$$` to the other, holding MathJax's rendering of the TeX between them and
+ * the widget's edit button. A click on it puts the cursor in the math.
+ */
+const MATH_WIDGET = '.cm-embed-block.math-block';
+const ANY_WIDGET = `${WIDGET}, ${MATH_WIDGET}`;
 /** A highlight span in a widget: one painted, or a cell editor's mark */
-const PAINTED = `${CALLOUT_WIDGET} ${HIGHLIGHT}, ${TABLE_WIDGET} ${HIGHLIGHT}`;
+const PAINTED = `${CALLOUT_WIDGET} ${HIGHLIGHT}, ${TABLE_WIDGET} ${HIGHLIGHT}, ${MATH_WIDGET} ${HIGHLIGHT}`;
+
+/** Draw TeX as `$$ … $$` math is drawn. */
+const renderDisplayMath: RenderMath = (tex) => renderMath(tex, true);
 
 /** A widget's rendered text, and the part of the note it was rendered from. */
 export interface WidgetTarget {
@@ -220,18 +248,103 @@ export function widgetTargets(
   });
 }
 
+/** A math widget, with its TeX and where that starts in the note's body. */
+export interface MathTarget {
+  el: HTMLElement;
+  tex: string;
+  bodyOffset: number;
+}
+
+/**
+ * The `$$ … $$` math widgets `view` shows of its note's body, which starts
+ * at `bodyStart`, each over lines of one formula; none of a nested editor's.
+ */
+export function mathTargets(view: EditorView, bodyStart: number): MathTarget[] {
+  const { doc } = view.state;
+  return ownWidgets(view, MATH_WIDGET).flatMap((el) => {
+    const range = widgetRange(view, el);
+    const text = doc.sliceString(range.from, range.to);
+    const spans = displayMath(text);
+    const span =
+      spans.length === 1
+        ? {
+            texStart: range.from + spans[0].texStart,
+            texEnd: range.from + spans[0].texEnd,
+          }
+        : spans.length === 0
+          ? previewedMath(doc.toString(), range.to)
+          : null;
+    if (!span) return [];
+    return [
+      {
+        el,
+        tex: doc.sliceString(span.texStart, span.texEnd),
+        bodyOffset: span.texStart - bodyStart,
+      },
+    ];
+  });
+}
+
+/**
+ * The TeX of the math whose closing `$$` ends at `at` in `doc`, where
+ * Obsidian draws its preview while the cursor is in it (see
+ * {@link MATH_WIDGET}); null if no top-level math closes there.
+ *
+ * Read line by line as the metadata cache reads math blocks (see
+ * `openBlockAtEnd`): math opens on a line starting with `$$` and holds no
+ * other `$$` until it closes. Math in a quote or callout opens on no such
+ * line, so its preview finds none.
+ */
+function previewedMath(doc: string, at: number): MathSpan | null {
+  if (doc.slice(at - 2, at) !== '$$') return null;
+  const before = doc.slice(0, at - 2);
+  if (openBlockAtEnd(before) !== 'math') return null;
+  return { texStart: openerEnd(before), texEnd: at - 2 };
+}
+
+/**
+ * The end of the last `$$` in `text` that no backslash escapes: the editor's
+ * TeX mode reads `\$` as a dollar sign, which closes nothing.
+ */
+function openerEnd(text: string): number {
+  let at = text.lastIndexOf('$$');
+  for (;;) {
+    let slashes = 0;
+    while (text[at - 1 - slashes] === '\\') slashes += 1;
+    if (slashes % 2 === 0) return at + 2;
+    at = text.lastIndexOf('$$', at - 1);
+  }
+}
+
+/** The parts of `highlights` in a formula of TeX `tex` at `bodyOffset`. */
+function mathHighlights(
+  { tex, bodyOffset }: MathTarget,
+  highlights: readonly SnippetHighlight[]
+): MathHighlight[] {
+  return highlights.flatMap((highlight) => {
+    const start = Math.max(highlight.start_offset - bodyOffset, 0);
+    const end = Math.min(highlight.end_offset - bodyOffset, tex.length);
+    return start < end ? [{ highlight, start, end }] : [];
+  });
+}
+
 /**
  * The highlight spans painted in `el`: none in an embed of another note, nor
- * a mark of the editor of a cell being edited, which that editor draws.
+ * a mark of the editor of a cell being edited, which that editor draws, nor
+ * one on rendered math, which `math-highlights.ts` marks.
  */
 function ownSpans(el: HTMLElement): HTMLElement[] {
   return Array.from(el.querySelectorAll<HTMLElement>(HIGHLIGHT)).filter(
     (span) => {
+      if (span.closest('mjx-container')) return false;
       const foreign = span.closest('.internal-embed, .cm-editor');
       return !foreign || !el.contains(foreign);
     }
   );
 }
+
+/** How many marks painting left in `el`, text and math alike. */
+const markCount = (el: HTMLElement) => ownSpans(el).length + mathMarkCount(el);
 
 /** Take the highlight spans out of `el`, their text left in place. */
 export function stripHighlights(el: HTMLElement): void {
@@ -324,9 +437,10 @@ class WidgetHighlightPainter implements PluginValue {
     contentDOM.removeEventListener('click', this.onClick, true);
     contentDOM.removeEventListener('auxclick', this.onAuxClick, true);
     for (const widget of Array.from(
-      contentDOM.querySelectorAll<HTMLElement>(WIDGET)
+      contentDOM.querySelectorAll<HTMLElement>(ANY_WIDGET)
     )) {
       stripHighlights(widget);
+      clearMath(widget, renderDisplayMath);
     }
   }
 
@@ -386,9 +500,44 @@ class WidgetHighlightPainter implements PluginValue {
     }
   }
 
+  /**
+   * Mark `highlights` on the math widgets `targets`, each only when what it
+   * shows changed: its highlights, or its rendering, drawn anew by Obsidian.
+   * The marks open nothing: a click there edits the math, as it always has.
+   */
+  private paintMath(
+    targets: readonly MathTarget[],
+    highlights: readonly SnippetHighlight[]
+  ) {
+    let drawn = false;
+    for (const target of targets) {
+      const keyOf = (own: readonly MathHighlight[]) =>
+        JSON.stringify([
+          target.tex,
+          own.map(({ highlight, start, end }) => [
+            highlight.id,
+            highlight.reference,
+            start,
+            end,
+          ]),
+        ]);
+      const own = mathHighlights(target, highlights);
+      const key = keyOf(own);
+      const { el } = target;
+      const last = this.painted.get(el) ?? { key: keyOf([]), count: 0 };
+      if (last.key === key && mathMarkCount(el) === last.count) continue;
+      if (!paintMath(el, target.tex, own, renderDisplayMath, { inert: true })) {
+        continue;
+      }
+      drawn = true;
+      this.painted.set(el, { key, count: mathMarkCount(el) });
+    }
+    if (drawn) void finishRenderMath();
+  }
+
   private async paintAll() {
     const { view } = this;
-    if (this.destroyed || !view.contentDOM.querySelector(WIDGET)) return;
+    if (this.destroyed || !view.contentDOM.querySelector(ANY_WIDGET)) return;
     const plugin = view.state.facet(irPluginFacet);
     const path = Obsidian.getFileInfoFromState(view.state).info?.file?.path;
     // Never painted then: each file has an editor state, and plugins, of its own
@@ -403,6 +552,9 @@ class WidgetHighlightPainter implements PluginValue {
     const highlights = all.filter((h) =>
       tracker.shownRange(path, h, bodyStart, doc.length)
     );
+    // Before any render is awaited, so math the cursor just left is marked
+    // as it is drawn, never shown a moment without its marks
+    this.paintMath(mathTargets(view, bodyStart), highlights);
     const targets = widgetTargets(view, bodyStart);
 
     const component = new Component();
@@ -414,7 +566,7 @@ class WidgetHighlightPainter implements PluginValue {
           key: paintKey(section, []),
           count: 0,
         };
-        if (last.key === key && ownSpans(el).length === last.count) continue;
+        if (last.key === key && markCount(el) === last.count) continue;
         stripHighlights(el);
         const render: RenderSection = (markdown, into) =>
           MarkdownRenderer.render(
@@ -429,7 +581,9 @@ class WidgetHighlightPainter implements PluginValue {
           stripHighlights(el);
           return;
         }
-        this.painted.set(el, { key, count: ownSpans(el).length });
+        // Opening a snippet on a click, as the callout's other marks do
+        paintSectionMath(el, section, highlights, renderDisplayMath);
+        this.painted.set(el, { key, count: markCount(el) });
       }
     } finally {
       component.unload();

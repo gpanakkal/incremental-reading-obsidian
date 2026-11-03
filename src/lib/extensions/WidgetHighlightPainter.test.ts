@@ -14,11 +14,13 @@ import {
   type DecorationSet,
 } from '@codemirror/view';
 import fc from 'fast-check';
-import { Component, MarkdownRenderer } from 'obsidian';
+import * as obsidian from 'obsidian';
+import { Component, MarkdownRenderer, renderMath } from 'obsidian';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { irPluginFacet } from './irPluginFacet';
 import {
   asCell,
+  mathTargets,
   paintKey,
   stripHighlights,
   tableCellSections,
@@ -67,7 +69,14 @@ function modelRender(markdown: string, into: HTMLElement) {
     const text = line.startsWith('| ')
       ? line.slice(2, -2)
       : line.replace(QUOTE_PREFIX, '');
-    into.createEl('p', { text });
+    const math = /^\$\$(.*)\$\$$/.exec(text);
+    if (math) {
+      into
+        .createDiv({ cls: 'math math-block' })
+        .append(renderMath(math[1], true));
+    } else {
+      into.createEl('p', { text });
+    }
   }
 }
 
@@ -113,7 +122,31 @@ class TableWidget extends WidgetType {
   }
 }
 
-type Block = { kind: 'callout' | 'table' | 'text'; text: string };
+/** A `$` math widget as live preview draws one: its TeX drawn by MathJax. */
+class MathWidget extends WidgetType {
+  constructor(readonly source: string) {
+    super();
+  }
+  eq(other: MathWidget) {
+    return other.source === this.source;
+  }
+  toDOM() {
+    const widget = createDiv({ cls: 'math math-block cm-embed-block' });
+    widget.append(renderMath(this.source.slice(2, -2), true));
+    widget.createDiv({ cls: 'embed-actions', text: 'edit' });
+    return widget;
+  }
+}
+
+/**
+ * A note's block: `math-editing` is math with the cursor in it, its source
+ * shown and, as Obsidian draws one, its rendered preview after its closing
+ * `$$` (`text` its lines, first to last)
+ */
+type Block = {
+  kind: 'callout' | 'table' | 'math' | 'math-editing' | 'text';
+  text: string;
+};
 
 /** Block widgets over the callout and table blocks of a note. */
 function widgetsField(blocks: Block[], bodyStart: number) {
@@ -121,9 +154,22 @@ function widgetsField(blocks: Block[], bodyStart: number) {
     const ranges: Range<Decoration>[] = [];
     let at = bodyStart;
     for (const { kind, text } of blocks) {
-      if (kind !== 'text') {
+      if (kind === 'math-editing') {
+        const tex = text.slice(text.indexOf('$$') + 2, text.lastIndexOf('$$'));
+        ranges.push(
+          Decoration.widget({
+            widget: new MathWidget(`$$${tex}$$`),
+            block: true,
+            side: 1,
+          }).range(at + text.length)
+        );
+      } else if (kind !== 'text') {
         const widget =
-          kind === 'callout' ? new CalloutWidget(text) : new TableWidget(text);
+          kind === 'callout'
+            ? new CalloutWidget(text)
+            : kind === 'math'
+              ? new MathWidget(text)
+              : new TableWidget(text);
         ranges.push(
           Decoration.replace({ widget, block: true }).range(
             at,
@@ -468,6 +514,17 @@ describe('stripHighlights', () => {
     inner.innerHTML = '<p>a<span class="ir-snippet-highlight">b</span></p>';
     stripHighlights(inner);
     expect(inner.innerHTML).toBe('<p>ab</p>');
+  });
+});
+
+describe('stripHighlights, around math', () => {
+  it('leaves the marks of math, and what they mark, as they are', () => {
+    const el = createDiv();
+    el.innerHTML =
+      '<div class="math math-block"><mjx-container class="MathJax ir-snippet-highlight"><mjx-mrow class="ir-snippet-highlight"><mjx-c>a</mjx-c></mjx-mrow></mjx-container></div>';
+    const before = el.innerHTML;
+    stripHighlights(el);
+    expect(el.innerHTML).toBe(before);
   });
 });
 
@@ -1068,5 +1125,271 @@ describe('widgetHighlightPainter', () => {
     view.dispatch({});
     await settle();
     expect(paintedText(view.contentDOM)).toEqual(new Map([['h1', 'one']]));
+  });
+});
+
+describe('widgetHighlightPainter, on math', () => {
+  const LINE = 'a^2 + b^2 = c^2';
+  const TEX = `\n${LINE}\n\\quad\\text{and}\\quad\ne^{i\\pi} + 1 = 0\n`;
+  const MATH = `$$${TEX}$$`;
+  const blocks: Block[] = [
+    { kind: 'text', text: 'Intro' },
+    { kind: 'math', text: MATH },
+    { kind: 'text', text: 'After' },
+  ];
+  /** Where `part` of the math block is in the note */
+  const at = (part: string) => 'Intro\n\n'.length + MATH.indexOf(part);
+
+  /** Each mark below a formula: id, glyphs, inert, opens a snippet */
+  const mathMarks = (root: HTMLElement) =>
+    Array.from(
+      root.querySelectorAll<HTMLElement>(
+        '.math-block mjx-container .ir-snippet-highlight'
+      ),
+      (el) => [
+        el.dataset.snippetId,
+        el.textContent,
+        el.classList.contains('ir-inert-highlight'),
+        el.hasAttribute('data-snippet-ref'),
+      ]
+    );
+  const wholeMark = (root: HTMLElement) =>
+    root
+      .querySelector('.math-block mjx-container.ir-snippet-highlight')
+      ?.getAttribute('data-snippet-id') ?? null;
+  const container = (view: EditorView) =>
+    view.contentDOM.querySelector('.math-block > mjx-container')!;
+
+  it('marks the part of a math block a snippet was cut from, as marks that open nothing', async () => {
+    const { view } = makeView('', blocks, [
+      makeHighlight('h1', at(LINE), at(LINE) + LINE.length),
+    ]);
+    await settle();
+    expect(mathMarks(view.contentDOM)).toEqual([
+      ['h1', 'a^2+b^2=c^2', true, false],
+    ]);
+    expect(wholeMark(view.contentDOM)).toBeNull();
+  });
+
+  it('marks the whole block for a snippet over all of it', async () => {
+    const { view } = makeView('', blocks, [
+      makeHighlight('h1', at(MATH), at(MATH) + MATH.length),
+    ]);
+    await settle();
+    expect(wholeMark(view.contentDOM)).toBe('h1');
+    expect(mathMarks(view.contentDOM)).toEqual([]);
+  });
+
+  it('marks anew as highlights change, and draws the block as before once they go', async () => {
+    const { view, plugin } = makeView('', blocks, [
+      makeHighlight('h1', at(LINE), at(LINE) + LINE.length),
+    ]);
+    await settle();
+    const tracker = plugin!.reviewManager!.snippets.offsetTracker;
+    const last = 'e^{i\\pi} + 1 = 0';
+    tracker.loadHighlights(FILE_PATH, [
+      makeHighlight('h2', at(last), at(last) + last.length),
+    ]);
+    view.dispatch({});
+    await settle();
+    expect(mathMarks(view.contentDOM)).toEqual([
+      // Drawn with no braces
+      ['h2', 'e^i\\pi+1=0', true, false],
+    ]);
+
+    tracker.loadHighlights(FILE_PATH, []);
+    view.dispatch({});
+    await settle();
+    expect(container(view).outerHTML).toBe(renderMath(TEX, true).outerHTML);
+  });
+
+  it('leaves a marked block as it is through updates that change nothing there', async () => {
+    const { view } = makeView('', blocks, [
+      makeHighlight('h1', at(LINE), at(LINE) + LINE.length),
+    ]);
+    await settle();
+    const marked = container(view);
+    const flush = vi.spyOn(obsidian, 'finishRenderMath');
+    view.dispatch({ changes: { from: view.state.doc.length, insert: '!' } });
+    await settle();
+    expect(container(view)).toBe(marked);
+    expect(flush).not.toHaveBeenCalled();
+  });
+
+  it('flushes MathJax’s stylesheet once for the blocks it marks in a pass', async () => {
+    const flush = vi.spyOn(obsidian, 'finishRenderMath');
+    makeView(
+      '',
+      [...blocks, { kind: 'math', text: MATH }],
+      [makeHighlight('h1', at(LINE), at(LINE) + LINE.length)]
+    );
+    await settle();
+    expect(flush).toHaveBeenCalledOnce();
+  });
+
+  it('marks a block once MathJax draws it, and again once it is drawn anew', async () => {
+    const { view } = makeView('', blocks, [
+      makeHighlight('h1', at(LINE), at(LINE) + LINE.length),
+    ]);
+    const widget = view.contentDOM.querySelector<HTMLElement>('.math-block')!;
+    container(view).remove();
+    await settle();
+    expect(mathMarks(view.contentDOM)).toEqual([]);
+
+    widget.prepend(renderMath(TEX, true));
+    await settle();
+    expect(mathMarks(view.contentDOM)).toHaveLength(1);
+
+    // As Obsidian draws the block again in place
+    container(view).replaceWith(renderMath(TEX, true));
+    await settle();
+    expect(mathMarks(view.contentDOM)).toHaveLength(1);
+  });
+
+  it('leaves clicks on a block’s marks to Obsidian, which edits the math', async () => {
+    const { view, plugin } = makeView('', blocks, [
+      makeHighlight('h1', at(LINE), at(LINE) + LINE.length),
+    ]);
+    await settle();
+    const mark = view.contentDOM.querySelector<HTMLElement>(
+      'mjx-container .ir-snippet-highlight'
+    )!;
+    const down = new MouseEvent('pointerdown', {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+    });
+    const click = new MouseEvent('click', { bubbles: true, cancelable: true });
+    mark.dispatchEvent(down);
+    mark.dispatchEvent(click);
+    expect(down.defaultPrevented).toBe(false);
+    expect(click.defaultPrevented).toBe(false);
+    expect(plugin!.app.workspace.openLinkText).not.toHaveBeenCalled();
+  });
+
+  it('draws the block as before when destroyed', async () => {
+    const { view } = makeView('', blocks, [
+      makeHighlight('h1', at(LINE), at(LINE) + LINE.length),
+    ]);
+    await settle();
+    const widget = view.contentDOM.querySelector<HTMLElement>('.math-block')!;
+    view.destroy();
+    expect(widget.querySelector('mjx-container')!.outerHTML).toBe(
+      renderMath(TEX, true).outerHTML
+    );
+  });
+
+  describe('with the cursor in the math', () => {
+    const editing: Block[] = [
+      { kind: 'text', text: 'Intro' },
+      { kind: 'math-editing', text: MATH },
+      { kind: 'text', text: 'After' },
+    ];
+
+    it('finds the preview drawn after the closing $$, with the whole formula', () => {
+      const { view } = makeView('', editing);
+      const [target] = mathTargets(view, 0);
+      expect(target.el.matches('.cm-embed-block.math-block')).toBe(true);
+      expect(target.tex).toBe(TEX);
+      expect(target.bodyOffset).toBe(at(TEX));
+    });
+
+    it('places the preview by where the body starts', () => {
+      const frontmatter = '---\na: b\n---\n';
+      const { view } = makeView(frontmatter, editing);
+      expect(mathTargets(view, frontmatter.length)[0].bodyOffset).toBe(at(TEX));
+    });
+
+    it('marks the part of the preview a snippet was cut from, as marks that open nothing', async () => {
+      const { view } = makeView('', editing, [
+        makeHighlight('h1', at(LINE), at(LINE) + LINE.length),
+      ]);
+      await settle();
+      expect(mathMarks(view.contentDOM)).toEqual([
+        ['h1', 'a^2+b^2=c^2', true, false],
+      ]);
+    });
+
+    it('finds no formula for the preview of math in a quote, and marks none', async () => {
+      // Its lines are the quote's; the source shows the marks instead
+      const quoted = ['> $$', `> ${LINE}`, '> $$'].join('\n');
+      const { view } = makeView(
+        '',
+        [{ kind: 'math-editing', text: quoted }],
+        [makeHighlight('h1', 0, quoted.length)]
+      );
+      await settle();
+      expect(view.contentDOM.querySelector('.ir-snippet-highlight')).toBeNull();
+    });
+
+    it.each([
+      ['on one line', `$$${LINE}$$`, LINE],
+      ['closed after text on its last line', `$$\n${LINE} $$`, `\n${LINE} `],
+      ['after a closed one', `$$a$$\n$$\n${LINE}\n$$`, `\n${LINE}\n`],
+      // `\$` is a dollar sign to the editor's TeX mode too: no `$$` there
+      ['holding an escaped dollar', '$$\na \\$$ b\n$$', '\na \\$$ b\n'],
+      ['after an escaped backslash', '$$\na \\\\\n$$', '\na \\\\\n'],
+    ])('finds the formula of a preview of math %s', (_name, source, tex) => {
+      const { view } = makeView('', [{ kind: 'math-editing', text: source }]);
+      expect(mathTargets(view, 0).map((t) => t.tex)).toEqual([tex]);
+    });
+
+    it('finds no formula for a preview not at a closing $$', () => {
+      const { view } = makeView('', [
+        { kind: 'math-editing', text: `$$\n${LINE}\n$$ ` },
+      ]);
+      expect(mathTargets(view, 0)).toEqual([]);
+    });
+  });
+
+  it('marks nothing in a math widget over lines of more than one formula', async () => {
+    const two = '$$a$$ $$b$$';
+    const { view } = makeView(
+      '',
+      [{ kind: 'math', text: two }],
+      [makeHighlight('h1', 0, two.length)]
+    );
+    await settle();
+    expect(view.contentDOM.querySelector('.ir-snippet-highlight')).toBeNull();
+  });
+
+  it('places a block of a note with frontmatter by where the body starts', async () => {
+    const { view } = makeView('---\na: b\n---\n', blocks, [
+      makeHighlight('h1', at(LINE), at(LINE) + LINE.length),
+    ]);
+    await settle();
+    expect(mathMarks(view.contentDOM)).toEqual([
+      ['h1', 'a^2+b^2=c^2', true, false],
+    ]);
+  });
+
+  it('marks the part of math in a callout, as marks that open its snippet, and repaints them as they change', async () => {
+    const callout = '> [!note]\n> $$x + y$$';
+    const x = callout.indexOf('x');
+    const { view, plugin } = makeView(
+      '',
+      [{ kind: 'callout', text: callout }],
+      [makeHighlight('h1', x, x + 1)]
+    );
+    await settle();
+    const marks = () =>
+      Array.from(
+        view.contentDOM.querySelectorAll<HTMLElement>(
+          '.cm-callout mjx-container .ir-snippet-highlight'
+        ),
+        (el) => [el.dataset.snippetId, el.dataset.snippetRef, el.textContent]
+      );
+    expect(marks()).toEqual([['h1', 'snippets/h1.md', 'x']]);
+
+    const tracker = plugin!.reviewManager!.snippets.offsetTracker;
+    tracker.loadHighlights(FILE_PATH, [makeHighlight('h2', x + 4, x + 5)]);
+    view.dispatch({});
+    await settle();
+    expect(marks()).toEqual([['h2', 'snippets/h2.md', 'y']]);
+
+    tracker.loadHighlights(FILE_PATH, []);
+    view.dispatch({});
+    await settle();
+    expect(marks()).toEqual([]);
   });
 });

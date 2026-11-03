@@ -15,10 +15,12 @@ import { SnippetManager } from '#/lib/items/SnippetManager';
 import { RERENDERING_CLASS } from '#/lib/preview-rerender';
 import { insertItemAt, makeItemVault, TestRepository } from '#/test/item-vault';
 import fc from 'fast-check';
+import * as obsidian from 'obsidian';
 import {
   Component,
   MarkdownRenderer,
   MarkdownView,
+  renderMath,
   type TFile,
 } from 'obsidian';
 import {
@@ -524,6 +526,167 @@ describe('registerSnippetHighlightPostProcessor', () => {
     });
     expect(painted(el)).toEqual({});
     expect(reviewManager.getSnippetHighlights).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// registerSnippetHighlightPostProcessor, on `$$ … $$` math
+// ---------------------------------------------------------------------------
+describe('registerSnippetHighlightPostProcessor, on display math', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  const LINE = 'a^2 + b^2 = c^2';
+  const TEX = `${LINE}\n\\quad\\text{and}\\quad\ne^{i\\pi} + 1 = 0`;
+  const BODY = `Intro\n\n$$\n${TEX}\n$$\n`;
+  const TEXT = `${FRONTMATTER}${BODY}`;
+  /** The math block's section: lines 6 to 10 */
+  const MATH_SECTION = { text: TEXT, lineStart: 6, lineEnd: 10 };
+
+  /**
+   * A math block's section as reading mode renders it: the TeX as text until
+   * Obsidian's own post-processor, which runs first but draws the math only
+   * once MathJax has loaded, draws it.
+   */
+  function mathEl(tex: string) {
+    const el = document.createElement('div');
+    const block = document.createElement('div');
+    block.className = 'math math-block';
+    block.textContent = tex;
+    el.appendChild(block);
+    const draw = () => {
+      block.replaceChildren(renderMath(tex, true));
+      block.classList.add('is-loaded');
+    };
+    return { el, block, draw };
+  }
+
+  const highlightOver = (part: string, id = 'snippet-1') => {
+    const start = BODY.indexOf(part);
+    return makeHighlight({
+      id,
+      start_offset: start,
+      end_offset: start + part.length,
+    });
+  };
+
+  /** Run the post-processor on `el` as reading mode does, drawing its math meanwhile. */
+  async function process(
+    processor: PostProcessor,
+    el: HTMLElement,
+    draw: () => void,
+    section = MATH_SECTION
+  ) {
+    const done = processor(el, {
+      sourcePath: 'notes/a.md',
+      getSectionInfo: () => section,
+    });
+    draw();
+    await done;
+  }
+
+  const marks = (el: HTMLElement) =>
+    Array.from(
+      el.querySelectorAll('mjx-container .ir-snippet-highlight'),
+      (mark) => [mark.getAttribute('data-snippet-id'), mark.textContent]
+    );
+  const wholeMark = (el: HTMLElement) =>
+    el
+      .querySelector('mjx-container.ir-snippet-highlight')
+      ?.getAttribute('data-snippet-id') ?? null;
+
+  it('marks the part of the formula a snippet was cut from', async () => {
+    const { processor } = setUp({ highlights: [highlightOver(LINE)] });
+    const { el, draw } = mathEl(TEX);
+    const render = vi.spyOn(obsidian, 'renderMath');
+    await process(processor, el, draw);
+    expect(marks(el)).toEqual([['snippet-1', 'a^2+b^2=c^2']]);
+    expect(wholeMark(el)).toBeNull();
+    // Drawn as display math, as Obsidian draws `$$ … $$`
+    expect(render).toHaveBeenCalled();
+    for (const [, display] of render.mock.calls) expect(display).toBe(true);
+  });
+
+  it('waits on no MathJax for a section with no math in it', async () => {
+    const load = vi.spyOn(obsidian, 'loadMathJax');
+    const { processor } = setUp({ highlights: [highlightOver(LINE)] });
+    await processor(paragraphEl('Intro'), {
+      sourcePath: 'notes/a.md',
+      getSectionInfo: () => ({ text: TEXT, lineStart: 4, lineEnd: 4 }),
+    });
+    expect(load).not.toHaveBeenCalled();
+  });
+
+  it('marks the whole formula for a snippet over all of the block', async () => {
+    const { processor } = setUp({
+      highlights: [highlightOver(`$$\n${TEX}\n$$`)],
+    });
+    const { el, draw } = mathEl(TEX);
+    await process(processor, el, draw);
+    expect(wholeMark(el)).toBe('snippet-1');
+    expect(marks(el)).toEqual([]);
+  });
+
+  it('takes a mark off a formula reading mode reuses, once its snippet is gone', async () => {
+    const first = setUp({ highlights: [highlightOver(LINE)] });
+    const { el, draw } = mathEl(TEX);
+    await process(first.processor, el, draw);
+    expect(marks(el)).toHaveLength(1);
+    // Reading mode's recycler hands the drawn block to the next render as is
+    const next = setUp({ highlights: [] });
+    await process(next.processor, el, () => {});
+    expect(marks(el)).toEqual([]);
+    expect(el.querySelector('mjx-container')!.outerHTML).toBe(
+      renderMath(TEX, true).outerHTML
+    );
+  });
+
+  it('marks the part of a formula in a quote, its quote markers left out', async () => {
+    const quoted = `${FRONTMATTER}Intro\n\n> $$\n> ${LINE}\n> $$\n`;
+    const start = quoted.indexOf(LINE) - FRONTMATTER.length;
+    const { processor } = setUp({
+      highlights: [
+        makeHighlight({ start_offset: start, end_offset: start + 3 }),
+      ],
+    });
+    const { el, draw } = mathEl(LINE);
+    await process(processor, el, draw, {
+      text: quoted,
+      lineStart: 6,
+      lineEnd: 8,
+    });
+    expect(marks(el)).toEqual([['snippet-1', 'a^2']]);
+    expect(wholeMark(el)).toBeNull();
+  });
+
+  it('marks math drawn only once MathJax has loaded', async () => {
+    const { processor } = setUp({ highlights: [highlightOver(LINE)] });
+    const { el, draw } = mathEl(TEX);
+    let loaded = () => {};
+    vi.spyOn(obsidian, 'loadMathJax').mockReturnValue(
+      new Promise<void>((resolve) => {
+        loaded = () => {
+          draw();
+          resolve();
+        };
+      })
+    );
+    const done = processor(el, {
+      sourcePath: 'notes/a.md',
+      getSectionInfo: () => MATH_SECTION,
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(marks(el)).toEqual([]);
+    loaded();
+    await done;
+    expect(marks(el)).toEqual([['snippet-1', 'a^2+b^2=c^2']]);
+  });
+
+  it('leaves the formula’s glyphs out of the text it paints', async () => {
+    const { processor } = setUp({ highlights: [highlightOver(BODY.trim())] });
+    const { el, draw } = mathEl(TEX);
+    await process(processor, el, draw);
+    expect(el.querySelectorAll('span.ir-snippet-highlight')).toHaveLength(0);
+    expect(wholeMark(el)).toBe('snippet-1');
   });
 });
 
