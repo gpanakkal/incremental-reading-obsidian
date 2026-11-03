@@ -139,15 +139,18 @@ export class SnippetManager extends ItemManager {
   /**
    * Give the tracker `highlights` read from the database for `path`, but for
    * those held back (see {@link offsetsPending}), whose offsets it keeps.
+   * Those it had for `path` that `highlights` leaves out, which are no longer
+   * the note's, are held back no longer, unless another note's highlights
+   * still hold them: should one come back to the note, it reads as stored.
    * @returns the highlights as the tracker has them now
    */
   #loadHighlights(
     path: string,
     highlights: SnippetHighlight[]
   ): SnippetHighlight[] {
+    const before = this.offsetTracker.getHighlights(path);
     const held = new Map(
-      this.offsetTracker
-        .getHighlights(path)
+      before
         .filter(({ id }) => this.#pendingOffsets.has(id))
         .map((h) => [h.id, h])
     );
@@ -162,6 +165,16 @@ export class SnippetManager extends ItemManager {
         : h;
     });
     this.offsetTracker.loadHighlights(path, loaded);
+    // Those still held at `path` count among the tracked, so stay held back
+    const tracked = new Set(
+      this.offsetTracker
+        .getTrackedPaths()
+        .flatMap((p) => this.offsetTracker.getHighlights(p))
+        .map(({ id }) => id)
+    );
+    for (const id of held.keys()) {
+      if (!tracked.has(id)) this.#pendingOffsets.delete(id);
+    }
     return loaded;
   }
 

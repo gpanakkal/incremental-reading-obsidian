@@ -222,6 +222,8 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
     private persistTimeout: number | null = null;
     // The save `persistTimeout` waits to make, for destroy() to make at once
     private pendingPersist: (() => void) | null = null;
+    // The highlights whose offsets `pendingPersist` saves
+    private pendingHighlights: SnippetHighlight[] = [];
     private isReviewInterface: boolean = false;
     // keep track of if the ViewPlugin was destroyed
     private destroyed: boolean = false;
@@ -438,12 +440,22 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
       if (this.persistTimeout) {
         window.clearTimeout(this.persistTimeout);
       }
+      // Those the save this replaces was to write and the note has lost since
+      // (its article un-imported, say) still go: the database would keep
+      // offsets older than the note's text, which a re-import reads them from
+      const ids = new Set(highlights.map(({ id }) => id));
+      const pending = [
+        ...highlights,
+        ...this.pendingHighlights.filter(({ id }) => !ids.has(id)),
+      ];
+      this.pendingHighlights = pending;
       this.pendingPersist = () => {
         this.persistTimeout = null;
         this.pendingPersist = null;
+        this.pendingHighlights = [];
         // A refused write keeps them held back, for `persistPendingOffsets`
-        this.persistHighlights(reviewManager, highlights).catch(
-          (error: unknown) => console.error(error)
+        this.persistHighlights(reviewManager, pending).catch((error: unknown) =>
+          console.error(error)
         );
       };
       this.persistTimeout = window.setTimeout(this.pendingPersist, 2000); // 2 second debounce

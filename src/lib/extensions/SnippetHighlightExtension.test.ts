@@ -2017,6 +2017,82 @@ describe('schedulePersist and destroy', () => {
     expect(rm.updateSnippetOffsets).toHaveBeenCalledTimes(1);
   });
 
+  it('property: still saves the offsets an edit moved for highlights the note lost before the save, as a later edit reschedules it', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(
+          fc
+            .integer({ min: 1, max: 8 })
+            .chain((start) =>
+              fc.tuple(
+                fc.constant(start),
+                fc.integer({ min: start + 1, max: 10 }),
+                fc.boolean()
+              )
+            ),
+          { minLength: 1, maxLength: 4 }
+        ),
+        async (spans) => {
+          vi.useFakeTimers();
+          vi.restoreAllMocks();
+          const rm = makeReviewManager();
+          const { offsetTracker } = rm.snippets;
+          offsetTracker.loadHighlights(
+            FILE_PATH,
+            spans.map(([start, end], i) =>
+              makeHighlight({
+                id: `h${i}`,
+                start_offset: start,
+                end_offset: end,
+              })
+            )
+          );
+          const view = makeLoadedView(rm, false);
+
+          view.dispatch({
+            changes: { from: 0, insert: 'X' },
+            userEvent: 'input',
+          });
+          // Read again before the save: those not kept are no longer the
+          // note's (its article un-imported, say), and those kept are read
+          // anew, as `SnippetManager` hands the tracker fresh highlights
+          offsetTracker.loadHighlights(
+            FILE_PATH,
+            offsetTracker
+              .getHighlights(FILE_PATH)
+              .filter((_, i) => spans[i][2])
+              .map((h) => ({ ...h }))
+          );
+          view.dispatch({
+            changes: { from: 0, insert: 'Y' },
+            userEvent: 'input',
+          });
+          await vi.advanceTimersByTimeAsync(2000);
+
+          // The last offsets written for each, by id
+          const written = Object.fromEntries(
+            rm.updateSnippetOffsets.mock.calls.map(([id, start, end]) => [
+              id,
+              [start, end],
+            ])
+          );
+          // Kept ones moved by both edits; the others by the first alone
+          expect(written).toStrictEqual(
+            Object.fromEntries(
+              spans.map(([start, end, kept], i) => {
+                const by = kept ? 2 : 1;
+                return [`h${i}`, [start + by, end + by]];
+              })
+            )
+          );
+          view.destroy();
+          vi.useRealTimers();
+        }
+      ),
+      { numRuns: 30 }
+    );
+  });
+
   it('destroy() does not throw when no timer is pending', () => {
     const rm = makeReviewManager();
     const irPlugin = makePlugin(rm);

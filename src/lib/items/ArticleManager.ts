@@ -2449,15 +2449,16 @@ export class ArticleManager extends ItemManager {
 
   /**
    * Reload the highlights of `file`, which is no article now: those of its
-   * snippets lose the parent they were found by.
+   * snippets lose the parent they were found by, and its views stop showing
+   * them at once (see `SnippetManager.refreshHighlightsAt`).
    */
   private async refreshHighlights(file: TFile): Promise<void> {
     try {
-      await this.plugin.reviewManager.snippets.getHighlights(file);
+      await this.plugin.reviewManager.snippets.refreshHighlightsAt(file.path);
     } catch (error) {
       console.error(error);
+      this.app.workspace.trigger('ir-highlights-changed', file.path);
     }
-    this.app.workspace.trigger('ir-highlights-changed', file.path);
   }
 
   /**

@@ -4783,6 +4783,144 @@ describe('offsetsSaved', () => {
   });
 });
 
+describe('offsets held back for highlights a note stops having', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** Another article's note, which a snippet can move to. */
+  const OTHER_ARTICLE = 'articles/b.md';
+
+  /**
+   * What becomes of a held-back highlight of {@link PENDING_ARTICLE} as its
+   * highlights are read again: it stays, its snippet leaves the note (freed
+   * by an un-import, say), or it leaves for {@link OTHER_ARTICLE}, whose
+   * open editor holds it back too.
+   */
+  type Fate = 'stays' | 'leaves' | 'elsewhere';
+
+  const fatesCaseArb = pendingCaseArb.chain((pending) =>
+    fc.record({
+      pending: fc.constant(pending),
+      fates: fc.array(fc.constantFrom<Fate>('stays', 'leaves', 'elsewhere'), {
+        minLength: pending.ids.length,
+        maxLength: pending.ids.length,
+      }),
+    })
+  );
+
+  it('stops holding back those it no longer has and no other note holds, so their stored offsets show when they come back', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fatesCaseArb,
+        async ({ pending: { ids, stored, tracked }, fates }) => {
+          vi.restoreAllMocks();
+          const { vault, repo, manager } = await wireSnippets({
+            [PENDING_ARTICLE]: { 'ir-id': 'article-1', tags: [ARTICLE_TAG] },
+            [OTHER_ARTICLE]: { 'ir-id': 'article-2', tags: [ARTICLE_TAG] },
+          });
+          Object.assign(vault.app, { workspace: { trigger: vi.fn() } });
+          for (const [id, reference] of [
+            ['article-1', PENDING_ARTICLE],
+            ['article-2', OTHER_ARTICLE],
+          ]) {
+            repo.mutate(
+              `INSERT INTO article (id, reference, due, interval, priority) VALUES ($1, $2, 0, 1, 30)`,
+              [id, reference]
+            );
+          }
+          for (const [i, id] of ids.entries()) {
+            repo.mutate(
+              `INSERT INTO snippet (id, reference, due, interval, priority, parent, start_offset, end_offset) VALUES ($1, $2, 0, 1, 30, 'article-1', $3, $4)`,
+              [id, `s/${i}.md`, ...stored[i]]
+            );
+          }
+          const setOffsets = (id: string, [start, end]: [number, number]) =>
+            repo.mutate(
+              'UPDATE snippet SET start_offset = $1, end_offset = $2 WHERE id = $3',
+              [start, end, id]
+            );
+          const note = vault.files.get(PENDING_ARTICLE)!;
+          const other = vault.files.get(OTHER_ARTICLE)!;
+          // Read, then moved by an edit not yet saved
+          const read = await manager.getHighlights(note);
+          const typed = read.map((h, i) => ({
+            ...h,
+            start_offset: tracked[i][0],
+            end_offset: tracked[i][1],
+          }));
+          manager.offsetTracker.loadHighlights(PENDING_ARTICLE, typed);
+          manager.offsetsPending(PENDING_ARTICLE);
+          // Those leaving for the other note, as its editor holds them
+          manager.offsetTracker.loadHighlights(
+            OTHER_ARTICLE,
+            typed
+              .filter((_, i) => fates[i] === 'elsewhere')
+              .map((h) => ({ ...h, parent: 'article-2' }))
+          );
+          manager.offsetsPending(OTHER_ARTICLE);
+          for (const [i, id] of ids.entries()) {
+            if (fates[i] === 'stays') continue;
+            repo.mutate('UPDATE snippet SET parent = $1 WHERE id = $2', [
+              fates[i] === 'leaves' ? null : 'article-2',
+              id,
+            ]);
+          }
+
+          await manager.refreshHighlightsAt(PENDING_ARTICLE);
+          expect(
+            manager.offsetTracker
+              .getHighlights(PENDING_ARTICLE)
+              .map(({ id }) => id)
+          ).toEqual(ids.filter((_, i) => fates[i] === 'stays'));
+
+          // Those that left come back, and another device moves every one
+          // twice: a read between takes in the first move
+          for (const [i, id] of ids.entries()) {
+            if (fates[i] === 'leaves') {
+              repo.mutate(
+                "UPDATE snippet SET parent = 'article-1' WHERE id = $1",
+                [id]
+              );
+            }
+            setOffsets(id, [1000 + i, 1100 + i]);
+          }
+          await manager.getHighlights(note);
+          for (const [i, id] of ids.entries()) {
+            setOffsets(id, [2000 + i, 2100 + i]);
+          }
+          const offsetsOf = (highlights: SnippetHighlight[]) =>
+            Object.fromEntries(
+              highlights.map((h) => [h.id, [h.start_offset, h.end_offset]])
+            );
+
+          // Still held back: those it kept, and those the other note holds
+          expect(offsetsOf(await manager.getHighlights(note))).toStrictEqual(
+            Object.fromEntries(
+              ids.flatMap((id, i) => {
+                if (fates[i] === 'stays') return [[id, tracked[i]]];
+                if (fates[i] === 'leaves') {
+                  return [[id, [2000 + i, 2100 + i]]];
+                }
+                return [];
+              })
+            )
+          );
+          expect(offsetsOf(await manager.getHighlights(other))).toStrictEqual(
+            Object.fromEntries(
+              ids.flatMap((id, i) =>
+                fates[i] === 'elsewhere' ? [[id, tracked[i]]] : []
+              )
+            )
+          );
+          repo.dispose();
+        }
+      ),
+      { numRuns: 30 }
+    );
+  });
+});
+
 describe('adoptLeftover', () => {
   afterEach(() => {
     vi.useRealTimers();

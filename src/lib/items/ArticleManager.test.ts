@@ -1055,7 +1055,7 @@ async function wireUnimport(
   plugin.reviewManager = reviewManager;
   const getHighlights = vi
     .spyOn(reviewManager.snippets, 'getHighlights')
-    .mockResolvedValue(undefined as never);
+    .mockResolvedValue([]);
   const logged = vi.spyOn(console, 'error').mockReturnValue(undefined);
   return {
     vault,
@@ -9341,6 +9341,61 @@ describe('unimportMany', () => {
           );
         }
       )
+    );
+  });
+
+  it('property: takes the highlights of its snippets off the open note before saying they changed, edited since saved or not', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(fc.tuple(fc.nat(500), fc.nat(500)), {
+          minLength: 1,
+          maxLength: 4,
+        }),
+        fc.boolean(),
+        async (spans, edited) => {
+          vi.restoreAllMocks();
+          const {
+            repo,
+            vault,
+            manager,
+            reviewManager,
+            getHighlights,
+            trigger,
+          } = await wireUnimport({
+            [NOTE]: { 'ir-id': 'a', tags: [ARTICLE_TAG] },
+          });
+          // Read for real: what the note's editor paints from
+          getHighlights.mockRestore();
+          seedArticle(repo, 'a', NOTE);
+          for (const [i, [start, length]] of spans.entries()) {
+            repo.mutate(
+              `INSERT INTO snippet (id, reference, parent, due, interval,
+                 priority, start_offset, end_offset)
+               VALUES ($1, $2, 'a', 0, 86400000, 30, $3, $4)`,
+              [`s${i}`, `snippets/s${i}.md`, start, start + length]
+            );
+          }
+          const { snippets } = reviewManager;
+          const file = vault.files.get(NOTE)!;
+          // As the open note's editor loads them, and moves them on an edit
+          expect(await snippets.getHighlights(file)).toHaveLength(spans.length);
+          if (edited) snippets.offsetsPending(NOTE);
+          // What the note's views redraw from, each time they are told to
+          const redrawnFrom: unknown[] = [];
+          trigger.mockImplementation((event: string, path: string) => {
+            if (event !== 'ir-highlights-changed' || path !== NOTE) return;
+            redrawnFrom.push(snippets.offsetTracker.getHighlights(NOTE));
+          });
+
+          const outcomes = await manager.unimportMany([file]);
+
+          expect(outcomes).toStrictEqual([{ file, status: 'unimported' }]);
+          expect(snippets.offsetTracker.getHighlights(NOTE)).toStrictEqual([]);
+          expect(redrawnFrom).toStrictEqual([[]]);
+          repo.dispose();
+        }
+      ),
+      { numRuns: 20 }
     );
   });
 });
