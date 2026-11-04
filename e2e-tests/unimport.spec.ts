@@ -68,6 +68,20 @@ test.beforeEach(async () => {
 });
 
 test.afterEach(async () => {
+  const testInfo = test.info();
+  if (barWatched && testInfo.status !== testInfo.expectedStatus) {
+    // Printed as well as attached: the job log is read first
+    const log = await window
+      .evaluate(() => (window as unknown as { __diag?: unknown }).__diag)
+      .catch((error: unknown) => `unreadable: ${String(error)}`);
+    const text = JSON.stringify(log);
+    console.log(`[bar diag] ${text}`);
+    await testInfo.attach('bar-diag', {
+      body: text,
+      contentType: 'text/plain',
+    });
+  }
+  barWatched = false;
   if (app) await closeElectron(app);
 });
 
@@ -129,18 +143,24 @@ type ReloadableApp = {
   };
 };
 
-/** The note's `ir-id` as the metadata cache holds it. */
-const cachedIrId = () =>
-  window.evaluate((notePath) => {
-    const { app } = window as unknown as {
-      app: {
-        metadataCache: {
-          getCache(path: string): { frontmatter?: Record<string, unknown> };
+/** The note's property `key` as the metadata cache holds it. */
+const cachedProperty = (key: string) =>
+  window.evaluate(
+    ({ notePath, key }) => {
+      const { app } = window as unknown as {
+        app: {
+          metadataCache: {
+            getCache(path: string): { frontmatter?: Record<string, unknown> };
+          };
         };
       };
-    };
-    return app.metadataCache.getCache(notePath)?.frontmatter?.['ir-id'];
-  }, NOTE);
+      return app.metadataCache.getCache(notePath)?.frontmatter?.[key];
+    },
+    { notePath: NOTE, key }
+  );
+
+/** The note's `ir-id` as the metadata cache holds it. */
+const cachedIrId = () => cachedProperty('ir-id');
 
 /**
  * How many articles the database holds, deleted ones included, but not the
@@ -217,6 +237,7 @@ async function unimportFromQueueRow() {
  */
 async function flagArticleRow(deleted: boolean) {
   const id = await cachedIrId();
+  await markBar(deleted ? 'delete row' : 'revive row');
   await window.evaluate(
     async ({ id, deleted }) => {
       const { app } = window as unknown as { app: PageApp };
@@ -230,9 +251,14 @@ async function flagArticleRow(deleted: boolean) {
   );
 }
 
-/** Set the note's tags to `tags`, as the user's own edit would. */
-const setTags = (tags: string[]) =>
-  window.evaluate(
+/**
+ * Set the note's tags to `tags`, as the user's own edit would, and wait for the
+ * metadata cache to parse them. The bars type the note by that parse, which
+ * can land well after the note's properties show the edit, and a row written
+ * before it lands is typed by the old tags.
+ */
+async function setTags(tags: string[]) {
+  await window.evaluate(
     async ({ notePath, tags }) => {
       const { app } = window as unknown as {
         app: {
@@ -254,6 +280,8 @@ const setTags = (tags: string[]) =>
     },
     { notePath: NOTE, tags }
   );
+  await expect.poll(() => cachedProperty('tags')).toEqual(tags);
+}
 
 /** Import the note, then open the review tab's queue, showing its row. */
 async function importAndOpenQueue() {
@@ -261,6 +289,139 @@ async function importAndOpenQueue() {
   await executeCommandById(window, 'incremental-reading:learn');
   await expect(queueRow()).toHaveCount(1);
 }
+
+/** Whether {@link watchBar} ran in the current test, so its log can be read. */
+let barWatched = false;
+
+/**
+ * Log, inside the page, everything that decides whether the note's bars show:
+ * database writes naming its row, the metadata cache's parses of it, the item
+ * layer's answers on its type and its item, and the bars coming and going,
+ * each as `window.__diag` holds it. Snapshots taken between test steps arrive
+ * too late to order these, so a failure prints the log instead (see
+ * `test.afterEach`). Unofficial: `window.app`, `app.plugins.plugins`, and the
+ * plugin's `reviewManager`.
+ */
+async function watchBar() {
+  barWatched = true;
+  await window.evaluate((notePath) => {
+    type Cache = { frontmatter?: Record<string, unknown> } | null;
+    type Items = {
+      itemTypeFromCache(file: unknown, cache: Cache): unknown;
+    };
+    type Manager = {
+      articles: Items;
+      getReviewItemFromFile(file: unknown): Promise<unknown>;
+      repo: {
+        onDataChange(
+          listener: (event: {
+            table: string;
+            op: string;
+            ids: string[];
+          }) => void
+        ): () => void;
+      };
+    };
+    const { app } = window as unknown as {
+      app: {
+        plugins: { plugins: Record<string, { reviewManager: Manager }> };
+        metadataCache: {
+          on(
+            name: 'changed',
+            listener: (
+              file: { path: string },
+              data: string,
+              cache: Cache
+            ) => void
+          ): unknown;
+        };
+        workspace: {
+          on(name: string, listener: () => void): unknown;
+          getMostRecentLeaf(): { view: { getMode?(): string } } | null;
+        };
+      };
+    };
+    const diag: [number, string, unknown?][] = [];
+    (window as unknown as { __diag: typeof diag }).__diag = diag;
+    const log = (what: string, detail?: unknown) =>
+      diag.push([Math.round(performance.now()), what, detail]);
+    const parse = (cache: Cache) => ({
+      tags: cache?.frontmatter?.tags,
+      id: cache?.frontmatter?.['ir-id'],
+    });
+    // Unofficial: Obsidian's own renderer asks its main process this way
+    log(
+      'obsidian',
+      (
+        window as unknown as {
+          require(module: 'electron'): {
+            ipcRenderer: { sendSync(channel: 'version'): unknown };
+          };
+        }
+      )
+        .require('electron')
+        .ipcRenderer.sendSync('version')
+    );
+    const { reviewManager } = app.plugins.plugins['incremental-reading'];
+    reviewManager.repo.onDataChange(({ table, op, ids }) =>
+      log('write', { table, op, ids })
+    );
+    app.metadataCache.on('changed', (file, _data, cache) => {
+      if (file.path === notePath) log('parsed', parse(cache));
+    });
+    app.workspace.on('layout-change', () =>
+      log('layout', app.workspace.getMostRecentLeaf()?.view.getMode?.())
+    );
+    const items = reviewManager.articles;
+    const typeOf = items.itemTypeFromCache.bind(
+      items
+    ) as Items['itemTypeFromCache'];
+    items.itemTypeFromCache = (file, cache) => {
+      const answer = typeOf(file, cache);
+      void Promise.resolve(answer).then((type) =>
+        log('typed', {
+          ...parse(cache),
+          type,
+          later: answer instanceof Promise,
+        })
+      );
+      return answer;
+    };
+    const itemOf = reviewManager.getReviewItemFromFile.bind(
+      reviewManager
+    ) as Manager['getReviewItemFromFile'];
+    reviewManager.getReviewItemFromFile = async (file) => {
+      log('item read');
+      const item = await itemOf(file);
+      log('item', item !== null);
+      return item;
+    };
+    const bars = () => ({
+      editing: document.querySelectorAll(
+        '.mod-root .markdown-source-view .ir-action-bar-panel'
+      ).length,
+      reading: document.querySelectorAll('.mod-root .ir-reading-mode-bar')
+        .length,
+    });
+    let last = JSON.stringify(bars());
+    log('bars', bars());
+    new MutationObserver(() => {
+      const now = JSON.stringify(bars());
+      if (now === last) return;
+      last = now;
+      log('bars', bars());
+    }).observe(document.body, { childList: true, subtree: true });
+  }, NOTE);
+}
+
+/** Log `what` in the page's bar log, ordered with what the page saw. */
+const markBar = (what: string) =>
+  window.evaluate((step) => {
+    (window as unknown as { __diag?: [number, string][] }).__diag?.push([
+      Math.round(performance.now()),
+      step,
+    ]);
+  }, what);
 
 // #endregion
 
@@ -308,7 +469,9 @@ test('puts the bar on an article open in reading view as it is imported, and tak
 
 test('takes the bar off a note no tag types while its row is deleted elsewhere, and puts it back with the row, in live preview and in reading view', async () => {
   await importFromFiles();
+  await watchBar();
   // Its type tag taken off by hand: its row still holds it, by its ir-id
+  await markBar('untag');
   await setTags(['keep-me']);
   await expect(tagPills()).toHaveText(['keep-me']);
   await expect(actionBar()).toBeVisible();
@@ -319,6 +482,7 @@ test('takes the bar off a note no tag types while its row is deleted elsewhere, 
   await expect(actionBar()).toBeVisible();
 
   await openNote(window, NOTE);
+  await markBar('to reading view');
   await executeCommandById(window, 'markdown:toggle-preview');
   await expect(readingBar()).toBeVisible();
   await flagArticleRow(true);

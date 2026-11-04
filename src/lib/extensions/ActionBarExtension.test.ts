@@ -1864,6 +1864,47 @@ describe('the edit-mode bar on a note its row alone types', () => {
     );
   });
 
+  it('takes the bar off a note untagged just before its row is deleted, whether the cache parses the edit before the delete or after it', async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.boolean(), async (parsedFirst) => {
+        const { panel, repo, vault } = await wireItemNote({
+          table: 'article',
+          row: 'live',
+          atReference: true,
+          frontmatter: { 'ir-id': 'x', tags: [ARTICLE_TAG, 'mine'] },
+        });
+        await tick();
+        expect(panel.hasBar()).toBe(true);
+        const cache = vault.app.metadataCache;
+        const tagged = structuredClone(cache.getFileCache(panel.file));
+
+        await vault.app.fileManager.processFrontMatter(panel.file, (fm) => {
+          fm.tags = ['mine'];
+        });
+        const parsed = cache.getFileCache(panel.file);
+        const reportParse = () => panel.reportChange(parsed?.frontmatter);
+        if (parsedFirst) {
+          reportParse();
+          await tick();
+        } else {
+          // The cache still holds the tagged parse when the delete lands
+          vi.spyOn(cache, 'getFileCache').mockReturnValue(tagged);
+        }
+        flagRow(repo, 'article', true);
+        await tick();
+        if (!parsedFirst) {
+          vi.mocked(cache.getFileCache).mockReturnValue(parsed);
+          reportParse();
+          await tick();
+        }
+
+        expect(panel.hasBar()).toBe(false);
+        panel.view.destroy();
+      }),
+      { numRuns: 10 }
+    );
+  });
+
   it('takes the bar off when the row is deleted elsewhere, and puts it back once the row is back', async () => {
     const { panel, repo } = await wireItemNote({
       table: 'snippet',

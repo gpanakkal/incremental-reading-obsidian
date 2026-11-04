@@ -261,35 +261,160 @@ const REDO = process.platform === 'darwin' ? 'Meta+Shift+z' : 'Control+y';
 const SHIFT_REDO = 'ControlOrMeta+Shift+z';
 
 /**
- * Press CodeMirror's redo key with focus in the editor, which answers it with
- * its own keymap.
+ * Record, inside the page, what happens to the undo and redo keys from here
+ * on, for a failure to report (see {@link withHistoryDiag}): where each key
+ * landed and what held focus, whether Obsidian's keymap had already taken it
+ * by the time it reached the window's other capturing listeners, whether it
+ * reached the review editor and was taken there, the native history
+ * `beforeinput` events it caused, the editor's undo and redo depths around
+ * it, and the history transactions the editor dispatched.
  *
- * On macOS, Playwright's Cmd+Shift+Z doesn't reach CodeMirror's redo binding
- * on CI, where Cmd+Z does reach undo: CodeMirror reads a Cmd+Shift+letter key
- * on macOS from `keyCode` rather than `key` (w3c-keyname, as a real Mac
- * reports the letter unshifted there). So on macOS this sends the keydown a
- * real Cmd+Shift+Z makes, which is also what Obsidian's own Edit > Redo menu
- * item sends the focused element there (read from obsidian.asar 1.15.0).
+ * Unofficial internals read for this alone: the editor's `cm` view, its
+ * state's field values (the history field is the one value holding `done`
+ * and `undone` arrays), and its `dispatch`, wrapped on the instance.
  */
-async function pressEditorRedo() {
-  if (process.platform !== 'darwin') {
-    await window.keyboard.press(REDO);
-    return;
-  }
+async function armHistoryDiag() {
   await window.evaluate(() => {
-    activeDocument.activeElement?.dispatchEvent(
-      new KeyboardEvent('keydown', {
-        keyCode: 90,
-        which: 90,
-        code: 'KeyZ',
-        key: 'z',
-        metaKey: true,
-        shiftKey: true,
-        bubbles: true,
-        cancelable: true,
-      })
+    type HistoryValue = { done: unknown[]; undone: unknown[] };
+    type Tr = { isUserEvent(event: string): boolean; docChanged: boolean };
+    type View = {
+      contentDOM: HTMLElement;
+      state: { values: unknown[] };
+      dispatch: (...args: unknown[]) => void;
+    };
+    const page = window as unknown as {
+      app: PageApp;
+      __diag?: Record<string, unknown>[];
+    };
+    // The page's window: `window` here is the test's page handle.
+    const pageWindow = document.defaultView as Window;
+    const diag: Record<string, unknown>[] = [];
+    page.__diag = diag;
+    const view = page.app.workspace.activeEditor?.editor.cm as unknown as
+      | View
+      | undefined;
+    if (!view) {
+      diag.push({ at: 'arm', error: 'no review editor' });
+      return;
+    }
+    const describe = (target: EventTarget | null) => {
+      if (target === null) return 'nothing';
+      if (!(target instanceof Element)) return target.constructor.name;
+      const classes = (target.getAttribute('class') ?? '')
+        .split(' ')
+        .slice(0, 2);
+      return [target.tagName.toLowerCase(), ...classes].join('.');
+    };
+    const depths = () => {
+      const history = view.state.values.find(
+        (value): value is HistoryValue =>
+          typeof value === 'object' &&
+          value !== null &&
+          Array.isArray((value as Partial<HistoryValue>).done) &&
+          Array.isArray((value as Partial<HistoryValue>).undone)
+      );
+      return history
+        ? { done: history.done.length, undone: history.undone.length }
+        : 'no history field';
+    };
+    const isHistoryKey = (evt: KeyboardEvent) =>
+      ['z', 'y'].includes(evt.key.toLowerCase());
+    // Added after Obsidian's own capturing listener on the window, so it
+    // sees what that one did to the event.
+    pageWindow.addEventListener(
+      'keydown',
+      (evt: KeyboardEvent) => {
+        if (!isHistoryKey(evt)) return;
+        diag.push({
+          at: 'window, capture',
+          key: evt.key,
+          code: evt.code,
+          // Deprecated, but what CodeMirror's keymap reads on macOS.
+          // eslint-disable-next-line @typescript-eslint/no-deprecated
+          keyCode: evt.keyCode,
+          meta: evt.metaKey,
+          ctrl: evt.ctrlKey,
+          shift: evt.shiftKey,
+          trusted: evt.isTrusted,
+          target: describe(evt.target),
+          focused: describe(document.activeElement),
+          editorFocused: document.activeElement === view.contentDOM,
+          takenByObsidianKeymap: evt.defaultPrevented,
+          depths: depths(),
+        });
+        setTimeout(() => {
+          diag.push({
+            at: 'after the key',
+            key: evt.key,
+            defaultPrevented: evt.defaultPrevented,
+            depths: depths(),
+          });
+        }, 0);
+      },
+      true
     );
+    view.contentDOM.addEventListener(
+      'keydown',
+      (evt) => {
+        if (!isHistoryKey(evt)) return;
+        diag.push({ at: 'review editor', key: evt.key });
+      },
+      true
+    );
+    document.addEventListener(
+      'beforeinput',
+      (evt) => {
+        if (!evt.inputType.startsWith('history')) return;
+        diag.push({
+          at: 'beforeinput',
+          inputType: evt.inputType,
+          target: describe(evt.target),
+          trusted: evt.isTrusted,
+        });
+      },
+      true
+    );
+    const dispatch = view.dispatch;
+    view.dispatch = (...args: unknown[]) => {
+      for (const arg of args) {
+        const tr = arg as Partial<Tr>;
+        if (typeof tr.isUserEvent !== 'function') continue;
+        const userEvent = ['undo', 'redo', 'input', 'delete', 'set'].find(
+          (event) => tr.isUserEvent?.(event)
+        );
+        if (userEvent === 'undo' || userEvent === 'redo') {
+          diag.push({
+            at: 'transaction',
+            userEvent,
+            docChanged: tr.docChanged,
+          });
+        }
+      }
+      dispatch.apply(view, args);
+    };
+    diag.push({ at: 'arm', depths: depths() });
   });
+}
+
+/**
+ * Run `check`, and should it fail, fail with what {@link armHistoryDiag}
+ * recorded in the page added to the message.
+ */
+async function withHistoryDiag(check: () => Promise<void>) {
+  try {
+    await check();
+  } catch (error) {
+    const diag = await window
+      .evaluate(
+        () => (window as unknown as { __diag?: unknown }).__diag ?? 'not armed'
+      )
+      .catch((reason: unknown) => `unreadable: ${String(reason)}`);
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `${message}\n\nUndo and redo in the page:\n${JSON.stringify(diag, null, 1)}`,
+      { cause: error }
+    );
+  }
 }
 
 /** What holds focus, as the class list of the focused element and where it is. */
@@ -425,11 +550,16 @@ for (const focusFirst of [true, false]) {
       });
     }
 
+    await armHistoryDiag();
     await window.keyboard.press('ControlOrMeta+z');
-    await expect.poll(reviewText, PROMPT).toBe(original);
+    await withHistoryDiag(async () => {
+      await expect.poll(reviewText, PROMPT).toBe(original);
+    });
 
-    await pressEditorRedo();
-    await expect.poll(reviewText, PROMPT).toContain(BURST);
+    await window.keyboard.press(REDO);
+    await withHistoryDiag(async () => {
+      await expect.poll(reviewText, PROMPT).toContain(BURST);
+    });
   });
 }
 
