@@ -1,11 +1,13 @@
 import { createReviewInterface } from '#/components/ReviewInterface';
 import { MORE_OPTIONS_SECTIONS, PLUGIN_ICON } from '#/lib/constants';
+import { asksForFocus, EditorFocusHandoff } from '#/lib/editor-focus-handoff';
 import { isPositionalEState } from '#/lib/ephemeral-position';
 import type ReviewManager from '#/lib/items/ReviewManager';
 import { isEditableText } from '#/lib/mime';
 import type { ExtractedMarkdownEditor } from '#/lib/obsidian-editor';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import type { PdfViewer } from '#/lib/pdf/obsidian-pdf';
+import type { RetiredEditorAnswerer } from '#/lib/retired-editor-park';
 import { addRevealInNavigationItem } from '#/lib/reveal-in-navigation';
 import {
   actionsToReach,
@@ -18,6 +20,13 @@ import {
   samePlace,
   type ReviewPlace,
 } from '#/lib/review-history';
+import {
+  historyCommandFor,
+  historyCommandForInput,
+  historyInputReachesEditor,
+  historyKeyReachesEditor,
+  isEditableTarget,
+} from '#/lib/review-undo-keys';
 import {
   resetCurrentItem,
   resetSession,
@@ -71,21 +80,10 @@ export const HEADER_SHOWN_CLASS = 'ir-header-shown';
  */
 export const HEADER_HIDDEN_CLASS = 'ir-header-hidden';
 
-/**
- * Whether keys pressed at `target` edit text: a form field, or anything inside
- * an element made editable. The review editor in selection mode is not one —
- * its `contenteditable` is `false`.
- */
-function isEditableTarget(target: EventTarget | null): boolean {
-  return (
-    target instanceof Element &&
-    target.closest(
-      'input, textarea, select, [contenteditable]:not([contenteditable="false"])'
-    ) !== null
-  );
-}
-
-export default class ReviewView extends FileView {
+export default class ReviewView
+  extends FileView
+  implements RetiredEditorAnswerer
+{
   static #viewType = 'incremental-reading-review';
   #reviewManager: ReviewManager;
   plugin: IncrementalReadingPlugin;
@@ -94,6 +92,12 @@ export default class ReviewView extends FileView {
   /* required for review view to open */
   allowNoFile: boolean = true;
   #lastFocusedEl: Element | null = null;
+  /**
+   * Keyboard focus passing from one item's editor to the next, which a note
+   * tab's single editor never has to do. Each item's editor releases it as it
+   * goes and claims it as it mounts.
+   */
+  readonly editorFocus = new EditorFocusHandoff();
   /**
    * Optional initial item to display first instead of the top of the queue.
    * Set this before opening the view to jump to a specific item.
@@ -153,10 +157,16 @@ export default class ReviewView extends FileView {
   /**
    * The keys review answers while it is in selection mode, held here and handed
    * to Obsidian through `scope` only for as long as the mode lasts — see
-   * {@link syncSelectionScope}. Parented on the app's scope, as Obsidian's own
+   * {@link syncScope}. Parented on the app's scope, as Obsidian's own
    * views' are, so every other hotkey keeps working in the mode.
    */
   #selectionScope: Scope;
+  /**
+   * The editor's undo and redo keys pressed elsewhere in the tab, handed to
+   * Obsidian through `scope` while an item's editor is on screen — see
+   * {@link syncScope} and {@link onHistoryKey}.
+   */
+  #historyScope: Scope;
   /** See {@link pdfViewer}. */
   #pdfViewer: PdfViewer | null = null;
   /** Undoes {@link interceptOpenFile}; `null` while nothing is wrapped. */
@@ -196,10 +206,17 @@ export default class ReviewView extends FileView {
     this.#selectionScope.register([], 'Escape', (evt) =>
       this.onSelectionEscape(evt)
     );
-    this.syncSelectionScope();
+    this.#historyScope = new Scope(plugin.app.scope);
+    // Every key, with neither modifiers nor key named: a handler like that
+    // passes the key on to the app's scope when it returns nothing, where one
+    // bound to a key would end the lookup there (undocumented; read from
+    // `Scope.handleKey` in obsidian.asar 1.14.5). So the app's hotkeys, a
+    // user's Ctrl+Z included, keep working wherever review doesn't take the key.
+    this.#historyScope.register(null, null, (evt) => this.onHistoryKey(evt));
+    this.syncScope();
 
     const unsub = plugin.store.subscribe(() => {
-      this.syncSelectionScope();
+      this.syncScope();
       this.dropStaleArrival();
       this.trackPlace(placeOf(plugin.store.getState()));
       const currentPage = plugin.store.getState().page;
@@ -476,6 +493,26 @@ export default class ReviewView extends FileView {
     super.setEphemeralState(state);
     const place = readPlace(state);
     if (place) this.goToPlace(place);
+    if (asksForFocus(state, Platform.isMobile)) this.restoreFocus();
+  }
+
+  /**
+   * Put focus back in the tab when `focusLeaf` brings it forward: where it
+   * last was in the tab (the editor, or a field such as the action bar's
+   * priority), and in the editor when that is gone, as a note tab puts the
+   * cursor in its editor. A click in the Files view does this to the tab it
+   * opens a note in, so the editor that review shows next, which takes over
+   * focus from this one, is the one keystrokes reach. Not in selection mode,
+   * whose text is not editable.
+   */
+  restoreFocus(): void {
+    if (this.plugin.store.getState().selectionMode !== null) return;
+    const last = this.#lastFocusedEl;
+    if (last instanceof HTMLElement && this.contentEl.contains(last)) {
+      this.refocusWithoutScroll(last);
+      return;
+    }
+    this.activeEditor?.editor.focus();
   }
 
   /**
@@ -586,6 +623,7 @@ export default class ReviewView extends FileView {
   setActiveEditor(owner: ExtractedMarkdownEditor['owner']): void {
     this.activeEditor = owner;
     this.app.workspace.activeEditor = owner;
+    this.syncScope();
   }
 
   /**
@@ -692,10 +730,40 @@ export default class ReviewView extends FileView {
       this.contentEl
     );
 
+    // A native undo or redo landing outside the editor: on the body, or on a
+    // button in the tab. A listener on each window, as the tab can move to a
+    // popout; one already open when this tab opened is not heard. A popout's
+    // goes when it closes, the rest when the tab does.
+    const onHistoryInput = (evt: InputEvent) => this.onHistoryInput(evt);
+    this.registerDomEvent(window, 'beforeinput', onHistoryInput);
+    // A native undo of typing in an editor review took down, whichever tab
+    // took it down: this one, or one closed since on the note shown here.
+    this.register(this.plugin.retiredEditors.listen(this));
+    const popouts = new Set<Window>();
+    this.registerEvent(
+      this.app.workspace.on('window-open', (_popout, win) => {
+        win.addEventListener('beforeinput', onHistoryInput);
+        popouts.add(win);
+      })
+    );
+    this.registerEvent(
+      this.app.workspace.on('window-close', (_popout, win) => {
+        win.removeEventListener('beforeinput', onHistoryInput);
+        popouts.delete(win);
+      })
+    );
+    this.register(() => {
+      for (const win of popouts) {
+        win.removeEventListener('beforeinput', onHistoryInput);
+      }
+      popouts.clear();
+    });
+
     this.registerDomEvent(this.contentEl, 'focusin', (e: FocusEvent) => {
       if (e.target instanceof Element) {
         this.#lastFocusedEl = e.target;
       }
+      this.editorFocus.cancel();
     });
 
     this.registerEvent(
@@ -894,22 +962,116 @@ export default class ReviewView extends FileView {
   }
 
   /**
-   * Give Obsidian's keymap review's selection mode keys exactly while review is
-   * in the mode, and nothing at all otherwise.
+   * Give Obsidian's keymap the keys review answers for what is on screen:
+   * selection mode's while review is in the mode, a PDF viewer's while one is
+   * attached, the editor's undo and redo keys while an item's editor is
+   * mounted, and nothing at all otherwise.
    *
    * The workspace's keymap scope asks the active leaf's view for `scope` on
    * every key it handles, and falls back to its own handling when there is none
    * (undocumented; read from the Workspace constructor in the app bundle). So
    * the keys apply only while this tab is the active leaf, and swapping the
-   * field takes effect from the next key. It is left `null` outside the mode
-   * rather than holding a scope whose Escape declines: a handler bound to a key
-   * ends Obsidian's lookup even when it declines, which would keep that key
-   * from the app's hotkeys and from anything registered on the workspace.
+   * field takes effect from the next key. Selection mode's scope is dropped
+   * outside the mode rather than kept with an Escape that declines: a handler
+   * bound to a key ends Obsidian's lookup even when it declines, which would
+   * keep that key from the app's hotkeys and from anything registered on the
+   * workspace. The history scope's one handler is bound to no key, so it passes
+   * on every key it doesn't take.
    */
-  syncSelectionScope(): void {
-    this.scope = this.plugin.store.getState().selectionMode
-      ? this.#selectionScope
-      : (this.pdfViewer?.scope ?? null);
+  syncScope(): void {
+    if (this.plugin.store.getState().selectionMode) {
+      this.scope = this.#selectionScope;
+    } else if (this.pdfViewer) {
+      this.scope = this.pdfViewer.scope;
+    } else {
+      this.scope = this.activeEditor ? this.#historyScope : null;
+    }
+  }
+
+  /**
+   * Undo or redo in the item's editor for those keys pressed in the tab
+   * outside it, where a note tab would leave them to Electron's Edit menu and
+   * the page's native undo — which takes back typing in whatever other tab
+   * Chromium last saw it in. Not from the editor itself, whose own keymap has
+   * them, nor from a field that edits text of its own (the priority, the
+   * title), which keeps its native undo.
+   *
+   * @returns `false`, which has Obsidian prevent the key's default (the Edit
+   * menu's accelerator included) and stop it, when the editor took it;
+   * nothing otherwise, which passes the key on.
+   */
+  onHistoryKey(evt: KeyboardEvent): false | undefined {
+    if (evt.isComposing) return undefined;
+    const command = historyCommandFor(evt, Platform.isMacOS);
+    const editor = this.activeEditor?.editor;
+    if (command === null || !editor) return undefined;
+    if (!historyKeyReachesEditor(evt.target, this.containerEl)) {
+      return undefined;
+    }
+    if (command === 'undo') editor.undo();
+    else editor.redo();
+    return false;
+  }
+
+  /**
+   * Undo or redo in the item's editor for a native undo or redo (a
+   * `beforeinput` of `historyUndo` / `historyRedo`, as iOS's shake to undo
+   * sends it) that CodeMirror can't answer — see {@link onHistoryInput} and
+   * {@link forwardHistoryInputFrom}. Only while the editor's keys are this
+   * tab's (see {@link syncScope}): not in selection mode, whose editor takes no
+   * edits, nor with a PDF viewer or nothing on screen. One it takes has its
+   * default prevented, as CodeMirror prevents it for its own: WebKit then
+   * leaves the page alone.
+   * @returns whether the editor took it
+   */
+  answerHistoryInput(evt: InputEvent): boolean {
+    const command = historyCommandForInput(evt.inputType);
+    const editor = this.activeEditor?.editor;
+    if (command === null || !editor || this.scope !== this.#historyScope) {
+      return false;
+    }
+    evt.preventDefault();
+    if (command === 'undo') editor.undo();
+    else editor.redo();
+    return true;
+  }
+
+  /**
+   * A native undo or redo heard on a window, answered for the editor when it
+   * landed outside any text field in this tab while the tab is active — the
+   * body, as on a phone after review moves on, the editor not taking focus
+   * there; a button in the action bar — as {@link onHistoryKey} answers keys.
+   */
+  onHistoryInput(evt: InputEvent): void {
+    // Every `beforeinput` of typing anywhere comes here: let those go first.
+    if (historyCommandForInput(evt.inputType) === null) return;
+    if (this.app.workspace.getActiveViewOfType(ReviewView) !== this) return;
+    // Not one for an editor the plugin keeps (another note's, left alone):
+    // those are out of the tab.
+    if (!historyInputReachesEditor(evt.target, this.containerEl)) return;
+    this.answerHistoryInput(evt);
+  }
+
+  /**
+   * Keep `el`, the content element of an editor review took down from `file`,
+   * where a native undo of the typing done in it still reaches it (iOS), for
+   * the review tab showing that note to answer — see `RetiredEditorPark`. A
+   * note tab's one editor answers for its note's typing from any earlier
+   * visit; review's editors, and its tab, come and go.
+   */
+  forwardHistoryInputFrom(el: HTMLElement, file: TFile): void {
+    this.plugin.retiredEditors.keep(el, file);
+  }
+
+  /**
+   * Answer a native undo or redo of typing done in `file`'s note in an editor
+   * review took down, when this tab's editor shows that same note. On any
+   * other note it stays unanswered: that note's history isn't the typing's.
+   * `file` is matched by identity, which Obsidian keeps through a rename: a
+   * note made again at the path is another note.
+   */
+  answerRetiredHistoryInput(evt: InputEvent, file: TFile): boolean {
+    return this.activeEditor?.file === file && this.answerHistoryInput(evt);
   }
 
   /**
@@ -917,13 +1079,13 @@ export default class ReviewView extends FileView {
    * become the tab's. `PdfArticleView` calls this on mount.
    *
    * Its scope goes to Obsidian the way a PDF tab's does, as the view's own
-   * `scope` (see {@link syncSelectionScope}): the workspace consults it only
+   * `scope` (see {@link syncScope}): the workspace consults it only
    * while this tab is the active leaf, so the keys stop the moment another tab
    * is focused and come back with this one. Nothing pushes it otherwise.
    */
   attachPdfViewer(viewer: PdfViewer): void {
     this.#pdfViewer = viewer;
-    this.syncSelectionScope();
+    this.syncScope();
   }
 
   /**
@@ -933,12 +1095,12 @@ export default class ReviewView extends FileView {
   detachPdfViewer(viewer: PdfViewer): void {
     if (this.#pdfViewer !== viewer) return;
     this.#pdfViewer = null;
-    this.syncSelectionScope();
+    this.syncScope();
   }
 
   /**
    * Escape in selection mode does what the mode's Cancel button does. Reached
-   * only in the mode, whose scope this is — see {@link syncSelectionScope}.
+   * only in the mode, whose scope this is — see {@link syncScope}.
    *
    * Anything open over review — a modal such as the card answer prompt or the
    * command palette, a menu, a suggest, the editor's find bar — pushes a keymap
@@ -978,6 +1140,9 @@ export default class ReviewView extends FileView {
     this.#open = false;
     this.#restoreOpenFile?.();
     await super.onClose();
+    // Takes the item's editor down: the plugin keeps it, for the tab that
+    // shows its note next — this one, back through the tab's history, is a
+    // new tab.
     render(null, this.contentEl);
     this.activeEditor = null;
     this.#lastFocusedEl = null;

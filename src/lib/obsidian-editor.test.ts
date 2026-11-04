@@ -4,12 +4,21 @@ import {
   ensurePropertiesExtension,
   getBaseMarkdownExtensions,
   getMarkdownController,
+  retireEditor,
   type ExtractedEditMode,
   type ExtractedMarkdownEditor,
 } from '#/lib/obsidian-editor';
 import type { ReviewItem } from '#/lib/types';
 import type ReviewView from '#/views/ReviewView';
-import type { Extension } from '@codemirror/state';
+import {
+  history,
+  historyField,
+  isolateHistory,
+  undo,
+  undoDepth,
+} from '@codemirror/commands';
+import { EditorState, type Extension } from '@codemirror/state';
+import { EditorView } from '@codemirror/view';
 import fc from 'fast-check';
 import type { App, Editor } from 'obsidian';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -63,10 +72,7 @@ function makeController(
 /** Arbitrary own properties for the view being spread, including keys that
  *  collide with the controller's own API. */
 const viewPropsArb = fc.dictionary(
-  fc.oneof(
-    fc.string({ minLength: 1 }),
-    fc.constantFrom(...CONTROLLER_KEYS)
-  ),
+  fc.oneof(fc.string({ minLength: 1 }), fc.constantFrom(...CONTROLLER_KEYS)),
   fc.anything()
 );
 
@@ -104,6 +110,90 @@ function makeEmbedApp(editMode: ExtractedEditMode | undefined) {
     embedRegistry: { embedByExtension: { md: vi.fn(() => md) } },
   } as unknown as App;
   return { app, md };
+}
+
+/**
+ * Obsidian's editor as `retireEditor` meets it, over a real CodeMirror view.
+ * `saveHistory` files the live undo history away as Obsidian's does: as JSON,
+ * with the length of the text it belongs to. `destroy` swaps in an empty state
+ * before tearing the view down, as Obsidian's does, which is what loses the
+ * history for good.
+ */
+function makeRetiringEditor(doc: string) {
+  const cm = new EditorView({
+    state: EditorState.create({ doc, extensions: [history()] }),
+  });
+  const filed: { json: unknown; length: number }[] = [];
+  const editor = {
+    cm,
+    saveHistory: vi.fn(() => {
+      const { history: json } = cm.state.toJSON({ history: historyField }) as {
+        history: unknown;
+      };
+      filed.push({ json, length: cm.state.doc.length });
+    }),
+    destroy: vi.fn(() => {
+      cm.setState(EditorState.create({}));
+      cm.destroy();
+    }),
+  };
+  return { editor, filed };
+}
+
+/** A fresh editor state on `doc` that takes back history filed for it. */
+function restoreFiled(doc: string, json: unknown): EditorState {
+  return EditorState.fromJSON(
+    {
+      doc,
+      selection: { ranges: [{ anchor: 0, head: 0 }], main: 0 },
+      history: json,
+    },
+    { extensions: [history()] },
+    { history: historyField }
+  );
+}
+
+/** Undo in `state` until there is nothing left to undo. */
+function undoAll(state: EditorState): EditorState {
+  let current = state;
+  const run = () =>
+    undo({
+      state: current,
+      dispatch: (tr) => {
+        current = tr.state;
+      },
+    });
+  while (run()) {
+    // Each pass takes back one group.
+  }
+  return current;
+}
+
+/** One insertion: where, as a fraction of the text, and what. */
+type Keystrokes = { at: number; text: string; newGroup: boolean };
+
+/**
+ * Typing as a reader does it: insertions anywhere in the text, each either
+ * joining the group before it or starting one of its own.
+ */
+const typingArb: fc.Arbitrary<Keystrokes[]> = fc.array(
+  fc.record({
+    at: fc.double({ min: 0, max: 1, noNaN: true }),
+    text: fc.string({ minLength: 1, maxLength: 8 }),
+    newGroup: fc.boolean(),
+  }),
+  { maxLength: 12 }
+);
+
+function type(cm: EditorView, typing: Keystrokes[]): void {
+  for (const { at, text, newGroup } of typing) {
+    const pos = Math.floor(at * cm.state.doc.length);
+    cm.dispatch({
+      changes: { from: pos, insert: text },
+      userEvent: 'input.type',
+      annotations: newGroup ? isolateHistory.of('before') : [],
+    });
+  }
 }
 
 // #endregion
@@ -236,9 +326,7 @@ describe('getMarkdownController', () => {
   describe('getSelection', () => {
     it('returns the live window selection', () => {
       const selection = {} as Selection;
-      const spy = vi
-        .spyOn(window, 'getSelection')
-        .mockReturnValue(selection);
+      const spy = vi.spyOn(window, 'getSelection').mockReturnValue(selection);
 
       expect(makeController().getSelection()).toBe(selection);
       expect(spy).toHaveBeenCalled();
@@ -371,5 +459,70 @@ describe('getBaseMarkdownExtensions', () => {
     const { app } = makeEmbedApp(undefined);
 
     expect(getBaseMarkdownExtensions(app)).toEqual([]);
+  });
+});
+
+describe('retireEditor', () => {
+  it('files the history the editor has on teardown, so a new editor on the same text undoes it all', () => {
+    fc.assert(
+      fc.property(fc.string(), typingArb, (original, typing) => {
+        const { editor, filed } = makeRetiringEditor(original);
+        type(editor.cm, typing);
+        const depth = undoDepth(editor.cm.state);
+        const typed = editor.cm.state.doc.toString();
+
+        retireEditor(editor);
+
+        expect(filed).toHaveLength(1);
+        expect(filed[0].length).toBe(typed.length);
+        const restored = restoreFiled(typed, filed[0].json);
+        expect(undoDepth(restored)).toBe(depth);
+        expect(undoAll(restored).doc.toString()).toBe(original);
+      })
+    );
+  });
+
+  it('tears the editor down once, after filing its history', () => {
+    const { editor } = makeRetiringEditor('text');
+
+    retireEditor(editor);
+
+    expect(editor.saveHistory).toHaveBeenCalledTimes(1);
+    expect(editor.destroy).toHaveBeenCalledTimes(1);
+    expect(editor.saveHistory.mock.invocationCallOrder[0]).toBeLessThan(
+      editor.destroy.mock.invocationCallOrder[0]
+    );
+  });
+
+  it('still tears the editor down when Obsidian has no history to file it with', () => {
+    const destroy = vi.fn();
+
+    retireEditor({ destroy });
+
+    expect(destroy).toHaveBeenCalledTimes(1);
+  });
+
+  it('goes on to each step when the one before it throws, and throws nothing itself', () => {
+    fc.assert(
+      fc.property(fc.boolean(), fc.boolean(), (saveThrows, destroyThrows) => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const failure = (fails: boolean) =>
+          vi.fn(() => {
+            if (fails) throw new Error('teardown failed');
+          });
+        const editor = {
+          saveHistory: failure(saveThrows),
+          destroy: failure(destroyThrows),
+        };
+
+        expect(() => retireEditor(editor)).not.toThrow();
+
+        expect(editor.destroy).toHaveBeenCalledTimes(1);
+        expect(warn).toHaveBeenCalledTimes(
+          Number(saveThrows) + Number(destroyThrows)
+        );
+        warn.mockRestore();
+      })
+    );
   });
 });

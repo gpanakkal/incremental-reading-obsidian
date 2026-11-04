@@ -39,6 +39,7 @@ import {
   registerPositionFlushes,
 } from '#/lib/reading-positions';
 import { REBIND_LOG_TOPIC } from '#/lib/rebind-records';
+import { RetiredEditorPark } from '#/lib/retired-editor-park';
 import { goToReviewPlace } from '#/lib/review-history';
 import {
   type Menu,
@@ -277,6 +278,12 @@ export default class IncrementalReadingPlugin extends Plugin {
    * (see `#/lib/queue-page-memory`).
    */
   readonly queuePage = new QueuePageMemory();
+  /**
+   * The editors review tabs took down, kept for a native undo of the typing
+   * done in them (iOS) beyond the tab that took them down (see
+   * `#/lib/retired-editor-park`).
+   */
+  readonly retiredEditors = new RetiredEditorPark();
   actions!: Actions;
   /**
    * Re-checks which open tabs carry a standalone action bar. Unset until the
@@ -586,6 +593,7 @@ export default class IncrementalReadingPlugin extends Plugin {
   onunload() {
     this.reviewManager?.repo.dispose();
     this.queuePage.clear();
+    this.retiredEditors.drop();
     configureSuccessNotices(null);
     this.stopDebugTiming?.();
   }
@@ -941,6 +949,8 @@ export default class IncrementalReadingPlugin extends Plugin {
    * showing it.
    */
   private onVaultDelete(file: TAbstractFile) {
+    // Its editors' undo has no note to answer for it any more.
+    this.retiredEditors.dropFile(file);
     if (!this.reviewManager) return;
     const path = this.itemPathGuard?.pathBeforeDeletion(file) ?? file.path;
     // Once any merge under way is over, which would drop the mark

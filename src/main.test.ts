@@ -41,6 +41,7 @@ import {
   StartupCancelledError,
   type SyncHold,
 } from '#/lib/repository/SQLJSRepository';
+import { RetiredEditorPark } from '#/lib/retired-editor-park';
 import * as ReviewReminder from '#/lib/review-reminder';
 import { DEFAULT_SETTINGS } from '#/lib/settings';
 import {
@@ -886,6 +887,7 @@ async function startRenames(items: readonly string[] = []) {
     onVaultRename: plugin.onVaultRename,
     onVaultDelete: plugin.onVaultDelete,
     followRename: plugin.followRename,
+    retiredEditors: new RetiredEditorPark(false),
   };
   /** Hear that `entry`, now in the vault at its path, moved from `oldPath`. */
   const rename = (entry: TFile | TFolder, oldPath: string) => {
@@ -906,6 +908,7 @@ async function startRenames(items: readonly string[] = []) {
     await (plugin.initReviewManager as () => Promise<void>).call(receiver);
   };
   return {
+    retiredEditors: receiver.retiredEditors as RetiredEditorPark,
     rename,
     remove,
     start,
@@ -4124,6 +4127,18 @@ describe('IncrementalReadingPlugin.followMovedNotes', () => {
 });
 
 describe('IncrementalReadingPlugin renames', () => {
+  it('lets go of the editors review kept for a deleted note, whether or not the review manager is up', async () => {
+    const renames = await startRenames(['a.md']);
+    const dropFile = vi.spyOn(renames.retiredEditors, 'dropFile');
+    const gone = tFileAt('a.md');
+
+    renames.remove(gone);
+    await renames.start();
+    renames.remove(gone);
+
+    expect(dropFile.mock.calls).toEqual([[gone], [gone]]);
+  });
+
   it('hears no rename before the review manager is up', async () => {
     const { rename, follow } = await startRenames(['a.md']);
 
@@ -5206,11 +5221,25 @@ describe('IncrementalReadingPlugin unload', () => {
     vi.restoreAllMocks();
   });
 
+  it('lets go of the editors review kept', () => {
+    const retiredEditors = new RetiredEditorPark(false);
+    const drop = vi.spyOn(retiredEditors, 'drop');
+
+    IncrementalReadingPlugin.prototype.onunload.call({
+      reviewManager: undefined,
+      queuePage: new QueuePageMemory(),
+      retiredEditors,
+    } as unknown as IncrementalReadingPlugin);
+
+    expect(drop).toHaveBeenCalledOnce();
+  });
+
   it('disposes the database repository', () => {
     const dispose = vi.fn();
     const receiver = {
       reviewManager: { repo: { dispose } },
       queuePage: new QueuePageMemory(),
+      retiredEditors: new RetiredEditorPark(false),
     };
 
     IncrementalReadingPlugin.prototype.onunload.call(
@@ -5224,6 +5253,7 @@ describe('IncrementalReadingPlugin unload', () => {
     const receiver = {
       reviewManager: undefined,
       queuePage: new QueuePageMemory(),
+      retiredEditors: new RetiredEditorPark(false),
       settings: {
         successNoticesInReview: 'none' as const,
         successNoticesOutsideReview: 'none' as const,
@@ -5245,7 +5275,11 @@ describe('IncrementalReadingPlugin unload', () => {
     const filter = { article: true } as const;
     const queuePage = new QueuePageMemory();
     queuePage.set(filter, 3);
-    const receiver = { reviewManager: undefined, queuePage };
+    const receiver = {
+      reviewManager: undefined,
+      queuePage,
+      retiredEditors: new RetiredEditorPark(false),
+    };
 
     IncrementalReadingPlugin.prototype.onunload.call(
       receiver as unknown as IncrementalReadingPlugin
@@ -5258,6 +5292,7 @@ describe('IncrementalReadingPlugin unload', () => {
     const receiver = {
       reviewManager: undefined,
       queuePage: new QueuePageMemory(),
+      retiredEditors: new RetiredEditorPark(false),
     };
 
     expect(() => {

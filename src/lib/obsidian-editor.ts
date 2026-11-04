@@ -76,11 +76,48 @@ export class ExtractedMarkdownEditor {
    * suggest, and pops the keymap scope the find bar pushes while open.
    */
   destroy(): void {}
+  /**
+   * Obsidian's own keeper of a note's undo history across editors. Stores the
+   * CodeMirror history, as JSON, in a list shared by every editor in the app
+   * (the last 20 notes), under the path of the note the editor holds and its
+   * length. The first {@link set} of an editor on that path takes the history
+   * back when the text is still that length, which is how a note tab's undo
+   * outlives switching to another note and back. A note tab calls it when it
+   * unloads its note; {@link destroy} does not.
+   *
+   * Undocumented: read from obsidian.asar 1.14.5 (`saveHistory` on the
+   * editor's prototype, called from the edit view's `beforeUnload`). Optional,
+   * since nothing promises a later version keeps it.
+   */
+  saveHistory?(): void;
   owner: MarkdownView | null;
   app: ExtractedApp;
   editor: Editor;
   cm: EditorView;
   set: (data: string) => void;
+}
+
+/**
+ * Tear an editor down the way a note tab unloads a note: its undo history goes
+ * to Obsidian's per-note store first, so the next editor on the same note,
+ * here or in a note tab, picks it up. One failing step doesn't stop the other.
+ */
+export function retireEditor(
+  editor: Pick<ExtractedMarkdownEditor, 'saveHistory' | 'destroy'>
+): void {
+  try {
+    editor.saveHistory?.();
+  } catch (error) {
+    console.warn(
+      'Incremental Reading - Error saving the editor history:',
+      error
+    );
+  }
+  try {
+    editor.destroy();
+  } catch (error) {
+    console.warn('Incremental Reading - Error destroying the editor:', error);
+  }
 }
 
 function getExtractedEmbedMd(app: App): ExtractedEmbedMarkdownComponent {

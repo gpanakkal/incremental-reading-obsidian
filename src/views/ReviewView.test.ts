@@ -8,10 +8,11 @@ import {
 } from '#/lib/constants';
 import { deleteMissingItem } from '#/lib/delete-missing-item';
 import type ReviewManager from '#/lib/items/ReviewManager';
-import { ObsidianHelpers } from '#/lib/ObsidianHelpers';
 import type { ExtractedMarkdownEditor } from '#/lib/obsidian-editor';
+import { ObsidianHelpers } from '#/lib/ObsidianHelpers';
 import type { PdfViewer } from '#/lib/pdf/obsidian-pdf';
 import { leaveCurrentItemIfPurged, queryClient } from '#/lib/query-client';
+import { RetiredEditorPark } from '#/lib/retired-editor-park';
 import {
   goToReviewPlace,
   isDestination,
@@ -22,6 +23,10 @@ import {
   samePlace,
   type ReviewPlace,
 } from '#/lib/review-history';
+import {
+  historyCommandFor,
+  historyCommandForInput,
+} from '#/lib/review-undo-keys';
 import type { IRPluginSettings, ReviewTitleBar } from '#/lib/settings';
 import {
   resetCurrentItem,
@@ -116,11 +121,15 @@ function makeActiveEditor() {
   return { showSearch: vi.fn() };
 }
 
-/** Bare receiver for `setActiveEditor`, which touches only these two slots. */
+/**
+ * Bare receiver for `setActiveEditor`, which touches only these two slots and
+ * hands the keys of the editor it publishes to `syncScope`.
+ */
 function makeSetActiveEditorReceiver() {
   const receiver = {
     activeEditor: null as unknown,
     app: { workspace: { activeEditor: 'someone else' as unknown } },
+    syncScope: vi.fn(),
   };
   return receiver;
 }
@@ -538,9 +547,15 @@ async function openHistoryView({
   itemExists = true,
   items = new Map(),
   leftovers,
+  workspace = {},
+  retiredEditors = new RetiredEditorPark(true),
 }: {
   /** The plugin's watch over notes left without review data, if it has one. */
   leftovers?: { reviewOpened: () => void };
+  /** Workspace members to add to, or put in place of, the stub's own. */
+  workspace?: Record<string, unknown>;
+  /** Where the plugin keeps the editors review tabs take down. */
+  retiredEditors?: RetiredEditorPark;
   file?: TFile | null;
   /** The item the tab was asked to open on, as `learn` hands it one. */
   initialItem?: ReviewItem | null;
@@ -587,6 +602,7 @@ async function openHistoryView({
       settings: makePluginSettings(),
       app: makePluginApp(),
       leftovers,
+      retiredEditors,
     } as unknown as IncrementalReadingPlugin,
     reviewManager as unknown as ReviewManager
   );
@@ -603,6 +619,9 @@ async function openHistoryView({
         on: () => ({}),
         getLeavesOfType: () => [leaf],
         setActiveLeaf: vi.fn(),
+        // Another tab active: the window's native undo listener stays out.
+        getActiveViewOfType: () => null,
+        ...workspace,
       },
     },
   });
@@ -811,6 +830,7 @@ function makeKeyedView() {
       settings: makePluginSettings(),
       app: { ...makePluginApp(), scope: appScope },
       actions: { cancelSelection },
+      retiredEditors: new RetiredEditorPark(true),
     } as unknown as IncrementalReadingPlugin,
     {} as ReviewManager
   );
@@ -845,6 +865,90 @@ function pressKey(
   const answer = scope.handleKey(evt, { modifiers, key: evt.key });
   return { consumed: answer === false };
 }
+
+/**
+ * A review tab with an item's editor on screen, for the native undo and redo
+ * (`beforeinput` of `historyUndo` / `historyRedo`) it answers. `active` is
+ * whether the tab is the active leaf; `file` is the note the editor shows;
+ * `parks` is whether it keeps the editors it takes down in the document, as it
+ * does on iOS; `attached` is whether the tab is in the document.
+ */
+function makeHistoryInputView({
+  active = true,
+  file = HISTORY_NOTE,
+  parks = true,
+  attached = true,
+}: {
+  active?: boolean;
+  file?: TFile;
+  parks?: boolean;
+  attached?: boolean;
+} = {}) {
+  const keyed = makeKeyedView();
+  const editor = { undo: vi.fn(), redo: vi.fn() };
+  Object.assign(keyed.view, {
+    app: {
+      workspace: {
+        getActiveViewOfType: () => (active ? keyed.view : null),
+      },
+    },
+  });
+  // As the tab does once open: it answers for what the plugin keeps.
+  keyed.view.plugin.retiredEditors.enabled = parks;
+  keyed.view.plugin.retiredEditors.listen(keyed.view);
+  if (attached) document.body.appendChild(keyed.view.containerEl);
+  keyed.view.setActiveEditor({ editor, file } as never);
+  return { ...keyed, editor };
+}
+
+/**
+ * An editor's content element as review takes it down: out of the document,
+ * editable as CodeMirror left it.
+ */
+function makeRetiredEditor(): HTMLElement {
+  const el = document.createElement('div');
+  el.setAttribute('contenteditable', 'true');
+  return el;
+}
+
+/** The note an item's editor shows in {@link makeHistoryInputView}. */
+const HISTORY_NOTE = { path: 'Notes/typed in.md' } as TFile;
+
+/** A `beforeinput` of `inputType`, as a native undo or redo sends it. */
+function makeHistoryInput(inputType: string) {
+  return new InputEvent('beforeinput', {
+    inputType,
+    bubbles: true,
+    cancelable: true,
+  });
+}
+
+/**
+ * Hand `view` a `beforeinput` of `inputType` landing on `target`, as its
+ * window's listener does. Returns whether review took it, by the default it
+ * prevented.
+ */
+function answerHistoryInputAt(
+  view: ReviewView,
+  target: EventTarget,
+  inputType: string
+): boolean {
+  const evt = makeHistoryInput(inputType);
+  Object.defineProperty(evt, 'target', { value: target });
+  view.onHistoryInput(evt);
+  return evt.defaultPrevented;
+}
+
+/** `beforeinput` types: the two of a native undo and redo, and others. */
+const inputTypeArb = fc.oneof(
+  fc.constantFrom(
+    'historyUndo',
+    'historyRedo',
+    'insertText',
+    'deleteContentBackward'
+  ),
+  fc.string()
+);
 
 /** Elements whose own keys edit text, focused when Escape is pressed. */
 const editableTargetArb = fc.constantFrom(
@@ -4295,5 +4399,649 @@ describe('ReviewView history over an item deleted for good', () => {
       ),
       { numRuns: 40 }
     );
+  });
+});
+
+describe('ReviewView editor focus', () => {
+  const selectionKindArb = fc.constantFrom<SelectionKind>('snippet', 'card');
+
+  beforeEach(() => {
+    store.dispatch(resetSession());
+  });
+
+  afterEach(() => {
+    store.dispatch(resetSession());
+  });
+
+  /** An editor on screen in `view`, recording whether it was focused. */
+  function giveEditor(view: ReviewView) {
+    const focus = vi.fn();
+    view.activeEditor = { editor: { focus } } as never;
+    return focus;
+  }
+
+  it('puts the cursor in the editor when its tab is brought forward as a note tab’s is, outside selection mode', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.record(
+          { focus: fc.boolean(), focusOnMobile: fc.boolean() },
+          { requiredKeys: [] }
+        ),
+        fc.boolean(),
+        fc.option(selectionKindArb, { nil: null }),
+        async (eState, isMobile, selecting) => {
+          store.dispatch(resetSession());
+          const { view } = await openHistoryView();
+          const focus = giveEditor(view);
+          try {
+            store.dispatch(setSelectionMode(selecting));
+
+            onPlatform(isMobile, () => view.setEphemeralState(eState));
+
+            const asked =
+              !!eState.focus && (!isMobile || !!eState.focusOnMobile);
+            expect(focus).toHaveBeenCalledTimes(
+              asked && selecting === null ? 1 : 0
+            );
+          } finally {
+            unload(view);
+          }
+        }
+      )
+    );
+  });
+
+  it('brought forward, puts focus back where it last was in the tab, and in the editor only when that is gone', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom('never', 'in the tab', 'gone', 'on an icon'),
+        async (lastFocus) => {
+          store.dispatch(resetSession());
+          const { view } = await openHistoryView();
+          document.body.appendChild(view.contentEl);
+          const focus = giveEditor(view);
+          // A field of the tab's own, such as the action bar's priority
+          const field = document.createElement('input');
+          // An element focus can't be put back on
+          const icon = document.createElementNS(
+            'http://www.w3.org/2000/svg',
+            'svg'
+          );
+          view.contentEl.append(field, icon);
+          try {
+            if (lastFocus === 'in the tab' || lastFocus === 'gone') {
+              field.focus();
+            }
+            if (lastFocus === 'gone') field.remove();
+            if (lastFocus === 'on an icon') {
+              icon.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+            }
+            // The reader went to another tab
+            field.blur();
+
+            onPlatform(false, () => view.setEphemeralState({ focus: true }));
+
+            const restores = lastFocus === 'in the tab';
+            expect(document.activeElement === field).toBe(restores);
+            expect(focus).toHaveBeenCalledTimes(restores ? 0 : 1);
+          } finally {
+            view.contentEl.remove();
+            unload(view);
+          }
+        }
+      )
+    );
+  });
+
+  it('asks for focus with no editor on screen without throwing', async () => {
+    const { view } = await openHistoryView();
+    try {
+      expect(() =>
+        onPlatform(false, () => view.setEphemeralState({ focus: true }))
+      ).not.toThrow();
+    } finally {
+      unload(view);
+    }
+  });
+
+  it('owes no focus to the next editor once anything in the tab has taken it', async () => {
+    const { view } = await openHistoryView();
+    try {
+      view.editorFocus.release(true, false);
+
+      view.contentEl.dispatchEvent(new FocusEvent('focusin'));
+
+      expect(view.editorFocus.claim(document)).toBe(false);
+    } finally {
+      unload(view);
+    }
+  });
+
+  it('still owes focus to the next editor while nothing in the tab has taken it', async () => {
+    const { view } = await openHistoryView();
+    try {
+      view.editorFocus.release(true, false);
+
+      expect(view.editorFocus.claim(document)).toBe(true);
+    } finally {
+      unload(view);
+    }
+  });
+});
+
+describe('ReviewView undo and redo keys outside the editor', () => {
+  beforeEach(() => {
+    store.dispatch(resetSession());
+  });
+
+  afterEach(() => {
+    store.dispatch(resetSession());
+  });
+
+  /** The review tab of `keyed` with an item's editor on screen. */
+  function mountEditor(keyed: ReturnType<typeof makeKeyedView>) {
+    const editor = { undo: vi.fn(), redo: vi.fn() };
+    Object.assign(keyed.view, { app: { workspace: {} } });
+    keyed.view.setActiveEditor({ editor } as never);
+    return editor;
+  }
+
+  /** Where focus can be in the tab, and whether the editor answers there. */
+  const targets = {
+    'an action bar button': (view: ReviewView) =>
+      view.containerEl.appendChild(document.createElement('button')),
+    'the body': () => document.body,
+    'the priority field': (view: ReviewView) =>
+      view.containerEl.appendChild(document.createElement('input')),
+  } as const;
+  const targetArb = fc.constantFrom(
+    ...(Object.keys(targets) as (keyof typeof targets)[])
+  );
+  const keyArb = fc.record({
+    key: fc.constantFrom('z', 'Z', 'y', 'a'),
+    ctrlKey: fc.boolean(),
+    shiftKey: fc.boolean(),
+    altKey: fc.boolean(),
+  });
+
+  it('undoes and redoes in the editor for its keys pressed outside any text field, and passes every other key on', () => {
+    fc.assert(
+      fc.property(targetArb, keyArb, (where, init) => {
+        store.dispatch(resetSession());
+        const keyed = makeKeyedView();
+        try {
+          const editor = mountEditor(keyed);
+          const command = historyCommandFor({ metaKey: false, ...init }, false);
+          const reaches = where !== 'the priority field';
+
+          // Off macOS, where Mod is Ctrl: the mock's Platform has no isMacOS.
+          const { consumed } = pressKey(
+            keyed,
+            init,
+            targets[where](keyed.view)
+          );
+
+          const taken = command !== null && reaches;
+          expect(consumed).toBe(taken);
+          expect(editor.undo).toHaveBeenCalledTimes(
+            taken && command === 'undo' ? 1 : 0
+          );
+          expect(editor.redo).toHaveBeenCalledTimes(
+            taken && command === 'redo' ? 1 : 0
+          );
+          // What review doesn't take reaches the app's hotkeys.
+          expect(keyed.hotkey).toHaveBeenCalledTimes(taken ? 0 : 1);
+        } finally {
+          unload(keyed.view);
+        }
+      })
+    );
+  });
+
+  it('takes no keys while no editor is on screen', () => {
+    const keyed = makeKeyedView();
+    try {
+      expect(keyed.view.scope).toBeNull();
+      mountEditor(keyed);
+      expect(keyed.view.scope).not.toBeNull();
+
+      keyed.view.setActiveEditor(null);
+
+      expect(keyed.view.scope).toBeNull();
+      expect(
+        pressKey(keyed, { key: 'z', ctrlKey: true }, document.body).consumed
+      ).toBe(false);
+      expect(keyed.hotkey).toHaveBeenCalledOnce();
+    } finally {
+      unload(keyed.view);
+    }
+  });
+
+  it('leaves a key that is part of a composition alone', () => {
+    const keyed = makeKeyedView();
+    try {
+      const editor = mountEditor(keyed);
+
+      const { consumed } = pressKey(
+        keyed,
+        { key: 'z', ctrlKey: true, isComposing: true },
+        document.body
+      );
+
+      expect(consumed).toBe(false);
+      expect(editor.undo).not.toHaveBeenCalled();
+    } finally {
+      unload(keyed.view);
+    }
+  });
+
+  it('gives way to selection mode and to a PDF viewer, and comes back after', () => {
+    const keyed = makeKeyedView();
+    const { viewer } = makePdfViewer(keyed.appScope);
+    try {
+      mountEditor(keyed);
+      const historyScope = keyed.view.scope;
+
+      store.dispatch(setSelectionMode('snippet'));
+      expect(keyed.view.scope).not.toBe(historyScope);
+      store.dispatch(setSelectionMode(null));
+      expect(keyed.view.scope).toBe(historyScope);
+
+      keyed.view.attachPdfViewer(viewer);
+      expect(keyed.view.scope).toBe(viewer.scope);
+      keyed.view.detachPdfViewer(viewer);
+      expect(keyed.view.scope).toBe(historyScope);
+    } finally {
+      unload(keyed.view);
+    }
+  });
+});
+
+describe('ReviewView native undo and redo outside the editor on screen', () => {
+  beforeEach(() => {
+    store.dispatch(resetSession());
+  });
+
+  afterEach(() => {
+    store.dispatch(resetSession());
+    document.body.replaceChildren();
+    vi.restoreAllMocks();
+  });
+
+  /** Where a native undo can land, and whether the editor answers there. */
+  const targets = {
+    'an action bar button': {
+      reaches: true,
+      make: (view: ReviewView) =>
+        view.containerEl.appendChild(document.createElement('button')),
+    },
+    'the body': { reaches: true, make: () => document.body },
+    'the priority field': {
+      reaches: false,
+      make: (view: ReviewView) =>
+        view.containerEl.appendChild(document.createElement('input')),
+    },
+    "another window's body": {
+      reaches: false,
+      make: () => document.implementation.createHTMLDocument('').body,
+    },
+  } as const;
+  const targetArb = fc.constantFrom(
+    ...(Object.keys(targets) as (keyof typeof targets)[])
+  );
+
+  it('undoes and redoes in the editor for a native undo and redo landing outside any text field while the tab is active, and leaves everything else alone', () => {
+    fc.assert(
+      fc.property(
+        inputTypeArb,
+        targetArb,
+        fc.boolean(),
+        (inputType, where, active) => {
+          store.dispatch(resetSession());
+          const { view, editor } = makeHistoryInputView({ active });
+          try {
+            const command = historyCommandForInput(inputType);
+
+            const prevented = answerHistoryInputAt(
+              view,
+              targets[where].make(view),
+              inputType
+            );
+
+            const taken = command !== null && targets[where].reaches && active;
+            expect(prevented).toBe(taken);
+            expect(editor.undo).toHaveBeenCalledTimes(
+              taken && command === 'undo' ? 1 : 0
+            );
+            expect(editor.redo).toHaveBeenCalledTimes(
+              taken && command === 'redo' ? 1 : 0
+            );
+          } finally {
+            unload(view);
+          }
+        }
+      )
+    );
+  });
+
+  it('leaves a native undo alone in selection mode, with a PDF viewer up, and with no editor on screen', () => {
+    const { view, editor, appScope } = makeHistoryInputView();
+    const { viewer } = makePdfViewer(appScope);
+    try {
+      const undo = () =>
+        answerHistoryInputAt(view, document.body, 'historyUndo');
+
+      store.dispatch(setSelectionMode('snippet'));
+      expect(undo()).toBe(false);
+      store.dispatch(setSelectionMode(null));
+
+      view.attachPdfViewer(viewer);
+      expect(undo()).toBe(false);
+      view.detachPdfViewer(viewer);
+
+      view.setActiveEditor(null);
+      expect(undo()).toBe(false);
+
+      expect(editor.undo).not.toHaveBeenCalled();
+    } finally {
+      unload(view);
+    }
+  });
+
+  it('answers a native undo and redo sent to an editor review has taken down in the editor on screen when it shows the same note, whether or not the tab is active, and leaves one for another note alone', () => {
+    fc.assert(
+      fc.property(
+        inputTypeArb,
+        fc.boolean(),
+        fc.constantFrom(
+          'the same note',
+          'another note',
+          'a note of the same path'
+        ),
+        (inputType, active, typedIn) => {
+          store.dispatch(resetSession());
+          const { view, editor } = makeHistoryInputView({ active });
+          try {
+            // As review leaves the editor of an item it has moved on from.
+            // WebKit still sends its native undo of the typing done there to
+            // it, but only while it is in the document.
+            const retired = makeRetiredEditor();
+            view.forwardHistoryInputFrom(
+              retired,
+              typedIn === 'the same note'
+                ? HISTORY_NOTE
+                : typedIn === 'another note'
+                  ? ({ path: 'Notes/other.md' } as TFile)
+                  : // A note deleted and made again at the path is another
+                    // note: Obsidian's history for it is not this one's.
+                    ({ path: HISTORY_NOTE.path } as TFile)
+            );
+            const command = historyCommandForInput(inputType);
+            expect(retired.isConnected).toBe(true);
+            expect(retired.closest('[hidden]')).not.toBeNull();
+
+            const evt = makeHistoryInput(inputType);
+            retired.dispatchEvent(evt);
+
+            const taken = command !== null && typedIn === 'the same note';
+            expect(evt.defaultPrevented).toBe(taken);
+            expect(editor.undo).toHaveBeenCalledTimes(
+              taken && command === 'undo' ? 1 : 0
+            );
+            expect(editor.redo).toHaveBeenCalledTimes(
+              taken && command === 'redo' ? 1 : 0
+            );
+          } finally {
+            unload(view);
+          }
+        }
+      )
+    );
+  });
+
+  it('tells the plugin whether it took a native undo of typing in a taken-down editor, so another tab is asked when it did not', () => {
+    fc.assert(
+      fc.property(
+        inputTypeArb,
+        fc.boolean(),
+        fc.boolean(),
+        (inputType, sameNote, selecting) => {
+          store.dispatch(resetSession());
+          const { view, editor } = makeHistoryInputView();
+          try {
+            if (selecting) store.dispatch(setSelectionMode('snippet'));
+            const evt = makeHistoryInput(inputType);
+
+            const took = view.answerRetiredHistoryInput(
+              evt,
+              sameNote ? HISTORY_NOTE : ({ path: 'Notes/other.md' } as TFile)
+            );
+
+            const command = historyCommandForInput(inputType);
+            const taken = command !== null && sameNote && !selecting;
+            expect(took).toBe(taken);
+            expect(evt.defaultPrevented).toBe(taken);
+            expect(
+              editor.undo.mock.calls.length + editor.redo.mock.calls.length
+            ).toBe(taken ? 1 : 0);
+          } finally {
+            store.dispatch(setSelectionMode(null));
+            unload(view);
+          }
+        }
+      )
+    );
+  });
+
+  it('leaves a native undo sent to a taken-down editor alone once no editor is on screen', () => {
+    const { view, editor } = makeHistoryInputView();
+    try {
+      const retired = makeRetiredEditor();
+      view.forwardHistoryInputFrom(retired, HISTORY_NOTE);
+      view.setActiveEditor(null);
+
+      const evt = makeHistoryInput('historyUndo');
+      retired.dispatchEvent(evt);
+
+      expect(evt.defaultPrevented).toBe(false);
+      expect(editor.undo).not.toHaveBeenCalled();
+    } finally {
+      unload(view);
+    }
+  });
+
+  it('leaves a taken-down editor out of the document, and its native undo alone, where the engine drops the undo of typing in removed elements', () => {
+    const { view, editor } = makeHistoryInputView({ parks: false });
+    try {
+      const retired = makeRetiredEditor();
+      view.forwardHistoryInputFrom(retired, HISTORY_NOTE);
+
+      const evt = makeHistoryInput('historyUndo');
+      retired.dispatchEvent(evt);
+
+      expect(retired.isConnected).toBe(false);
+      expect(evt.defaultPrevented).toBe(false);
+      expect(editor.undo).not.toHaveBeenCalled();
+    } finally {
+      unload(view);
+    }
+  });
+
+  it("leaves a native undo of another note's typing sent to a kept editor alone, where it reaches the window as well", async () => {
+    const opened = await openHistoryView({
+      workspace: { getActiveViewOfType: () => opened.view },
+    });
+    const { view } = opened;
+    document.body.appendChild(view.containerEl);
+    const editor = { undo: vi.fn(), redo: vi.fn() };
+    view.setActiveEditor({ editor, file: HISTORY_NOTE } as never);
+    try {
+      // Kept in the tab, so its events reach the window, where review would
+      // take any outside a text field: an editor it took down no longer
+      // reads as one once its attributes are gone.
+      const retired = document.createElement('div');
+      view.forwardHistoryInputFrom(retired, {
+        path: 'Notes/other.md',
+      } as TFile);
+
+      const evt = makeHistoryInput('historyUndo');
+      retired.dispatchEvent(evt);
+
+      expect(evt.defaultPrevented).toBe(false);
+      expect(editor.undo).not.toHaveBeenCalled();
+    } finally {
+      view.setActiveEditor(null);
+      unload(view);
+    }
+  });
+
+  it('answers a native undo sent to a kept editor of the same note once, where it reaches the window as well', async () => {
+    const opened = await openHistoryView({
+      workspace: { getActiveViewOfType: () => opened.view },
+    });
+    const { view } = opened;
+    document.body.appendChild(view.containerEl);
+    const editor = { undo: vi.fn(), redo: vi.fn() };
+    view.setActiveEditor({ editor, file: HISTORY_NOTE } as never);
+    try {
+      const retired = document.createElement('div');
+      view.forwardHistoryInputFrom(retired, HISTORY_NOTE);
+
+      retired.dispatchEvent(makeHistoryInput('historyUndo'));
+
+      expect(editor.undo).toHaveBeenCalledOnce();
+    } finally {
+      view.setActiveEditor(null);
+      unload(view);
+    }
+  });
+
+  it('answers a native undo sent to an editor a closed review tab kept in the tab opened again on the same note, and in the closed tab no longer', async () => {
+    const retiredEditors = new RetiredEditorPark(true);
+    const closing = await openHistoryView({ retiredEditors });
+    document.body.appendChild(closing.view.containerEl);
+    const closedEditor = { undo: vi.fn(), redo: vi.fn() };
+    closing.view.setActiveEditor({
+      editor: closedEditor,
+      file: HISTORY_NOTE,
+    } as never);
+    // As Obsidian closes a view when a note opens in its place: its
+    // container goes out of the document, then it unloads, then `onClose`
+    // unmounts the item's editor, which review keeps.
+    closing.view.containerEl.remove();
+    unload(closing.view);
+    const kept = makeRetiredEditor();
+    closing.view.forwardHistoryInputFrom(kept, HISTORY_NOTE);
+    await closing.view.onClose();
+    // Back to review through the tab's history: a tab of its own.
+    const reopened = await openHistoryView({ retiredEditors });
+    const editor = { undo: vi.fn(), redo: vi.fn() };
+    reopened.view.setActiveEditor({ editor, file: HISTORY_NOTE } as never);
+    // What the closed tab holds after, it no longer answers for.
+    closing.view.setActiveEditor({
+      editor: closedEditor,
+      file: HISTORY_NOTE,
+    } as never);
+    try {
+      const evt = makeHistoryInput('historyUndo');
+      kept.dispatchEvent(evt);
+
+      expect(kept.isConnected).toBe(true);
+      expect(evt.defaultPrevented).toBe(true);
+      expect(editor.undo).toHaveBeenCalledOnce();
+      expect(closedEditor.undo).not.toHaveBeenCalled();
+    } finally {
+      closing.view.setActiveEditor(null);
+      reopened.view.setActiveEditor(null);
+      unload(reopened.view);
+      retiredEditors.drop();
+    }
+  });
+
+  it('hears a native undo in the window it opened in and in popout windows opened after, from the body of the one it is in', async () => {
+    const windowOpened: ((...args: unknown[]) => void)[] = [];
+    const opened = await openHistoryView({
+      workspace: {
+        getActiveViewOfType: () => opened.view,
+        on: (name: string, callback: (...args: unknown[]) => void) => {
+          if (name === 'window-open') windowOpened.push(callback);
+          return {};
+        },
+      },
+    });
+    const { view } = opened;
+    const editor = { undo: vi.fn(), redo: vi.fn() };
+    view.setActiveEditor({ editor } as never);
+    const send = (target: EventTarget, inputType: string) => {
+      const evt = makeHistoryInput(inputType);
+      target.dispatchEvent(evt);
+      return evt.defaultPrevented;
+    };
+    try {
+      expect(send(document.body, 'historyUndo')).toBe(true);
+      expect(editor.undo).toHaveBeenCalledOnce();
+
+      const frame = document.body.appendChild(document.createElement('iframe'));
+      const popout = frame.contentWindow;
+      if (!popout) throw new Error('No window in the frame');
+      windowOpened.forEach((callback) => callback({ win: popout }, popout));
+      // Its body isn't the tab's while the tab is in the main window...
+      expect(send(popout.document.body, 'historyRedo')).toBe(false);
+      // ...and is once the tab has moved there.
+      popout.document.body.appendChild(view.containerEl);
+      expect(send(popout.document.body, 'historyRedo')).toBe(true);
+      expect(editor.redo).toHaveBeenCalledOnce();
+    } finally {
+      // Its listener stays on the main window: the stub doesn't remove it.
+      view.setActiveEditor(null);
+      unload(view);
+    }
+  });
+
+  it('stops hearing a popout window once it closes, and every popout once the tab closes', async () => {
+    const listeners = new Map<string, ((...args: unknown[]) => void)[]>();
+    const emit = (name: string, win: Window) =>
+      (listeners.get(name) ?? []).forEach((callback) => callback({ win }, win));
+    const opened = await openHistoryView({
+      workspace: {
+        getActiveViewOfType: () => opened.view,
+        on: (name: string, callback: (...args: unknown[]) => void) => {
+          listeners.set(name, [...(listeners.get(name) ?? []), callback]);
+          return {};
+        },
+      },
+    });
+    const { view } = opened;
+    const editor = { undo: vi.fn(), redo: vi.fn() };
+    view.setActiveEditor({ editor } as never);
+    /** A popout window, opened, with the tab moved into it. */
+    const openPopout = () => {
+      const frame = document.body.appendChild(document.createElement('iframe'));
+      const popout = frame.contentWindow;
+      if (!popout) throw new Error('No window in the frame');
+      emit('window-open', popout);
+      popout.document.body.appendChild(view.containerEl);
+      return popout;
+    };
+    const undoIn = (popout: Window) => {
+      const evt = makeHistoryInput('historyUndo');
+      popout.document.body.dispatchEvent(evt);
+      return evt.defaultPrevented;
+    };
+    try {
+      const closing = openPopout();
+      expect(undoIn(closing)).toBe(true);
+      emit('window-close', closing);
+      expect(undoIn(closing)).toBe(false);
+
+      const open = openPopout();
+      expect(undoIn(open)).toBe(true);
+      unload(view);
+      expect(undoIn(open)).toBe(false);
+      expect(editor.undo).toHaveBeenCalledTimes(2);
+    } finally {
+      view.setActiveEditor(null);
+      unload(view);
+    }
   });
 });

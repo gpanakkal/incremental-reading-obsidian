@@ -11,9 +11,11 @@ import { type ExtractedMarkdownEditor,
   type ExtractedMobileToolbar,
   getBaseMarkdownExtensions,
   getMarkdownController,
+  retireEditor,
   setInsertMode } from '#/lib/obsidian-editor';
 import { computeMinimalChange } from '#/lib/minimal-change';
 import { positionOnArrival, subpathResolver } from '#/lib/review-position';
+import { historyCommandForInput } from '#/lib/review-undo-keys';
 import { createSaveCoalescer } from '#/lib/save-coalescer';
 import { isEditing, setHasSelection, setShowAnswer } from '#/lib/store';
 import {
@@ -254,6 +256,23 @@ export function IREditor({
     itemRef.current = item;
   }, [item]);
 
+  // Whether this editor holds focus as it goes, for the next item's editor to
+  // take over. Read while the editor is still whole: Preact runs a component's
+  // hook cleanups in the order the hooks were declared, so this one comes
+  // before the effect below, whose teardown resets the editor's state and drops
+  // its focus. A layout effect for React too, whose passive cleanups run once
+  // the editor is out of the document.
+  useLayoutEffect(
+    () => () => {
+      const cm = internalRef.current;
+      const held =
+        cm !== null &&
+        cm.contentDOM.ownerDocument.activeElement === cm.contentDOM;
+      reviewView.editorFocus.release(held, Platform.isMobile);
+    },
+    [reviewView]
+  );
+
   // extend the MarkdownEditor extracted from Obsidian
   useEffect(() => {
     // The document as of the editor's latest change, whatever made it. A save
@@ -490,6 +509,15 @@ export function IREditor({
       const onBlankPress = isReviewCard(item) ? caretOnBlankPress(cm) : null;
       if (onBlankPress) cm.dom.addEventListener('mousedown', onBlankPress);
 
+      // Whether anything was typed here, which WebKit keeps an undo of: review
+      // keeps this element around for that undo once the editor goes, but
+      // only then.
+      let typedHere = false;
+      const onTyping = (evt: InputEvent) => {
+        if (historyCommandForInput(evt.inputType) === null) typedHere = true;
+      };
+      cm.contentDOM.addEventListener('beforeinput', onTyping);
+
       // Render TitleEditor via React portal into a container prepended to
       // .cm-sizer, so it appears above the note body. .cm-sizer is created
       // synchronously by CodeMirror's constructor, so it's always present here.
@@ -518,6 +546,10 @@ export function IREditor({
 
       // The listener reports changes from here on; this is where it starts.
       syncHasSelection(!cm.state.selection.main.empty);
+
+      // The editor of the item review just left had focus: this one takes it
+      // over, as a note tab's editor keeps focus from note to note.
+      if (reviewView.editorFocus.claim(cm.dom.ownerDocument)) cm.focus();
 
       // A link followed in the review tab to a heading, a block or a Go to
       // context range of this item: put the editor there, as a note tab would,
@@ -569,6 +601,8 @@ export function IREditor({
         try {
           if (reviewView.activeEditor === (controller as unknown)) {
             reviewView.activeEditor = null;
+            // Its undo and redo keys go with it.
+            reviewView.syncScope();
           }
 
           if ((app.workspace.activeEditor as unknown) === controller) {
@@ -587,13 +621,20 @@ export function IREditor({
 
         // Obsidian's teardown. Pops the keymap scope the find bar pushes while open
         // (Enter/Escape/F3/Mod+G would otherwise stay captured globally), closes the
-        // editor suggest, and destroys the CodeMirror view.
-        try {
-          editor.destroy();
-        } catch (error) {
-          console.warn(
-            'Incremental Reading - Error destroying the editor:',
-            error
+        // editor suggest, and destroys the CodeMirror view. The undo history is
+        // handed to Obsidian first, as a note tab does when it leaves a note: the
+        // editor for this item's next visit is a new one, and its first `set`
+        // takes the history back. `itemRef` still names this item here, which is
+        // the note the history is filed under.
+        retireEditor(editor);
+        // WebKit's native undo (iOS shake to undo) of typing done here comes
+        // to this element, and only while it is in the document: review keeps
+        // it there, and the editor on screen answers while it shows this note.
+        cm.contentDOM.removeEventListener('beforeinput', onTyping);
+        if (typedHere) {
+          reviewView.forwardHistoryInputFrom(
+            cm.contentDOM,
+            itemRef.current.file
           );
         }
 
