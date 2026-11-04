@@ -971,7 +971,13 @@ type LookupWorld =
  * of whichever table; for one claiming none, the live row at its path of the
  * table its tag names; for one claiming what no row can hold, none.
  */
-function expectedLookup(world: LookupWorld) {
+function expectedLookup(
+  world: Pick<LookupWorld, 'irId' | 'tag'> & {
+    rows: readonly (Omit<LookupWorld['rows'][number], 'path'> & {
+      path: string;
+    })[];
+  }
+) {
   const live = world.rows.filter((row) => !row.deleted);
   const { irId, tag } = world;
   if (irId === undefined || irId === '') {
@@ -984,6 +990,29 @@ function expectedLookup(world: LookupWorld) {
   const held = live.find((r) => r.id === irId && r.path === BAR_PATH);
   return held ? { id: held.id, type: TYPE_OF_TABLE[held.table] } : null;
 }
+
+/** Where the PDF of a {@link positionWorldArb} world is. */
+const PDF_PATH = 'notes/n.pdf';
+
+/**
+ * A {@link lookupWorldArb} world whose deleted rows may have been purged for
+ * good (pointing at their purge marker, no note's path), and whose note at
+ * {@link BAR_PATH} may be a PDF at {@link PDF_PATH} instead: a file with no
+ * frontmatter, so no `ir-id` or tag, with the rows at the note's path at its.
+ */
+const positionWorldArb = fc
+  .tuple(lookupWorldArb, fc.boolean(), fc.array(fc.boolean(), { maxLength: 4 }))
+  .map(([world, pdf, purges]) => ({
+    ...world,
+    pdf,
+    rows: world.rows.map((row, i) =>
+      row.deleted && purges[i]
+        ? { ...row, path: purgedReference(row.id) }
+        : pdf && row.path === BAR_PATH
+          ? { ...row, path: PDF_PATH }
+          : row
+    ),
+  }));
 
 // #endregion
 
@@ -3429,7 +3458,7 @@ describe('ReviewManager.positionIdOf', () => {
   });
 
   it.each([null, 'card'] as const)(
-    'answers null for a note of type %s, without looking for a row',
+    'answers null for a note of type %s, without looking for an article or snippet row at its path',
     async (noteType) => {
       const manager = new ReviewManager(makePlugin(), makeRepo());
       vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue(noteType);
@@ -3486,6 +3515,102 @@ describe('ReviewManager.positionIdOf', () => {
       })
     );
   });
+
+  // Real database work per case, as the bar's property above does
+  it("keeps a note's reading position in the row its bar shows, and in none when the bar shows no article or snippet", async () => {
+    const repo = await ItemRepository.create();
+    await fc.assert(
+      fc.asyncProperty(positionWorldArb, async (world) => {
+        for (const table of ITEM_TABLES)
+          repo.hardDelete(`DELETE FROM ${table}`);
+        const notePath = world.pdf ? PDF_PATH : BAR_PATH;
+        const vault = makeItemVault({
+          [notePath]: world.pdf
+            ? null
+            : {
+                ...(world.irId === undefined ? {} : { 'ir-id': world.irId }),
+                ...(world.tag ? { tags: [TAG_OF_TYPE[world.tag]] } : {}),
+              },
+          ...(world.other
+            ? {
+                [OTHER_PATH]:
+                  world.other.irId === undefined
+                    ? {}
+                    : { 'ir-id': world.other.irId },
+              }
+            : {}),
+        });
+        // Each article and snippet row starts at a position of its own
+        const seeded = new Map<string, number>();
+        for (const { table, id, path, deleted } of world.rows) {
+          insertItemAt(repo, table, { id, reference: path, deleted });
+          if (table === 'srs_card') continue;
+          seeded.set(id, seeded.size + 1);
+          repo.mutate(`UPDATE ${table} SET scroll_top = $1 WHERE id = $2`, [
+            seeded.size,
+            id,
+          ]);
+        }
+        const manager = new ReviewManager(makePlugin(vault.app), repo);
+        const file = vault.files.get(notePath)!;
+
+        const bar = await manager.getReviewItemFromFile(file);
+        const held =
+          bar && (bar.data.type === 'article' || bar.data.type === 'snippet')
+            ? bar.data.id
+            : null;
+        if (!world.pdf) {
+          const owed = expectedLookup(world);
+          expect(held).toBe(owed && owed.type !== 'card' ? owed.id : null);
+        }
+
+        // What the editor does with a note it opens: look up its row, restore
+        // that row's position, then save the reader's moves to it; no row,
+        // nothing restored (unset) and nothing saved
+        const id = await manager.positionIdOf(file);
+        expect(id).toBe(held);
+        const row = id === null ? null : await manager.readPosition(id);
+        expect(row?.position ?? 0).toBe(held === null ? 0 : seeded.get(held));
+        if (id !== null) await manager.writePosition(id, 1000, row!);
+
+        const positions = Object.fromEntries(
+          (
+            repo.query(
+              'SELECT id, scroll_top FROM article UNION ALL SELECT id, scroll_top FROM snippet'
+            ) as { id: string; scroll_top: number }[]
+          ).map((r) => [r.id, r.scroll_top])
+        );
+        expect(positions).toEqual(
+          Object.fromEntries(
+            [...seeded].map(([seed, at]) => [seed, seed === held ? 1000 : at])
+          )
+        );
+      }),
+      {
+        numRuns: 200,
+        // A note claiming `x` squatting at the path article `y` still points
+        // at, whose own note was moved away
+        examples: [
+          [
+            {
+              irId: 'x',
+              tag: 'article',
+              other: { irId: 'y' },
+              rows: [
+                {
+                  table: 'article',
+                  id: 'y',
+                  path: BAR_PATH,
+                  deleted: false,
+                },
+              ],
+              pdf: false,
+            },
+          ],
+        ],
+      }
+    );
+  }, 20_000);
 });
 
 // ---------------------------------------------------------------------------

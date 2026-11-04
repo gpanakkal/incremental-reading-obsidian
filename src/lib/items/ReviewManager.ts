@@ -1437,17 +1437,15 @@ export default class ReviewManager {
 
   /**
    * The id an article's or snippet's reading position is kept under (see
-   * `#/lib/position-store`), or `null` for a card or a note with no row.
+   * `#/lib/position-store`): that of the row the note bar shows for `file`
+   * (see {@link getReviewItemFromFile}), the live row holding both its path
+   * and the `ir-id` it claims, so a note never saves its position to, or
+   * restores one from, a row it isn't the note of. `null` for a card's row,
+   * and for a note no such row holds, which then opens as a plain note.
    */
   async positionIdOf(file: TFile): Promise<string | null> {
-    const noteType = await this.articles.getItemType(file);
-    let row: ArticleRow | SnippetRow | null = null;
-    if (noteType === 'article') {
-      row = await this.articles.findArticle(file);
-    } else if (noteType === 'snippet') {
-      row = await this.snippets.findSnippet(file);
-    }
-    return row?.id ?? null;
+    const item = await this.getReviewItemFromFile(file);
+    return item && item.data.type !== 'card' ? item.data.id : null;
   }
 
   /**
