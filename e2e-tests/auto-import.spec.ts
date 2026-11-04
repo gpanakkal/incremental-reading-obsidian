@@ -113,15 +113,58 @@ async function writeVaultFile(at: string, content: string) {
 }
 
 /**
- * Whether Obsidian's vault has picked up the note at `notePath`, written from
- * outside, polled until it has or `timeoutMs` passes, and attached to the test
- * as `vault-saw-external-write`. It never fails the test: it is there so a
- * failure says whether Obsidian's file watcher missed the write, or the plugin
- * missed a note the vault had.
+ * Write `content` to `at` from outside while Obsidian runs, as a script would,
+ * its folder first when the vault has none yet, and wait for the vault to
+ * have the note (see {@link probeVaultSaw}).
+ *
+ * The folder goes in on its own, and the vault is seen to know it, before the
+ * note does: a new folder is listed once its creation comes through Obsidian's
+ * file watcher, and a note written in the same moment can be missing from
+ * that listing and leave no event of its own behind (seen on macOS, where the
+ * watcher is FSEvents), keeping the note out of the vault for good.
+ */
+async function writeIntoOpenVault(at: string, content: string) {
+  const slash = at.lastIndexOf('/');
+  if (slash > 0) {
+    const folder = at.slice(0, slash);
+    await fs.mkdir(path.join(vaultPath, folder), { recursive: true });
+    await expect
+      .poll(
+        () =>
+          window.evaluate(
+            (folderPath) =>
+              (
+                window as unknown as {
+                  app: { vault: { getFolderByPath(path: string): unknown } };
+                }
+              ).app.vault.getFolderByPath(folderPath) !== null,
+            folder
+          ),
+        { message: `the vault knows the folder ${folder} made from outside` }
+      )
+      .toBe(true);
+  }
+  await fs.writeFile(path.join(vaultPath, at), content);
+  await probeVaultSaw(at);
+}
+
+/**
+ * Wait for Obsidian's vault to pick up the note at `notePath`, written from
+ * outside, and attach what happened to the test as `vault-saw-external-write`.
+ *
+ * Polled for `timeoutMs`. Should the vault still not have it, the change is
+ * handed to Obsidian's adapter where its file watcher hands every change it
+ * hears, and polled again: the write is the test's input, and whether the
+ * operating system's watcher delivers it is Obsidian's concern, not the
+ * plugin's. The attachment says whether that was needed (`nudged`), so a
+ * failure still says whether the watcher missed the write or the plugin missed
+ * a note the vault had.
  *
  * Unofficial: `app.vault.adapter.watchers`, the desktop adapter's map of
- * watched folder paths ("/" for the vault root) to their `fs.watch` handles.
- * Shape-checked, and reported as "unknown" when missing or shaped otherwise.
+ * watched folder paths ("/" for the vault root) to their `fs.watch` handles,
+ * and `app.vault.adapter.onFileChange(path)`, what its watcher calls with
+ * each changed path (both read from obsidian.asar 1.15.0). Shape-checked:
+ * reported as "unknown", and not called, when missing.
  */
 async function probeVaultSaw(notePath: string, timeoutMs = 10_000) {
   const read = () =>
@@ -150,17 +193,39 @@ async function probeVaultSaw(notePath: string, timeoutMs = 10_000) {
         };
       }, notePath)
       .catch((error: unknown) => ({ error: String(error) }));
+  const isSeen = (state: Awaited<ReturnType<typeof read>>) =>
+    'seen' in state && state.seen;
+  const pollUntilSeen = async (until: number) => {
+    let state = await read();
+    while (!isSeen(state) && Date.now() < until) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      state = await read();
+    }
+    return state;
+  };
   const started = Date.now();
-  let state = await read();
-  while (!('seen' in state && state.seen) && Date.now() - started < timeoutMs) {
-    await new Promise((resolve) => setTimeout(resolve, 250));
-    state = await read();
+  let state = await pollUntilSeen(started + timeoutMs);
+  let nudged: boolean | 'unavailable' = false;
+  if (!isSeen(state)) {
+    nudged = await window
+      .evaluate((at) => {
+        const adapter = (
+          window as unknown as {
+            app: { vault: { adapter?: { onFileChange?: unknown } } };
+          }
+        ).app.vault.adapter;
+        if (typeof adapter?.onFileChange !== 'function') return 'unavailable';
+        (adapter.onFileChange as (path: string) => void).call(adapter, at);
+        return true;
+      }, notePath)
+      .catch(() => 'unavailable' as const);
+    state = await pollUntilSeen(Date.now() + 5_000);
   }
   await test
     .info()
     .attach('vault-saw-external-write', {
       body: JSON.stringify(
-        { notePath, afterMs: Date.now() - started, ...state },
+        { notePath, afterMs: Date.now() - started, nudged, ...state },
         null,
         2
       ),
@@ -339,12 +404,11 @@ test('imports a note written into the vault with a trigger tag, once, however of
   const before = await articleCount();
   const notePath = 'inbox/Clipped article.md';
 
-  await writeVaultFile(
+  await writeIntoOpenVault(
     notePath,
     `---\ntags: [${AUTO_IMPORT_TAG}]\n---\nA clipped page.\n`
   );
 
-  await probeVaultSaw(notePath);
   const id = await expectImported(notePath);
   expect(await articleCount()).toBe(before + 1);
 
@@ -416,7 +480,7 @@ test('shows the action bar on a note open in reading mode once a trigger tag set
 test('imports a note again by its trigger tag once the database has lost its row', async () => {
   await setPluginSetting(window, 'autoImportOnTag', true);
   const notePath = 'inbox/Read before the reset.md';
-  await writeVaultFile(
+  await writeIntoOpenVault(
     notePath,
     `---
 tags: [${AUTO_IMPORT_TAG}]
@@ -458,7 +522,7 @@ test('imports the notes tagged while Obsidian was closed when it next starts, on
   await setPluginSetting(window, 'autoImportOnTag', false);
   await saveSettings();
   const taggedBefore = 'inbox/Tagged before.md';
-  await writeVaultFile(
+  await writeIntoOpenVault(
     taggedBefore,
     `---\ntags: [${AUTO_IMPORT_TAG}]\n---\nTagged before importing by tag was on.\n`
   );
@@ -589,7 +653,7 @@ test('imports what is created in, moved into or copied into a watched folder, an
 test('imports what was added to a watched folder while Obsidian was closed when it next starts, once, but not what was there before or was un-imported', async () => {
   const folder = 'Clippings';
   const hereBefore = `${folder}/Here before.md`;
-  await writeVaultFile(hereBefore, 'Here before watching.\n');
+  await writeIntoOpenVault(hereBefore, 'Here before watching.\n');
   // Written from outside, so in the vault only once Obsidian's file watcher
   // tells of it, which can take longer than the settings below take to
   // change (macOS): it would arrive after watching began, and be imported
@@ -752,7 +816,10 @@ test('adds a watched folder on Enter as a chip under the field, refuses one that
 
 test("suggests the vault's tags in the trigger tags field, but the plugin's item-type tags, and a pick joins the list", async () => {
   // Body tags: frontmatter ones would make the note an item
-  await writeVaultFile('inbox/Tagged.md', 'Text #e2e-suggest #ir-card/e2e\n');
+  await writeIntoOpenVault(
+    'inbox/Tagged.md',
+    'Text #e2e-suggest #ir-card/e2e\n'
+  );
   // The metadata cache catches up on its own time (`getTags` is undocumented)
   await expect
     .poll(() =>

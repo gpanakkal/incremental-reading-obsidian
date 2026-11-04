@@ -261,6 +261,28 @@ const REDO = process.platform === 'darwin' ? 'Meta+Shift+z' : 'Control+y';
 const SHIFT_REDO = 'ControlOrMeta+Shift+z';
 
 /**
+ * Take the test vault's own Mod+Shift+Z hotkey (the plugin's "Undo last
+ * action") off, for the editor to have its redo key back. On macOS
+ * Mod+Shift+Z is CodeMirror's only redo key, and Obsidian's hotkeys answer a
+ * key at the window, before the editor's keymap sees it: the hotkey runs its
+ * command and takes the key. The review tab's own undo and redo keys outside
+ * the editor are answered before the hotkeys, so only the editor's redo loses
+ * the key, as it would in a note tab.
+ *
+ * Unofficial: `app.hotkeyManager.removeHotkeys`, which drops a command's
+ * custom hotkeys until the next save (read from obsidian.asar 1.15.0).
+ */
+async function freeEditorRedoKey() {
+  await window.evaluate(() => {
+    (
+      window as unknown as {
+        app: { hotkeyManager: { removeHotkeys(command: string): void } };
+      }
+    ).app.hotkeyManager.removeHotkeys('incremental-reading:undo');
+  });
+}
+
+/**
  * Record, inside the page, what happens to the undo and redo keys from here
  * on, for a failure to report (see {@link withHistoryDiag}): where each key
  * landed and what held focus, whether Obsidian's keymap had already taken it
@@ -550,6 +572,7 @@ for (const focusFirst of [true, false]) {
       });
     }
 
+    await freeEditorRedoKey();
     await armHistoryDiag();
     await window.keyboard.press('ControlOrMeta+z');
     await withHistoryDiag(async () => {
