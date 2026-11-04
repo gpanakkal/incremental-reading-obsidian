@@ -6,9 +6,8 @@ import {
   type Vault,
   type Workspace,
 } from 'obsidian';
-import { hasTag, TAG_BY_TABLE } from './item-tags';
 import { supportsFrontmatter } from './mime';
-import { holdersOf, type Holder, type RowId } from './moved-note-scan';
+import { holdersOf, type Holder } from './moved-note-scan';
 import { yieldToHost } from './pacing';
 import { MERGE_WAIT_MS, outlastMerge } from './readiness';
 import type { SQLiteRepository } from './types';
@@ -59,38 +58,6 @@ export function readsAsTampering(
   // A tombstone holding the path has no note of its own there to have lost one
   if (!claimsIdentity(claim.irId)) return live.length > 0;
   return live.some((holder) => holder.id !== claim.irId);
-}
-
-/** A note missing its item's type tag, and the row it is missing it for. */
-export interface TagLoss {
-  row: RowId;
-  path: string;
-  tag: string;
-}
-
-/**
- * Whether the note at a path has lost its item's type tag, and which tag.
- *
- * A note belongs to the live row at its path that its `ir-id` names or, making
- * no claim, to the one live row at its path. A note no single live row answers
- * to (a plain note, an id typed over, a copy, a tombstone's old path, or one two
- * live rows could own) has no tag to have lost. The tag is read from the
- * note's `frontmatter` as `hasTag` reads it.
- */
-export function classifyTag(
-  { path, irId }: NoteClaim,
-  frontmatter: unknown,
-  holders: readonly Holder[]
-): TagLoss | null {
-  const live = holders.filter((holder) => !holder.deleted);
-  const owners = claimsIdentity(irId)
-    ? live.filter((holder) => holder.id === irId)
-    : live;
-  if (owners.length !== 1) return null;
-  const [{ table, id }] = owners;
-  const tag = TAG_BY_TABLE[table];
-  if (hasTag(frontmatter, tag)) return null;
-  return { row: { table, id }, path, tag };
 }
 
 /**
@@ -178,7 +145,8 @@ export interface IrIdWatchDeps {
   vault: Pick<Vault, 'getFileByPath'>;
   metadataCache: Pick<MetadataCache, 'getFileCache'>;
   /**
-   * Told the notes a pass found missing their `ir-id` or type tag, once per
+   * Told the notes a pass found with their `ir-id` taken off or changed (see
+   * {@link readsAsTampering}), once per
    * pass that finds any. Telling the user is the caller's business, including
    * how: a folder arriving over Sync can name a great many at once.
    *
@@ -222,8 +190,10 @@ export interface IrIdWatch {
 }
 
 /**
- * Watch the metadata cache for item notes that lost their `ir-id` or type tag
- * outside the plugin, and report them. It never writes a note or a row.
+ * Watch the metadata cache for item notes whose `ir-id` was taken off or
+ * changed outside the plugin, and report them. It never writes a note or a row.
+ * A type tag taken off or changed is no damage: the rows and the `ir-id`, not
+ * the tags, say which note is an item's, so no tag is looked at.
  *
  * The editor guard only covers writes made through an open CodeMirror editor.
  * Reading mode's properties editor writes straight to the vault, and so do other
@@ -290,7 +260,7 @@ export function createIrIdWatch({
   let chain: Promise<unknown> = Promise.resolve();
 
   /**
-   * What the note at `path` claims, and its frontmatter, or null when there is
+   * What the note at `path` claims, or null when there is
    * nothing to judge yet: no note there, or one the metadata cache is part way
    * through re-reading.
    *
@@ -302,9 +272,7 @@ export function createIrIdWatch({
    * missing. Nothing is lost by passing over it, because the parse finishing
    * is what raises `changed`, and that brings the note back.
    */
-  const claimAt = (
-    path: string
-  ): { claim: NoteClaim; frontmatter: unknown } | null => {
+  const claimAt = (path: string): NoteClaim | null => {
     // Normalized as `ObsidianHelpers.getNote` does it, or this disagrees with
     // every other reader about what a `reference` points at
     const file = vault.getFileByPath(normalizePath(path));
@@ -312,14 +280,14 @@ export function createIrIdWatch({
     const cache = metadataCache.getFileCache(file);
     if (!cache) return null;
     const irId: unknown = cache.frontmatter?.['ir-id'];
-    return { claim: { path, irId }, frontmatter: cache.frontmatter };
+    return { path, irId };
   };
 
   /** Damaged notes already told of, until a pass finds them whole again. */
   const reported = new Set<string>();
 
   /**
-   * Whether each note at `paths` has lost its `ir-id` or type tag, read
+   * Whether each note at `paths` has had its `ir-id` taken off or changed, read
    * against the database as it is now. A note gone since the change was
    * remembered, or mid-parse, is left out.
    */
@@ -332,15 +300,13 @@ export function createIrIdWatch({
     });
     const holders = await holdersOf(
       repo,
-      found.map(({ claim }) => claim.path)
+      found.map((claim) => claim.path)
     );
     const losses = new Map<string, boolean>();
-    for (const { claim, frontmatter } of found) {
-      const atPath = holders.get(claim.path) ?? [];
+    for (const claim of found) {
       losses.set(
         claim.path,
-        readsAsTampering(claim, atPath) ||
-          classifyTag(claim, frontmatter, atPath) !== null
+        readsAsTampering(claim, holders.get(claim.path) ?? [])
       );
     }
     return losses;

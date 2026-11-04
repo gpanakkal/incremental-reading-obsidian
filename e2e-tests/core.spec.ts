@@ -34,7 +34,6 @@ import {
   setShowViewHeader,
   toggleReviewSourceMode,
   waitForReviewItem,
-  watchNotices,
   type RepoWindow,
 } from './helpers';
 import {
@@ -2800,6 +2799,8 @@ test.describe('PDF articles', () => {
 
 test.describe("Removing an item note's type tag", () => {
   const SOURCE = 'sources/Security Principles';
+  /** A second source, for an item of its own. */
+  const OTHER_SOURCE = 'sources/Curse of dimensionality - Wikipedia';
 
   /**
    * What the page-side calls below reach on Obsidian and the plugin.
@@ -2846,6 +2847,31 @@ test.describe("Removing an item note's type tag", () => {
       const { repo } = app.plugins.plugins['incremental-reading'].reviewManager;
       return repo.query(`SELECT reference FROM ${table} WHERE deleted = 0`);
     }, table);
+
+  /** The ids and paths of the live rows in `table`. */
+  const itemIds = (table: string) =>
+    window.evaluate((table) => {
+      const { app } = window as unknown as { app: PageApp };
+      const { repo } = app.plugins.plugins['incremental-reading'].reviewManager;
+      return repo.query(
+        `SELECT id, reference FROM ${table} WHERE deleted = 0`
+      ) as unknown as { id: string; reference: string }[];
+    }, table);
+
+  /** The note's frontmatter, as the metadata cache last parsed it. */
+  const cachedFrontmatter = (path: string) =>
+    window.evaluate((path) => {
+      const { app } = window as unknown as {
+        app: {
+          metadataCache: {
+            getCache(path: string): {
+              frontmatter?: Record<string, unknown>;
+            } | null;
+          };
+        };
+      };
+      return app.metadataCache.getCache(path)?.frontmatter ?? null;
+    }, path);
 
   /** Set the note's tags to `tags`, as the user's own edit would. */
   const setTags = (path: string, tags: string[]) =>
@@ -2932,31 +2958,45 @@ test.describe("Removing an item note's type tag", () => {
     return { reference, keys: await propertyKeys(view) };
   }
 
+  /** The row the damaged-notes notice lists for the note at `reference`. */
+  const damageRow = (reference: string) =>
+    window
+      .locator('.notice.ir-damaged-notes-notice .ir-damaged-note')
+      .and(window.locator(`[data-path="${reference}"]`));
+
   /**
-   * Waits for the `round`th notice naming the note, then dismisses it, so the
-   * next round's notice is a fresh one rather than names added to this one.
+   * Count every damaged-notes notice raised from now on, and answer a
+   * function that reads the count. The notice's class is set in the same task
+   * that shows it, so it is there by the time the observer hears of it.
    */
-  async function expectDamageNotice(
-    reference: string,
-    notices: () => Promise<string[]>,
-    round: number
-  ) {
-    // Named in quotes ahead of what it lost; the import's own notice names it too
-    const name = `"${path.basename(reference, '.md')}" lost`;
-    await expect
-      .poll(
-        async () =>
-          (await notices()).filter((text) => text.includes(name)).length
-      )
-      .toBe(round);
-    const notice = window.locator('.notice').filter({ hasText: name });
-    await notice.click();
-    await expect(notice).toHaveCount(0);
+  async function countDamageNotices() {
+    await window.evaluate(() => {
+      const w = window as unknown as { __irDamageNotices?: number };
+      w.__irDamageNotices = 0;
+      new MutationObserver((mutations) => {
+        for (const mutation of mutations) {
+          mutation.addedNodes.forEach((node) => {
+            if (
+              node instanceof HTMLElement &&
+              node.matches('.notice.ir-damaged-notes-notice')
+            ) {
+              w.__irDamageNotices = (w.__irDamageNotices ?? 0) + 1;
+            }
+          });
+        }
+      }).observe(document.body, { childList: true, subtree: true });
+    });
+    return () =>
+      window.evaluate(
+        () =>
+          (window as unknown as { __irDamageNotices?: number })
+            .__irDamageNotices ?? 0
+      );
   }
 
   /**
-   * The tag stays off: the notice comes from the pass that used to put it
-   * back, so by now nothing will. The user's own tags and property are kept.
+   * The tag stays off: nothing puts it back. The user's own tags and
+   * property are kept.
    */
   async function expectTagLeftOff(view: View, keys: (string | null)[]) {
     await expect(tagPills(view)).toHaveText(['mine', 'also-mine']);
@@ -2966,22 +3006,35 @@ test.describe("Removing an item note's type tag", () => {
     ).toContainText('kept');
   }
 
+  /** The path of the note the active tab shows. */
+  const activePath = () =>
+    window.evaluate(() => {
+      const { app } = window as unknown as {
+        app: { workspace: { getActiveFile(): { path: string } | null } };
+      };
+      return app.workspace.getActiveFile()?.path ?? null;
+    });
+
   for (const { kind, table, tag, make } of kinds) {
-    test(`reports a ${kind} note whose type tag was removed in live preview, source mode or reading mode, leaving it off`, async () => {
+    test(`tells nothing of a ${kind} note's type tag removed in live preview, source mode or reading mode, and offers to open a note whose ir-id is changed and give it back`, async () => {
       await setDefaultEditingMode(window, 'live-preview');
       const { reference, keys } = await showTaggedItemNote(make, table, tag);
-      const notices = await watchNotices(window);
+      const damageNotices = await countDamageNotices();
       const livePreview = '.markdown-source-view';
 
       // Live preview's properties editor
       await tagPill(livePreview, tag)
         .locator('.multi-select-pill-remove-button')
         .click();
-      await expectDamageNotice(reference, notices, 1);
       await expectTagLeftOff(livePreview, keys);
 
-      // Back where it was for the next round
+      // Back where it was for the next round, once the edit is on disk: an
+      // editor saves a little after the keystroke, and a save landing after
+      // this write would take the tag off again
       const reset = async (view: View) => {
+        await expect
+          .poll(async () => (await cachedFrontmatter(reference))?.tags)
+          .toEqual(['mine', 'also-mine']);
         await setTags(reference, ['mine', tag, 'also-mine']);
         await expect(tagPills(view)).toHaveText(['mine', tag, 'also-mine']);
       };
@@ -3005,7 +3058,6 @@ test.describe("Removing an item note's type tag", () => {
         );
       }, tag);
       await window.keyboard.press('Backspace');
-      await expectDamageNotice(reference, notices, 2);
       await executeCommandById(window, 'editor:toggle-source');
       await expectTagLeftOff(livePreview, keys);
       await reset(livePreview);
@@ -3016,8 +3068,52 @@ test.describe("Removing an item note's type tag", () => {
       await tagPill(reading, tag)
         .locator('.multi-select-pill-remove-button')
         .click();
-      await expectDamageNotice(reference, notices, 3);
       await expectTagLeftOff(reading, keys);
+
+      // The strip has reached the metadata cache, which raised the `changed`
+      // the watch takes it from
+      await expect
+        .poll(async () => (await cachedFrontmatter(reference))?.tags)
+        .toEqual(['mine', 'also-mine']);
+
+      // A second item, whose id is typed over, here, in the note on screen.
+      // Its row is told of by the pass that takes every change before it, the
+      // strips' included, so had a strip been told of, it would be told of by
+      // now, in this notice or one before it
+      await importArticle(window, OTHER_SOURCE);
+      await expect.poll(async () => (await itemIds(table)).length).toBe(2);
+      const other = (await itemIds(table)).find(
+        (row) => row.reference !== reference
+      )!;
+      await openFileInActiveLeaf(window, other.reference);
+      await expect.poll(activePath).toBe(other.reference);
+      await window.evaluate((path) => {
+        const { app } = window as unknown as { app: PageApp };
+        return app.fileManager.processFrontMatter(
+          app.vault.getFileByPath(path),
+          (frontmatter) => {
+            frontmatter['ir-id'] = 'typed-over';
+          }
+        );
+      }, other.reference);
+      const row = damageRow(other.reference);
+      await expect(row).toBeVisible();
+      await expect(damageRow(reference)).toHaveCount(0);
+      expect(await damageNotices()).toBe(1);
+
+      // Looked at somewhere else, then brought back from the notice
+      await openFileInActiveLeaf(window, reference);
+      await expect.poll(activePath).toBe(reference);
+      await row.locator('button.ir-damaged-note-open').click();
+      await expect.poll(activePath).toBe(other.reference);
+      await expect(row).toBeVisible();
+
+      // Given its id back, which takes it off the notice
+      await row.locator('button.ir-damaged-note-restore').click();
+      await expect
+        .poll(async () => (await cachedFrontmatter(other.reference))?.['ir-id'])
+        .toBe(other.id);
+      await expect(row).toHaveCount(0);
     });
   }
 });

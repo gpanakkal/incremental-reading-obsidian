@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import { SQLJSRepository } from '#/lib/repository/SQLJSRepository';
 import fc from 'fast-check';
@@ -21,7 +22,8 @@ import {
   it,
   vi,
 } from 'vitest';
-import { ARTICLE_TAG, SNIPPET_TAG } from './constants';
+import { ARTICLE_TAG } from './constants';
+import { createDamagedNoteActions } from './damaged-note-actions';
 import { createDamagedNotesNotice } from './ir-id-warning-notice';
 import {
   DEBOUNCE_MS,
@@ -30,14 +32,13 @@ import {
   type NoteClaim,
   PATH_BATCH,
   claimsIdentity,
-  classifyTag,
   createIrIdWatch,
   readsAsTampering,
   settleAfterSync,
   shownInMarkdownView,
   writtenHere,
 } from './ir-id-watch';
-import { TAG_BY_TABLE, hasTag, withTag } from './item-tags';
+import { TAG_BY_TABLE } from './item-tags';
 import { purgedReference } from './items/row-delete';
 import { type Holder, ITEM_TABLES, type ItemTable } from './moved-note-scan';
 import { MERGE_WAIT_MS } from './readiness';
@@ -299,11 +300,6 @@ const storedRowArb: fc.Arbitrary<StoredRow> = fc
   })
   .map((row) => ({ ...row }));
 
-const holdersArb = fc.array(
-  fc.record({ table: tableArb, id: idArb, deleted: fc.boolean() }),
-  { maxLength: 5 }
-);
-
 /** A tag a note might carry: an item tag, a lookalike, or anything else. */
 const tagEntryArb: fc.Arbitrary<unknown> = fc.oneof(
   fc.constantFrom<unknown>(
@@ -338,6 +334,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+  document.body.replaceChildren();
 });
 
 describe('claimsIdentity', () => {
@@ -411,230 +408,6 @@ describe('readsAsTampering', () => {
               tombstones.map(([table, id]) => holder(table, id, true))
             )
           ).toBe(false);
-        }
-      )
-    );
-  });
-});
-
-describe('classifyTag', () => {
-  /** `tags` lacking `tag`, as a list or a lone string. */
-  const tagsLackingArb = (tag: string) =>
-    tagsArb.filter((tags) => !hasTag({ tags }, tag));
-
-  /** `tags` carrying `tag`, as a list or a lone string, spelled as Obsidian reads it. */
-  const tagsCarryingArb = (tag: string) =>
-    fc.oneof(
-      fc
-        .tuple(fc.array(tagEntryArb, { maxLength: 3 }), fc.nat())
-        .map(([others, at]) => {
-          const tags = [...others];
-          tags.splice(at % (others.length + 1), 0, tag);
-          return tags as unknown;
-        }),
-      fc.constantFrom(tag, `#${tag}`, ` ${tag.toUpperCase()} `)
-    );
-
-  /**
-   * A note that belongs to one live row at its path: it names the row's id, with
-   * any other rows about, live or not, so long as none of them answers to that
-   * id; or it makes no claim, and every other row at the path is a tombstone.
-   */
-  const ownedArb = fc
-    .record({
-      path: pathArb,
-      owner: fc.record({ table: tableArb, id: idArb }),
-      claims: fc.boolean(),
-      noClaim: noClaimArb,
-      others: holdersArb,
-      at: fc.nat(),
-    })
-    .map(({ path, owner, claims, noClaim, others, at }) => {
-      const rest = others
-        .filter(({ id }) => id !== owner.id)
-        .map((row) => (claims ? row : { ...row, deleted: true }));
-      const holders = [...rest];
-      holders.splice(at % (rest.length + 1), 0, holder(owner.table, owner.id));
-      return { path, owner, irId: claims ? owner.id : noClaim, holders };
-    });
-
-  /**
-   * A note that belongs to no live row at its path, or could belong to more
-   * than one: it makes no claim and the path has no live row or several; it
-   * names an id no live row there holds; or two live rows there share its id.
-   */
-  const unownedArb = fc.oneof(
-    fc
-      .record({
-        path: pathArb,
-        irId: noClaimArb,
-        holders: holdersArb,
-      })
-      .filter(
-        ({ holders }) => holders.filter(({ deleted }) => !deleted).length !== 1
-      ),
-    fc
-      .record({
-        path: pathArb,
-        irId: someClaimArb,
-        holders: holdersArb,
-      })
-      .map(({ path, irId, holders }) => ({
-        path,
-        irId,
-        holders: holders.map((row) =>
-          row.id === irId ? { ...row, deleted: true } : row
-        ),
-      })),
-    fc
-      .record({
-        path: pathArb,
-        id: idArb,
-        tables: fc.uniqueArray(tableArb, { minLength: 2, maxLength: 3 }),
-        others: holdersArb,
-      })
-      .map(({ path, id, tables, others }) => ({
-        path,
-        irId: id,
-        holders: [...others, ...tables.map((table) => holder(table, id))],
-      }))
-  );
-
-  it('names the tag of the live row a note belongs to, when the note lacks it', () => {
-    fc.assert(
-      fc.property(
-        ownedArb.chain((owned) =>
-          tagsLackingArb(TAG_BY_TABLE[owned.owner.table]).map((tags) => ({
-            ...owned,
-            tags,
-          }))
-        ),
-        ({ path, owner, irId, holders, tags }) => {
-          expect(classifyTag({ path, irId }, { tags }, holders)).toStrictEqual({
-            row: { table: owner.table, id: owner.id },
-            path,
-            tag: TAG_BY_TABLE[owner.table],
-          });
-        }
-      )
-    );
-  });
-
-  it("leaves alone a note that already carries its row's tag", () => {
-    fc.assert(
-      fc.property(
-        ownedArb.chain((owned) =>
-          tagsCarryingArb(TAG_BY_TABLE[owned.owner.table]).map((tags) => ({
-            ...owned,
-            tags,
-          }))
-        ),
-        ({ path, irId, holders, tags }) => {
-          expect(classifyTag({ path, irId }, { tags }, holders)).toBeNull();
-        }
-      )
-    );
-  });
-
-  it('finds no tag lost from a note no single live row at its path answers to, whatever its tags', () => {
-    fc.assert(
-      fc.property(unownedArb, tagsArb, ({ path, irId, holders }, tags) => {
-        expect(classifyTag({ path, irId }, { tags }, holders)).toBeNull();
-      })
-    );
-  });
-
-  it('names the tag of the one live row at a path when the note makes no claim', () => {
-    fc.assert(
-      fc.property(
-        pathArb,
-        noClaimArb,
-        tableArb,
-        idArb,
-        fc.array(fc.record({ table: tableArb, id: idArb }), { maxLength: 3 }),
-        (path, irId, table, id, tombstones) => {
-          const holders = [
-            ...tombstones.map((row) => holder(row.table, row.id, true)),
-            holder(table, id),
-          ];
-          expect(
-            classifyTag({ path, irId }, { tags: ['other'] }, holders)
-          ).toStrictEqual({
-            row: { table, id },
-            path,
-            tag: TAG_BY_TABLE[table],
-          });
-        }
-      )
-    );
-  });
-
-  it('leaves a note alone that claims an id no live row at its path holds', () => {
-    expect(
-      classifyTag({ path: 'a.md', irId: 'typed-over' }, {}, [
-        holder('article', 'a1'),
-      ])
-    ).toBeNull();
-    expect(
-      classifyTag({ path: 'a.md', irId: 'a1' }, {}, [
-        holder('article', 'a1', true),
-      ])
-    ).toBeNull();
-    expect(classifyTag({ path: 'a.md', irId: undefined }, {}, [])).toBeNull();
-  });
-
-  it('leaves a note alone that more than one live row could own', () => {
-    const holders = [holder('article', 'a1'), holder('snippet', 's1')];
-    expect(
-      classifyTag({ path: 'a.md', irId: undefined }, {}, holders)
-    ).toBeNull();
-    expect(
-      classifyTag({ path: 'a.md', irId: 'a1' }, {}, [
-        holder('article', 'a1'),
-        holder('snippet', 'a1'),
-      ])
-    ).toBeNull();
-  });
-
-  it('reads a lone string as one tag, as Obsidian does', () => {
-    const holders = [holder('snippet', 's1')];
-    expect(
-      classifyTag({ path: 'a.md', irId: 's1' }, { tags: SNIPPET_TAG }, holders)
-    ).toBeNull();
-    expect(
-      classifyTag(
-        { path: 'a.md', irId: 's1' },
-        { tags: 'other ir-text-snippet' },
-        holders
-      )
-    ).toStrictEqual({
-      row: { table: 'snippet', id: 's1' },
-      path: 'a.md',
-      tag: SNIPPET_TAG,
-    });
-  });
-
-  it('finds nothing lost once the tag it names is back', () => {
-    fc.assert(
-      fc.property(
-        fc.oneof(
-          ownedArb.chain((owned) =>
-            tagsArb.map((tags) => ({ ...owned, tags }))
-          ),
-          unownedArb.chain((unowned) =>
-            tagsArb.map((tags) => ({ ...unowned, tags }))
-          )
-        ),
-        ({ path, irId, holders, tags }) => {
-          const first = classifyTag({ path, irId }, { tags }, holders);
-          fc.pre(first !== null);
-          expect(
-            classifyTag(
-              { path, irId },
-              { tags: withTag(tags, first.tag) },
-              holders
-            )
-          ).toBeNull();
         }
       )
     );
@@ -821,30 +594,46 @@ describe('createIrIdWatch', () => {
         .spyOn(Obsidian, 'updateFrontMatter')
         .mockResolvedValue(undefined);
       const createNotice = vi.fn((message: string) => ({
-        containerEl: {
-          isConnected: true,
-          addEventListener: () => {},
-        } as unknown as HTMLElement,
+        containerEl: document.body.createDiv(),
         setMessage: vi.fn(),
         hide: vi.fn(),
         message,
       }));
-      const notice = createDamagedNotesNotice(createNotice);
+      const reports: Promise<void>[] = [];
+      let report = (_paths: readonly string[]) => Promise.resolve();
       const harness = wire(
         [ROW],
         [{ path: ROW.reference, irId: 'a1', tags: [ARTICLE_TAG, 'keep'] }],
         {
-          onDamage: (paths) => notice.report(paths),
+          onDamage: (paths) => reports.push(report(paths)),
           isShown: (path) => shown && path === ROW.reference,
         }
       );
-      return { ...harness, writes, createNotice };
+      const notice = createDamagedNotesNotice(
+        createNotice,
+        createDamagedNoteActions({
+          repo: harness.repo,
+          vault: harness.vault.vault,
+          metadataCache: harness.vault.metadataCache,
+          fileManager: { processFrontMatter: vi.fn() },
+          workspace: { getLeaf: vi.fn() },
+        })
+      );
+      report = (paths) => notice.report(paths);
+      /** The rows the notice lists, by path, once every report has landed. */
+      const listed = async () => {
+        await Promise.all(reports);
+        return [
+          ...document.querySelectorAll<HTMLElement>('.ir-damaged-note'),
+        ].map((row) => row.dataset.path);
+      };
+      return { ...harness, writes, createNotice, listed };
     }
 
     it('raises one notice naming a note open here, and writes nothing back to it or its row', async () => {
       // Reading mode's properties editor, say: an edit made inside Obsidian
       // that the editor guard could not stop
-      const { watch, repo, vault, scheduler, writes, createNotice } =
+      const { watch, repo, vault, scheduler, writes, createNotice, listed } =
         wireNotice(true);
       const rowsBefore = readRows(repo);
 
@@ -857,7 +646,7 @@ describe('createIrIdWatch', () => {
       await watch.flush();
 
       expect(createNotice).toHaveBeenCalledOnce();
-      expect(createNotice.mock.calls[0][0]).toContain('"one"');
+      expect(await listed()).toStrictEqual([ROW.reference]);
       expect(writes).not.toHaveBeenCalled();
       expect(vault.notes.get(ROW.reference)).toStrictEqual({ tags: ['keep'] });
       expect(readRows(repo)).toStrictEqual(rowsBefore);
@@ -866,7 +655,7 @@ describe('createIrIdWatch', () => {
     it('raises no notice and writes nothing for a note not open here, nor once the database arrives', async () => {
       // The 0166 flow: un-imported on another device, the note arrives over
       // Sync before the database without its row does
-      const { watch, repo, vault, scheduler, writes, createNotice } =
+      const { watch, repo, vault, scheduler, writes, listed } =
         wireNotice(false);
       const rowsBefore = readRows(repo);
 
@@ -876,7 +665,7 @@ describe('createIrIdWatch', () => {
       scheduler.run();
       await watch.flush();
 
-      expect(createNotice).not.toHaveBeenCalled();
+      expect(await listed()).toStrictEqual([]);
       expect(writes).not.toHaveBeenCalled();
       expect(vault.notes.get(ROW.reference)).toStrictEqual({ tags: ['keep'] });
       expect(readRows(repo)).toStrictEqual(rowsBefore);
@@ -889,7 +678,7 @@ describe('createIrIdWatch', () => {
       watch.handleChange(changed(ROW.reference));
       await watch.flush();
 
-      expect(createNotice).not.toHaveBeenCalled();
+      expect(await listed()).toStrictEqual([]);
       expect(writes).not.toHaveBeenCalled();
     });
   });
@@ -1244,7 +1033,7 @@ describe('createIrIdWatch', () => {
     });
   });
 
-  it('reports exactly the notes on screen that lost their id or tag, and never writes a row', async () => {
+  it('reports exactly the notes on screen whose id was taken off or changed, whatever their tags, and never writes a row', async () => {
     await fc.assert(
       fc.asyncProperty(
         fc.uniqueArray(storedRowArb, {
@@ -1288,14 +1077,12 @@ describe('createIrIdWatch', () => {
           const reported = await watch.flush();
 
           const expected = notes
-            .filter(({ path, irId, tags }) => {
+            .filter(({ path, irId }) => {
               const holders = rows
                 .filter(({ reference }) => reference === path)
                 .map(({ table, id, deleted }) => holder(table, id, deleted));
               return (
-                shown.has(path) &&
-                (readsAsTampering({ path, irId }, holders) ||
-                  classifyTag({ path, irId }, { tags }, holders) !== null)
+                shown.has(path) && readsAsTampering({ path, irId }, holders)
               );
             })
             .map(({ path }) => path);
@@ -1322,15 +1109,44 @@ describe('createIrIdWatch', () => {
     expect(onDamage).not.toHaveBeenCalled();
   });
 
-  it('reports a note that kept its id but lost its type tag', async () => {
-    const { watch } = wire(
-      [ROW],
-      [{ path: ROW.reference, irId: 'a1', tags: [] }]
+  it('reports nothing for a note that kept its id, whatever became of its tags', async () => {
+    await fc.assert(
+      fc.asyncProperty(tableArb, tagsArb, async (table, tags) => {
+        const row = { ...ROW, table };
+        const { watch, vault, onDamage } = wire(
+          [row],
+          [{ path: row.reference, irId: row.id, tags: [TAG_BY_TABLE[table]] }]
+        );
+
+        // Taken off, swapped for another type's, or anything else
+        vault.notes.set(row.reference, { 'ir-id': row.id, tags });
+        watch.handleChange(changed(row.reference));
+
+        expect(await watch.flush()).toStrictEqual([]);
+        expect(onDamage).not.toHaveBeenCalled();
+      })
     );
+  });
 
-    watch.handleChange(changed(ROW.reference));
+  it('reports a note whose id was changed to another value, tag kept or not', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        someClaimArb.filter((irId) => irId !== ROW.id),
+        fc.constantFrom<unknown>([ARTICLE_TAG], [], undefined),
+        async (irId, tags) => {
+          const { watch, vault, onDamage } = wire(
+            [ROW],
+            [{ path: ROW.reference, irId: ROW.id, tags: [ARTICLE_TAG] }]
+          );
 
-    expect(await watch.flush()).toStrictEqual([ROW.reference]);
+          vault.notes.set(ROW.reference, { 'ir-id': irId, tags });
+          watch.handleChange(changed(ROW.reference));
+
+          expect(await watch.flush()).toStrictEqual([ROW.reference]);
+          expect(onDamage.mock.calls).toStrictEqual([[[ROW.reference]]]);
+        }
+      )
+    );
   });
 
   it('reports a note still damaged on later passes only once', async () => {

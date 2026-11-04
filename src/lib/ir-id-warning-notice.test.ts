@@ -2,11 +2,12 @@
 import { Notice } from '#/test/__mocks__/obsidian';
 import fc from 'fast-check';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { DamagedNote } from './damaged-note-actions';
 import {
   createDamagedNotesNotice,
   createIrIdWarning,
-  DAMAGED_NOTES_NAMED,
-  damagedNotesMessage,
+  DAMAGED_NOTES_LISTED,
+  damagedNotesHeading,
   IR_ID_WARNING_MAX_LIFETIME_MS,
   IR_ID_WARNING_WINDOW_MS,
   irIdWarningMessage,
@@ -15,6 +16,7 @@ import {
   type NoticeFactory,
   type NoticeTarget,
 } from './ir-id-warning-notice';
+import { ITEM_TABLES, type ItemTable } from './moved-note-scan';
 
 // #region HELPERS
 
@@ -163,6 +165,112 @@ const hoverArb = fc
 const capFor = (gaps: readonly number[], windowMs: number, slack = 0) =>
   gaps.reduce((sum, gap) => sum + gap, 0) + windowMs + slack + 1;
 
+/** What a {@link createDamagedNotesNotice} is told about each note, by path. */
+function makeFakeActions(known: readonly DamagedNote[] = []) {
+  const byPath = new Map(known.map((note) => [note.path, note]));
+  return {
+    byPath,
+    describe: vi.fn(async (paths: readonly string[]) =>
+      paths.flatMap((path) => {
+        const note = byPath.get(path);
+        return note ? [note] : [];
+      })
+    ),
+    restore: vi.fn(async (_path: string) => true),
+    open: vi.fn(async (_path: string) => true),
+  };
+}
+
+/** A damaged-notes notice over fake notices and {@link makeFakeActions}. */
+function makeDamagedNotice(known: readonly DamagedNote[] = []) {
+  const { raised, createNotice } = makeNotices();
+  const actions = makeFakeActions(known);
+  const notice = createDamagedNotesNotice(createNotice, actions);
+  return { raised, createNotice, actions, notice };
+}
+
+/** The rows a notice lists, in order. */
+const rowsOf = (notice: NoticeTarget) => [
+  ...notice.containerEl.querySelectorAll<HTMLElement>('.ir-damaged-note'),
+];
+
+/** The row a notice lists for the note at `path`, if any. */
+const rowOf = (notice: NoticeTarget, path: string) =>
+  rowsOf(notice).find((row) => row.dataset.path === path) ?? null;
+
+/** The Open button of the row for `path`. */
+const openOf = (notice: NoticeTarget, path: string) =>
+  rowOf(notice, path)?.querySelector<HTMLButtonElement>(
+    'button.ir-damaged-note-open'
+  ) ?? null;
+
+/** The Restore button of the row for `path`. */
+const restoreOf = (notice: NoticeTarget, path: string) =>
+  rowOf(notice, path)?.querySelector<HTMLButtonElement>(
+    'button.ir-damaged-note-restore'
+  ) ?? null;
+
+const restoreAllOf = (notice: NoticeTarget) =>
+  notice.containerEl.querySelector<HTMLButtonElement>(
+    'button.ir-damaged-notes-restore-all'
+  );
+
+const KIND_WORD: Record<ItemTable, string> = {
+  article: 'article',
+  snippet: 'snippet',
+  srs_card: 'card',
+};
+
+/** A damaged note at a vault path ending in a name of its own. */
+const damagedNoteArb: fc.Arbitrary<DamagedNote & { name: string }> = fc
+  .record({
+    folders: fc.array(fc.stringMatching(/^[a-z]{1,6}$/), { maxLength: 2 }),
+    name: fc.stringMatching(/^[A-Za-z0-9 ]{1,10}$/),
+    ext: fc.constantFrom('.md', ''),
+    table: fc.constantFrom(...ITEM_TABLES),
+    change: fc.constantFrom('removed' as const, 'changed' as const),
+    restorable: fc.boolean(),
+  })
+  .map(({ folders, name, ext, table, change, restorable }) => ({
+    path: [...folders, `${name}${ext}`].join('/'),
+    name,
+    table,
+    change,
+    restorable,
+  }));
+
+const damagedNotesArb = (maxLength: number) =>
+  fc.uniqueArray(damagedNoteArb, {
+    minLength: 1,
+    maxLength,
+    selector: ({ path }) => path,
+  });
+
+/**
+ * Many fake-notice notes, `notes/n<i>.md`, each with its id taken off,
+ * restorable unless `restorable` says otherwise.
+ */
+const numberedNotes = (
+  count: number,
+  restorable: (i: number) => boolean = () => true
+): DamagedNote[] =>
+  Array.from({ length: count }, (_, i) => ({
+    path: `notes/n${i}.md`,
+    table: 'article',
+    change: 'removed',
+    restorable: restorable(i),
+  }));
+
+/** A promise a test settles by hand. */
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
 // #endregion
 
 describe('irIdWarningMessage', () => {
@@ -819,124 +927,723 @@ describe('createIrIdWarning', () => {
   });
 });
 
-describe('damagedNotesMessage', () => {
-  /** A vault path ending in a note name of its own. */
-  const pathArb = fc
-    .tuple(
-      fc.array(fc.stringMatching(/^[a-z]{1,6}$/), { maxLength: 2 }),
-      fc.stringMatching(/^[A-Za-z0-9]{1,10}$/)
-    )
-    .map(([folders, name]) => ({
-      name,
-      path: [...folders, `${name}.md`].join('/'),
-    }));
-
-  it('names the first notes without folder or extension, and counts the rest', () => {
+describe('damagedNotesHeading', () => {
+  it('counts the notes once there are two or more', () => {
     fc.assert(
-      fc.property(
-        fc.uniqueArray(pathArb, {
-          minLength: 1,
-          maxLength: 8,
-          selector: ({ path }) => path,
-        }),
-        (notes) => {
-          const message = damagedNotesMessage(notes.map(({ path }) => path));
-          const named = notes.slice(0, DAMAGED_NOTES_NAMED);
-          for (const { name } of named) expect(message).toContain(`"${name}"`);
-          for (const { path } of notes.slice(DAMAGED_NOTES_NAMED)) {
-            expect(message).not.toContain(`"${path}"`);
+      fc.property(fc.integer({ min: 2, max: 10_000 }), (count) => {
+        expect(damagedNotesHeading(count)).toContain(` ${count} `);
+        expect(damagedNotesHeading(count)).toMatch(/\bnotes\b/);
+      })
+    );
+    expect(damagedNotesHeading(1)).not.toMatch(/\d/);
+    expect(damagedNotesHeading(1)).toMatch(/\bnote\b/);
+  });
+});
+
+describe('createDamagedNotesNotice', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    document.body.replaceChildren();
+  });
+
+  it('lists each note by name, with its kind, what became of its id, an Open button, and a Restore button where it can be restored', async () => {
+    await fc.assert(
+      fc.asyncProperty(damagedNotesArb(DAMAGED_NOTES_LISTED), async (notes) => {
+        document.body.replaceChildren();
+        const { raised, notice } = makeDamagedNotice(notes);
+
+        await notice.report(notes.map(({ path }) => path));
+
+        expect(raised).toHaveLength(1);
+        expect(rowsOf(raised[0]).map((row) => row.dataset.path)).toStrictEqual(
+          notes.map(({ path }) => path)
+        );
+        for (const { path, name, table, change, restorable } of notes) {
+          const row = rowOf(raised[0], path)!;
+          const nameEl = row.querySelector('.ir-damaged-note-name');
+          expect(nameEl?.textContent).toBe(name);
+          // The full path on hover, for two notes of the same name
+          expect(nameEl?.getAttribute('aria-label')).toBe(path);
+          const kind = row.querySelector('.ir-damaged-note-kind')?.textContent;
+          expect(kind).toContain(KIND_WORD[table]);
+          expect(kind).toMatch(
+            change === 'removed' ? /\bremoved\b/ : /\bchanged\b/
+          );
+          expect(openOf(raised[0], path)).not.toBeNull();
+          expect(restoreOf(raised[0], path) !== null).toBe(restorable);
+        }
+      })
+    );
+  });
+
+  it(`lists at most ${DAMAGED_NOTES_LISTED} notes and counts the rest`, async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.integer({ min: 1, max: DAMAGED_NOTES_LISTED * 3 }),
+        async (count) => {
+          document.body.replaceChildren();
+          const notes = numberedNotes(count);
+          const { raised, notice } = makeDamagedNotice(notes);
+
+          await notice.report(notes.map(({ path }) => path));
+
+          const listed = Math.min(count, DAMAGED_NOTES_LISTED);
+          expect(
+            rowsOf(raised[0]).map((row) => row.dataset.path)
+          ).toStrictEqual(notes.slice(0, listed).map(({ path }) => path));
+          const more = raised[0].containerEl.querySelector(
+            '.ir-damaged-notes-more'
+          );
+          if (count > listed) {
+            expect(more?.textContent).toMatch(
+              new RegExp(`\\b${count - listed}\\b`)
+            );
+          } else {
+            expect(more).toBeNull();
           }
-          expect(message).not.toContain('.md"');
-          const rest = notes.length - named.length;
-          if (rest > 0) expect(message).toContain(` and ${rest} more `);
-          else expect(message).not.toMatch(/\d+ more/);
+          expect(raised[0].messages.at(-1)).toBe(damagedNotesHeading(count));
         }
       )
     );
   });
 
-  it('lists the names it shows in order, the last joined by "and"', () => {
-    expect(damagedNotesMessage(['a/One.md'])).toMatch(/: "One" lost its /);
-    expect(damagedNotesMessage(['One.md', 'Two.md'])).toMatch(
-      /: "One" and "Two" lost their /
+  it('opens the note from its Open button and leaves the notice up', async () => {
+    const notes = numberedNotes(2);
+    const { raised, actions, notice } = makeDamagedNotice(notes);
+    await notice.report(notes.map(({ path }) => path));
+
+    openOf(raised[0], 'notes/n1.md')!.click();
+
+    await vi.waitFor(() =>
+      expect(actions.describe).toHaveBeenLastCalledWith(['notes/n1.md'])
     );
-    expect(damagedNotesMessage(['One.md', 'Two.md', 'Three.md'])).toMatch(
-      /: "One", "Two" and "Three" lost their /
+    expect(actions.open).toHaveBeenCalledExactlyOnceWith('notes/n1.md');
+    expect(raised[0].hides).toBe(0);
+    expect(rowsOf(raised[0])).toHaveLength(2);
+  });
+
+  it('asks again about a note Open finds gone, and shows what it is now', async () => {
+    const notes = numberedNotes(3);
+    const { raised, actions, notice } = makeDamagedNotice(notes);
+    await notice.report(notes.map(({ path }) => path));
+    actions.open.mockResolvedValue(false);
+    // One moved and its old path now holds a note with another id; the
+    // other's whole again
+    actions.byPath.set('notes/n0.md', { ...notes[0], change: 'changed' });
+    actions.byPath.delete('notes/n1.md');
+    actions.describe.mockClear();
+
+    openOf(raised[0], 'notes/n0.md')!.click();
+    openOf(raised[0], 'notes/n1.md')!.click();
+
+    await vi.waitFor(() => expect(rowOf(raised[0], 'notes/n1.md')).toBeNull());
+    await vi.waitFor(() =>
+      expect(
+        rowOf(raised[0], 'notes/n0.md')?.querySelector('.ir-damaged-note-kind')
+          ?.textContent
+      ).toMatch(/\bchanged\b/)
     );
+    expect(actions.describe.mock.calls).toStrictEqual([
+      [['notes/n0.md']],
+      [['notes/n1.md']],
+    ]);
+    expect(raised[0].messages.at(-1)).toBe(damagedNotesHeading(2));
+    expect(raised[0].hides).toBe(0);
+  });
+
+  it('hides the notice once Open has found its last note gone', async () => {
+    const notes = numberedNotes(1);
+    const { raised, actions, notice } = makeDamagedNotice(notes);
+    await notice.report(['notes/n0.md']);
+    actions.open.mockResolvedValueOnce(false);
+    actions.byPath.delete('notes/n0.md');
+
+    openOf(raised[0], 'notes/n0.md')!.click();
+
+    await vi.waitFor(() => expect(raised[0].hides).toBe(1));
+    // A note damaged after that has a notice of its own
+    actions.byPath.set('notes/n0.md', notes[0]);
+    await notice.report(['notes/n0.md']);
+    expect(raised).toHaveLength(2);
+  });
+
+  it('says why in the console when Open fails, and keeps the row', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const notes = numberedNotes(1);
+    const { raised, actions, notice } = makeDamagedNotice(notes);
+    const failure = new Error('no leaf');
+    actions.open.mockRejectedValueOnce(failure);
+    await notice.report(['notes/n0.md']);
+
+    openOf(raised[0], 'notes/n0.md')!.click();
+
+    await vi.waitFor(() => expect(error).toHaveBeenCalled());
+    expect(error.mock.calls[0]).toContain(failure);
+    expect(String(error.mock.calls[0][0])).toContain('notes/n0.md');
+    expect(rowOf(raised[0], 'notes/n0.md')).not.toBeNull();
+  });
+
+  it('drops the row of a note found mended once opened, and keeps one still damaged', async () => {
+    const notes = numberedNotes(2);
+    const { raised, actions, notice } = makeDamagedNotice(notes);
+    await notice.report(notes.map(({ path }) => path));
+    // Undone by hand before Open was clicked
+    actions.byPath.delete('notes/n0.md');
+
+    openOf(raised[0], 'notes/n0.md')!.click();
+    openOf(raised[0], 'notes/n1.md')!.click();
+
+    await vi.waitFor(() => expect(rowOf(raised[0], 'notes/n0.md')).toBeNull());
+    await vi.waitFor(() =>
+      expect(actions.describe).toHaveBeenLastCalledWith(['notes/n1.md'])
+    );
+    expect(rowsOf(raised[0]).map((row) => row.dataset.path)).toStrictEqual([
+      'notes/n1.md',
+    ]);
+    expect(raised[0].hides).toBe(0);
+  });
+
+  it('restores only the note whose Restore was clicked, dropping its row and keeping the notice up', async () => {
+    const notes = numberedNotes(3);
+    const { raised, actions, notice } = makeDamagedNotice(notes);
+    await notice.report(notes.map(({ path }) => path));
+
+    restoreOf(raised[0], 'notes/n1.md')!.click();
+
+    await vi.waitFor(() => expect(rowOf(raised[0], 'notes/n1.md')).toBeNull());
+    expect(actions.restore).toHaveBeenCalledExactlyOnceWith('notes/n1.md');
+    expect(rowsOf(raised[0]).map((row) => row.dataset.path)).toStrictEqual([
+      'notes/n0.md',
+      'notes/n2.md',
+    ]);
+    expect(raised[0].hides).toBe(0);
+    expect(raised[0].messages.at(-1)).toBe(damagedNotesHeading(2));
+  });
+
+  it('hides the notice once its last note is restored', async () => {
+    const notes = numberedNotes(1);
+    const { raised, notice } = makeDamagedNotice(notes);
+    await notice.report(['notes/n0.md']);
+
+    restoreOf(raised[0], 'notes/n0.md')!.click();
+
+    await vi.waitFor(() => expect(raised[0].hides).toBe(1));
+    // A note damaged after that has a notice of its own
+    await notice.report(['notes/n0.md']);
+    expect(raised).toHaveLength(2);
+  });
+
+  it('runs one restore at a time for a note, however often its button is clicked', async () => {
+    const notes = numberedNotes(2);
+    const { raised, actions, notice } = makeDamagedNotice(notes);
+    const pending = deferred<boolean>();
+    actions.restore.mockReturnValueOnce(pending.promise);
+    await notice.report(notes.map(({ path }) => path));
+
+    const button = restoreOf(raised[0], 'notes/n0.md')!;
+    button.click();
+    button.click();
+    // A report arriving meanwhile redraws the rows, and keeps it running
+    await notice.report(['notes/n1.md']);
+    restoreOf(raised[0], 'notes/n0.md')!.click();
+
+    expect(actions.restore).toHaveBeenCalledOnce();
+    expect(restoreOf(raised[0], 'notes/n0.md')!.disabled).toBe(true);
+    expect(restoreAllOf(raised[0])!.disabled).toBe(true);
+    pending.resolve(true);
+    await vi.waitFor(() => expect(rowOf(raised[0], 'notes/n0.md')).toBeNull());
+    expect(restoreAllOf(raised[0])).toBeNull();
+    expect(restoreOf(raised[0], 'notes/n1.md')!.disabled).toBe(false);
+  });
+
+  it('asks again about a note Restore could not mend, and shows what it is now', async () => {
+    const notes = numberedNotes(3);
+    const { raised, actions, notice } = makeDamagedNotice(notes);
+    await notice.report(notes.map(({ path }) => path));
+    actions.restore.mockResolvedValue(false);
+    // A second row came to share its path; the other's whole again
+    actions.byPath.set('notes/n0.md', { ...notes[0], restorable: false });
+    actions.byPath.delete('notes/n1.md');
+    actions.describe.mockClear();
+
+    restoreOf(raised[0], 'notes/n0.md')!.click();
+    restoreOf(raised[0], 'notes/n1.md')!.click();
+
+    await vi.waitFor(() => expect(rowOf(raised[0], 'notes/n1.md')).toBeNull());
+    await vi.waitFor(() =>
+      expect(restoreOf(raised[0], 'notes/n0.md')).toBeNull()
+    );
+    expect(actions.describe.mock.calls).toStrictEqual([
+      [['notes/n0.md']],
+      [['notes/n1.md']],
+    ]);
+    expect(rowOf(raised[0], 'notes/n0.md')).not.toBeNull();
+    expect(raised[0].hides).toBe(0);
+  });
+
+  it('keeps the row of a note whose restore failed, its button usable again, and says why in the console', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const notes = numberedNotes(1);
+    const { raised, actions, notice } = makeDamagedNotice(notes);
+    const failure = new Error('disk full');
+    actions.restore.mockRejectedValueOnce(failure);
+    await notice.report(['notes/n0.md']);
+
+    restoreOf(raised[0], 'notes/n0.md')!.click();
+
+    await vi.waitFor(() => expect(error).toHaveBeenCalled());
+    expect(error.mock.calls[0]).toContain(failure);
+    expect(String(error.mock.calls[0][0])).toContain('notes/n0.md');
+    await vi.waitFor(() =>
+      expect(restoreOf(raised[0], 'notes/n0.md')!.disabled).toBe(false)
+    );
+    expect(raised[0].hides).toBe(0);
+  });
+
+  it('offers Restore all exactly when two or more notes can be restored, outside the scrolled rows', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        damagedNotesArb(DAMAGED_NOTES_LISTED * 2),
+        async (notes) => {
+          document.body.replaceChildren();
+          const { raised, notice } = makeDamagedNotice(notes);
+
+          await notice.report(notes.map(({ path }) => path));
+
+          const restorable = notes.filter((note) => note.restorable).length;
+          const all = restoreAllOf(raised[0]);
+          expect(all !== null).toBe(restorable >= 2);
+          const list = rowsOf(raised[0])[0].parentElement!;
+          expect(list.contains(all)).toBe(false);
+        }
+      )
+    );
+  });
+
+  it('restores every note it can from Restore all, listed or counted, one at a time, and none of the rest', async () => {
+    const count = DAMAGED_NOTES_LISTED + 4;
+    const notes = numberedNotes(count, (i) => i % 3 !== 0);
+    const { raised, actions, notice } = makeDamagedNotice(notes);
+    let running = 0;
+    let overlapped = false;
+    actions.restore.mockImplementation(async () => {
+      running += 1;
+      overlapped ||= running > 1;
+      await Promise.resolve();
+      running -= 1;
+      return true;
+    });
+    await notice.report(notes.map(({ path }) => path));
+
+    restoreAllOf(raised[0])!.click();
+
+    const fixed = notes
+      .filter((note) => note.restorable)
+      .map(({ path }) => path);
+    const kept = notes
+      .filter((note) => !note.restorable)
+      .map(({ path }) => path);
+    await vi.waitFor(() =>
+      expect(actions.restore.mock.calls).toStrictEqual(
+        fixed.map((path) => [path])
+      )
+    );
+    await vi.waitFor(() =>
+      expect(rowsOf(raised[0]).map((row) => row.dataset.path)).toStrictEqual(
+        kept
+      )
+    );
+    expect(overlapped).toBe(false);
     expect(
-      damagedNotesMessage(['One.md', 'Two.md', 'Three.md', 'Four.md'])
-    ).toMatch(/: "One", "Two", "Three" and 1 more lost their /);
+      raised[0].containerEl.querySelector('.ir-damaged-notes-more')
+    ).toBeNull();
+    expect(restoreAllOf(raised[0])).toBeNull();
+    expect(raised[0].hides).toBe(0);
   });
 
-  it('keeps an extension other than .md, which is part of what the user sees', () => {
-    expect(damagedNotesMessage(['notes/Card.mdx'])).toContain('"Card.mdx"');
-    expect(damagedNotesMessage(['notes/Plain'])).toContain('"Plain"');
+  it('runs Restore all once at a time, however often it is clicked, holding every Restore meanwhile', async () => {
+    const notes = numberedNotes(3);
+    const { raised, actions, notice } = makeDamagedNotice(notes);
+    const pending = deferred<boolean>();
+    let running = 0;
+    let overlapped = false;
+    actions.restore.mockImplementation(async (path: string) => {
+      running += 1;
+      overlapped ||= running > 1;
+      if (path === 'notes/n0.md') await pending.promise;
+      running -= 1;
+      return true;
+    });
+    await notice.report(notes.map(({ path }) => path));
+
+    const button = restoreAllOf(raised[0])!;
+    button.click();
+    // The one it was drawn as, before the first click redrew the rows
+    button.click();
+    expect(restoreOf(raised[0], 'notes/n2.md')!.disabled).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    pending.resolve(true);
+
+    // Every note restored, so the notice goes
+    await vi.waitFor(() => expect(raised[0].hides).toBe(1));
+    expect(actions.restore.mock.calls).toStrictEqual(
+      notes.map(({ path }) => [path])
+    );
+    expect(overlapped).toBe(false);
   });
-});
 
-describe('createDamagedNotesNotice', () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-    document.body.replaceChildren();
+  it('gives back the Restore of a note Restore all could not mend, once it is done', async () => {
+    const notes = numberedNotes(2);
+    const { raised, actions, notice } = makeDamagedNotice(notes);
+    // Its note changed meanwhile, and Restore can still mend it
+    actions.restore.mockImplementation(async (path) => path !== 'notes/n0.md');
+    await notice.report(notes.map(({ path }) => path));
+
+    restoreAllOf(raised[0])!.click();
+
+    await vi.waitFor(() => expect(rowOf(raised[0], 'notes/n1.md')).toBeNull());
+    await vi.waitFor(() =>
+      expect(restoreOf(raised[0], 'notes/n0.md')!.disabled).toBe(false)
+    );
   });
 
-  afterEach(() => {
-    vi.useRealTimers();
-    vi.restoreAllMocks();
+  it('leaves alone a notice since dismissed, or the one that replaced it, when a restore ends', async () => {
+    for (const after of ['dismissed', 'replaced', 'disposed'] as const) {
+      document.body.replaceChildren();
+      const notes = numberedNotes(3);
+      const { raised, actions, notice } = makeDamagedNotice(notes);
+      const pending = deferred<boolean>();
+      actions.restore.mockReturnValueOnce(pending.promise);
+      await notice.report(['notes/n0.md']);
+
+      restoreOf(raised[0], 'notes/n0.md')!.click();
+      if (after === 'disposed') notice.dispose();
+      else clickAway(raised[0]);
+      if (after === 'replaced') await notice.report(['notes/n1.md']);
+      pending.resolve(true);
+      await vi.waitFor(() => expect(actions.restore).toHaveBeenCalled());
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      // Hidden once, by whatever took it down, and never again
+      expect(raised[0].hides).toBe(1);
+      if (after === 'replaced') {
+        // Still the notice the next report adds to
+        await notice.report(['notes/n2.md']);
+        expect(raised).toHaveLength(2);
+        expect(rowsOf(raised[1]).map((row) => row.dataset.path)).toStrictEqual([
+          'notes/n1.md',
+          'notes/n2.md',
+        ]);
+      }
+    }
   });
 
-  it('raises one notice naming the notes, and adds later ones to it while it is up', () => {
-    const { raised, createNotice } = makeNotices();
-    const notice = createDamagedNotesNotice(createNotice);
+  it('looks the notes it lists up again with each report, in the same lookup, dropping those mended since', async () => {
+    const notes = numberedNotes(4);
+    const { raised, actions, notice } = makeDamagedNotice(notes);
+    await notice.report(['notes/n0.md', 'notes/n1.md', 'notes/n2.md']);
+    // One undone by hand, one whose id changed again
+    actions.byPath.delete('notes/n1.md');
+    actions.byPath.set('notes/n2.md', { ...notes[2], change: 'changed' });
+    actions.describe.mockClear();
 
-    notice.report(['One.md']);
-    notice.report(['Two.md', 'One.md']);
+    await notice.report(['notes/n3.md']);
 
+    expect(actions.describe.mock.calls).toStrictEqual([
+      [['notes/n0.md', 'notes/n1.md', 'notes/n2.md', 'notes/n3.md']],
+    ]);
+    expect(rowsOf(raised[0]).map((row) => row.dataset.path)).toStrictEqual([
+      'notes/n0.md',
+      'notes/n2.md',
+      'notes/n3.md',
+    ]);
+    expect(
+      rowOf(raised[0], 'notes/n2.md')?.querySelector('.ir-damaged-note-kind')
+        ?.textContent
+    ).toMatch(/\bchanged\b/);
+  });
+
+  it('takes the notice down when a report finds every note it lists mended, and the new ones whole', async () => {
+    const notes = numberedNotes(2);
+    const { raised, createNotice, actions, notice } = makeDamagedNotice(notes);
+    await notice.report(['notes/n0.md']);
+    actions.byPath.clear();
+
+    await notice.report(['notes/n1.md']);
+
+    expect(raised[0].hides).toBe(1);
     expect(createNotice).toHaveBeenCalledOnce();
-    expect(raised[0].messages).toStrictEqual([
-      damagedNotesMessage(['One.md']),
-      damagedNotesMessage(['One.md', 'Two.md']),
+  });
+
+  it('looks up only the new notes for a report once the notice was dismissed', async () => {
+    const notes = numberedNotes(2);
+    const { raised, actions, notice } = makeDamagedNotice(notes);
+    await notice.report(['notes/n0.md']);
+    clickAway(raised[0]);
+    actions.describe.mockClear();
+
+    await notice.report(['notes/n1.md']);
+
+    expect(actions.describe.mock.calls).toStrictEqual([[['notes/n1.md']]]);
+  });
+
+  it('raises a fresh notice with only the new notes when the one it looked up its rows for is dismissed meanwhile', async () => {
+    const notes = numberedNotes(2);
+    const { raised, actions, notice } = makeDamagedNotice(notes);
+    await notice.report(['notes/n0.md']);
+    const lookup = deferred<DamagedNote[]>();
+    actions.describe.mockReturnValueOnce(lookup.promise);
+
+    const reported = notice.report(['notes/n1.md']);
+    clickAway(raised[0]);
+    lookup.resolve(notes);
+    await reported;
+
+    expect(raised).toHaveLength(2);
+    expect(rowsOf(raised[1]).map((row) => row.dataset.path)).toStrictEqual([
+      'notes/n1.md',
     ]);
   });
 
-  it('raises a fresh notice, naming only the new notes, once the last was dismissed', () => {
+  it('keeps a row added while a report was being looked up', async () => {
+    const notes = numberedNotes(3);
+    const { raised, actions, notice } = makeDamagedNotice(notes);
+    await notice.report(['notes/n0.md']);
+    const lookup = deferred<DamagedNote[]>();
+    actions.describe.mockReturnValueOnce(lookup.promise);
+
+    const slow = notice.report(['notes/n1.md']);
+    await notice.report(['notes/n2.md']);
+    // Answered as it was before n2 was listed
+    lookup.resolve([notes[0], notes[1]]);
+    await slow;
+
+    expect(rowsOf(raised[0]).map((row) => row.dataset.path)).toStrictEqual([
+      'notes/n0.md',
+      'notes/n2.md',
+      'notes/n1.md',
+    ]);
+  });
+
+  it('keeps a row restored while a report was being looked up off the list', async () => {
+    const notes = numberedNotes(3);
+    const { raised, actions, notice } = makeDamagedNotice(notes);
+    await notice.report(['notes/n0.md', 'notes/n2.md']);
+    const lookup = deferred<DamagedNote[]>();
+    actions.describe.mockReturnValueOnce(lookup.promise);
+
+    const slow = notice.report(['notes/n1.md']);
+    restoreOf(raised[0], 'notes/n0.md')!.click();
+    await vi.waitFor(() => expect(rowOf(raised[0], 'notes/n0.md')).toBeNull());
+    // Answered from a read made before the restore's write
+    lookup.resolve(notes);
+    await slow;
+
+    expect(rowsOf(raised[0]).map((row) => row.dataset.path)).toStrictEqual([
+      'notes/n2.md',
+      'notes/n1.md',
+    ]);
+  });
+
+  it('lists a note it held again in the fresh notice when the report names it and the old notice is dismissed meanwhile', async () => {
+    const notes = numberedNotes(2);
+    const { raised, actions, notice } = makeDamagedNotice(notes);
+    await notice.report(['notes/n0.md']);
+    const lookup = deferred<DamagedNote[]>();
+    actions.describe.mockReturnValueOnce(lookup.promise);
+
+    const reported = notice.report(['notes/n0.md', 'notes/n1.md']);
+    clickAway(raised[0]);
+    lookup.resolve(notes);
+    await reported;
+
+    expect(raised).toHaveLength(2);
+    expect(rowsOf(raised[1]).map((row) => row.dataset.path)).toStrictEqual([
+      'notes/n0.md',
+      'notes/n1.md',
+    ]);
+  });
+
+  it('adds a note it held to the notice that replaced its own meanwhile, when the report names it', async () => {
+    const notes = numberedNotes(3);
+    const { raised, actions, notice } = makeDamagedNotice(notes);
+    await notice.report(['notes/n0.md']);
+    const lookup = deferred<DamagedNote[]>();
+    actions.describe.mockReturnValueOnce(lookup.promise);
+
+    const slow = notice.report(['notes/n0.md']);
+    clickAway(raised[0]);
+    await notice.report(['notes/n2.md']);
+    lookup.resolve([notes[0]]);
+    await slow;
+
+    expect(raised).toHaveLength(2);
+    expect(rowsOf(raised[1]).map((row) => row.dataset.path)).toStrictEqual([
+      'notes/n2.md',
+      'notes/n0.md',
+    ]);
+  });
+
+  it('raises nothing when the notice is dismissed during a report whose new notes turn out whole', async () => {
+    const notes = numberedNotes(1);
+    const { raised, createNotice, actions, notice } = makeDamagedNotice(notes);
+    await notice.report(['notes/n0.md']);
+    const lookup = deferred<DamagedNote[]>();
+    actions.describe.mockReturnValueOnce(lookup.promise);
+
+    const reported = notice.report(['notes/n9.md']);
+    clickAway(raised[0]);
+    // The note it listed still damaged, the new one whole
+    lookup.resolve([notes[0]]);
+    await reported;
+
+    expect(createNotice).toHaveBeenCalledOnce();
+  });
+
+  it('lists its rows in one element of their own that phone swipes leave to scroll', async () => {
+    const notes = numberedNotes(DAMAGED_NOTES_LISTED + 2);
+    const { raised, notice } = makeDamagedNotice(notes);
+
+    await notice.report(notes.map(({ path }) => path));
+
+    const rows = rowsOf(raised[0]);
+    const list = rows[0].parentElement!;
+    expect(rows.every((row) => row.parentElement === list)).toBe(true);
+    expect(list.dataset.ignoreSwipe).toBeDefined();
+    expect(
+      list.contains(
+        raised[0].containerEl.querySelector('.ir-damaged-notes-more')
+      )
+    ).toBe(true);
+    // Not the notice itself, whose own swipe still dismisses it
+    expect(list).not.toBe(raised[0].containerEl);
+  });
+
+  it('leaves alone a notice since dismissed, or the one that replaced it, when an Open ends', async () => {
+    for (const after of ['dismissed', 'replaced', 'disposed'] as const) {
+      document.body.replaceChildren();
+      const notes = numberedNotes(3);
+      const { raised, actions, notice } = makeDamagedNotice(notes);
+      const pending = deferred<boolean>();
+      actions.open.mockReturnValueOnce(pending.promise);
+      await notice.report(['notes/n0.md']);
+
+      openOf(raised[0], 'notes/n0.md')!.click();
+      if (after === 'disposed') notice.dispose();
+      else clickAway(raised[0]);
+      if (after === 'replaced') await notice.report(['notes/n1.md']);
+      // Gone by the time the tab opens, so the notice would drop it
+      actions.byPath.delete('notes/n0.md');
+      pending.resolve(false);
+      await vi.waitFor(() =>
+        expect(actions.describe).toHaveBeenLastCalledWith(['notes/n0.md'])
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      // Hidden once, by whatever took it down, and never again
+      expect(raised[0].hides).toBe(1);
+      if (after === 'replaced') {
+        // Still the notice the next report adds to
+        await notice.report(['notes/n2.md']);
+        expect(raised).toHaveLength(2);
+        expect(rowsOf(raised[1]).map((row) => row.dataset.path)).toStrictEqual([
+          'notes/n1.md',
+          'notes/n2.md',
+        ]);
+      }
+    }
+  });
+
+  it('adds notes reported while it is up to the same notice, once each', async () => {
+    const notes = numberedNotes(3);
+    const { raised, createNotice, actions, notice } = makeDamagedNotice(notes);
+
+    await notice.report(['notes/n0.md']);
+    actions.byPath.set('notes/n0.md', { ...notes[0], change: 'changed' });
+    await notice.report(['notes/n1.md', 'notes/n0.md', 'notes/n2.md']);
+
+    expect(createNotice).toHaveBeenCalledOnce();
+    expect(rowsOf(raised[0]).map((row) => row.dataset.path)).toStrictEqual([
+      'notes/n0.md',
+      'notes/n1.md',
+      'notes/n2.md',
+    ]);
+    // Told afresh what became of its id
+    expect(
+      rowOf(raised[0], 'notes/n0.md')?.querySelector('.ir-damaged-note-kind')
+        ?.textContent
+    ).toMatch(/\bchanged\b/);
+    expect(raised[0].messages.at(-1)).toBe(damagedNotesHeading(3));
+  });
+
+  it('raises a fresh notice, listing only the new notes, once the last was dismissed', async () => {
     for (const dismiss of ['click', 'detach'] as const) {
       document.body.replaceChildren();
-      const { raised, createNotice } = makeNotices();
-      const notice = createDamagedNotesNotice(createNotice);
-      notice.report(['One.md']);
+      const notes = numberedNotes(2);
+      const { raised, notice } = makeDamagedNotice(notes);
+      await notice.report(['notes/n0.md']);
 
       // A click leaves the element in the document while the hide animates
-      if (dismiss === 'click') raised[0].containerEl.click();
-      else raised[0].containerEl.remove();
-      notice.report(['Two.md']);
+      if (dismiss === 'click') clickAway(raised[0]);
+      else swipeAway(raised[0]);
+      await notice.report(['notes/n1.md']);
 
-      expect(raised.map(({ messages }) => messages)).toStrictEqual([
-        [damagedNotesMessage(['One.md'])],
-        [damagedNotesMessage(['Two.md'])],
+      expect(raised).toHaveLength(2);
+      expect(rowsOf(raised[1]).map((row) => row.dataset.path)).toStrictEqual([
+        'notes/n1.md',
       ]);
     }
   });
 
-  it('says nothing for a report naming no notes', () => {
-    const { createNotice } = makeNotices();
-    const notice = createDamagedNotesNotice(createNotice);
+  it('says nothing for a report naming no notes, or none damaged by now', async () => {
+    const { createNotice, actions, notice } = makeDamagedNotice();
 
-    notice.report([]);
+    await notice.report([]);
+    await notice.report(['notes/whole.md']);
+
+    expect(createNotice).not.toHaveBeenCalled();
+    expect(actions.describe).toHaveBeenCalledOnce();
+  });
+
+  it('hides the notice it has up when disposed, and raises a fresh one after', async () => {
+    const notes = numberedNotes(2);
+    const { raised, notice } = makeDamagedNotice(notes);
+    notice.dispose();
+    await notice.report(['notes/n0.md']);
+
+    notice.dispose();
+    await notice.report(['notes/n1.md']);
+
+    expect(raised.map(({ hides }) => hides)).toStrictEqual([1, 0]);
+    expect(rowsOf(raised[1]).map((row) => row.dataset.path)).toStrictEqual([
+      'notes/n1.md',
+    ]);
+  });
+
+  it('raises nothing for a report still being looked up when disposed', async () => {
+    const { createNotice, actions, notice } = makeDamagedNotice(
+      numberedNotes(1)
+    );
+    const lookup = deferred<DamagedNote[]>();
+    actions.describe.mockReturnValueOnce(lookup.promise);
+
+    const reported = notice.report(['notes/n0.md']);
+    notice.dispose();
+    lookup.resolve(numberedNotes(1));
+    await reported;
 
     expect(createNotice).not.toHaveBeenCalled();
   });
 
-  it('hides the notice it has up when disposed, and raises a fresh one after', () => {
-    const { raised, createNotice } = makeNotices();
-    const notice = createDamagedNotesNotice(createNotice);
-    notice.dispose();
-    notice.report(['One.md']);
+  it('says why in the console, raising nothing, when the notes cannot be looked up', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { createNotice, actions, notice } = makeDamagedNotice();
+    const failure = new Error('database closed');
+    actions.describe.mockRejectedValueOnce(failure);
 
-    notice.dispose();
-    notice.report(['Two.md']);
+    await notice.report(['notes/n0.md']);
 
-    expect(raised.map(({ hides }) => hides)).toStrictEqual([1, 0]);
-    expect(raised[1].messages).toStrictEqual([damagedNotesMessage(['Two.md'])]);
+    expect(createNotice).not.toHaveBeenCalled();
+    expect(error.mock.calls[0]).toContain(failure);
   });
 });

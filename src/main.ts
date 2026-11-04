@@ -56,6 +56,7 @@ import {
 import databaseSchema from './db/schema.sql';
 import { Actions } from './lib/Actions';
 import { DATABASE_FILE_PATH, PLUGIN_ICON } from './lib/constants';
+import { createDamagedNoteActions } from './lib/damaged-note-actions';
 import {
   type DeviceState,
   type ReviewSession,
@@ -963,9 +964,10 @@ export default class IncrementalReadingPlugin extends Plugin {
   }
 
   /**
-   * Tell the user about item notes whose `ir-id` or type tag was taken off
-   * outside the plugin. See {@link createIrIdWatch}, which used to put them back
-   * and now only reports them (0166).
+   * Tell the user about item notes whose `ir-id` was taken off or changed
+   * outside the plugin. See {@link createIrIdWatch}, which used to put ids and
+   * tags back and now only reports a lost id (0166). A type tag taken off is
+   * no damage, and goes untold.
    *
    * Registered here rather than in {@link onload} for two reasons. The check
    * reads the database, which does not exist until {@link initReviewManager}
@@ -975,15 +977,25 @@ export default class IncrementalReadingPlugin extends Plugin {
    */
   private watchIrIdFrontmatter() {
     // One notice naming every note a burst damaged, however many: a checkout
-    // or a folder arriving over Sync can name a great many at once
-    const notice = createDamagedNotesNotice(persistentNotice);
+    // or a folder arriving over Sync can name a great many at once. Each note
+    // can be opened from it, and given its id back
+    const notice = createDamagedNotesNotice(
+      persistentNotice,
+      createDamagedNoteActions({
+        repo: this.reviewManager.repo,
+        vault: this.app.vault,
+        metadataCache: this.app.metadataCache,
+        fileManager: this.app.fileManager,
+        workspace: this.app.workspace,
+      })
+    );
     this.register(() => notice.dispose());
 
     const watch = createIrIdWatch({
       repo: this.reviewManager.repo,
       vault: this.app.vault,
       metadataCache: this.app.metadataCache,
-      onDamage: (paths) => notice.report(paths),
+      onDamage: (paths) => void notice.report(paths),
       isShown: (path) => shownInMarkdownView(this.app.workspace, path),
     });
     this.register(() => watch.dispose());

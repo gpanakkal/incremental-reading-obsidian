@@ -9,7 +9,6 @@ import fc from 'fast-check';
 import type { App, TFile } from 'obsidian';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ARTICLE_TAG, CARD_TAG, SNIPPET_TAG, SOURCE_TAG } from './constants';
-import { classifyTag } from './ir-id-watch';
 import {
   frontmatterTags,
   hasTag,
@@ -381,50 +380,37 @@ describe('every tag reader', () => {
 
   it('agrees with Obsidian on whether a note carries each tag the plugin reads, whatever shape its frontmatter takes', async () => {
     await fc.assert(
-      fc.asyncProperty(
-        frontmatterArb,
-        fc.constantFrom(...ITEM_TABLES),
-        async (frontmatter, table) => {
-          vi.restoreAllMocks();
-          const app = appWith(frontmatter);
-          const type = obsidianTypeOf(frontmatter);
-          // The bars and review: from the metadata cache, and from the text
-          expect(
-            Obsidian.noteTypeFromCache(NOTE, { frontmatter } as never, app)
-          ).toBe(type);
-          vi.spyOn(Obsidian, 'readFrontMatter').mockResolvedValue(
-            frontmatter ?? {}
-          );
-          await expect(Obsidian.getNoteType(NOTE, app)).resolves.toBe(type);
-          // Relinking's mixed-kind guard
-          const tagged =
-            ITEM_TABLES.find((each) =>
-              obsidianCarries(frontmatter, TAG_BY_TABLE[each])
-            ) ?? null;
-          expect(vaultReader(app).taggedTableOf(NOTE)).toBe(tagged);
-          // The ir-id watch's lost-tag report
-          const lost = classifyTag(
-            { path: NOTE.path, irId: 'x' },
-            frontmatter,
-            [{ table, id: 'x', deleted: false }]
-          );
-          expect(lost === null).toBe(
-            obsidianCarries(frontmatter, TAG_BY_TABLE[table])
-          );
-          // Orphan snippets' source notes
-          expect(Obsidian.isSourceNote(NOTE, app)).toBe(
-            obsidianCarries(frontmatter, SOURCE_TAG)
-          );
-          // The tag search of a bulk import finds at least as much
-          for (const tag of PLUGIN_TAGS) {
-            if (obsidianCarries(frontmatter, tag)) {
-              expect(
-                matchAnyTags({ frontmatter } as never, [tag])
-              ).toStrictEqual([tag]);
-            }
+      fc.asyncProperty(frontmatterArb, async (frontmatter) => {
+        vi.restoreAllMocks();
+        const app = appWith(frontmatter);
+        const type = obsidianTypeOf(frontmatter);
+        // The bars and review: from the metadata cache, and from the text
+        expect(
+          Obsidian.noteTypeFromCache(NOTE, { frontmatter } as never, app)
+        ).toBe(type);
+        vi.spyOn(Obsidian, 'readFrontMatter').mockResolvedValue(
+          frontmatter ?? {}
+        );
+        await expect(Obsidian.getNoteType(NOTE, app)).resolves.toBe(type);
+        // Relinking's mixed-kind guard
+        const tagged =
+          ITEM_TABLES.find((each) =>
+            obsidianCarries(frontmatter, TAG_BY_TABLE[each])
+          ) ?? null;
+        expect(vaultReader(app).taggedTableOf(NOTE)).toBe(tagged);
+        // Orphan snippets' source notes
+        expect(Obsidian.isSourceNote(NOTE, app)).toBe(
+          obsidianCarries(frontmatter, SOURCE_TAG)
+        );
+        // The tag search of a bulk import finds at least as much
+        for (const tag of PLUGIN_TAGS) {
+          if (obsidianCarries(frontmatter, tag)) {
+            expect(matchAnyTags({ frontmatter } as never, [tag])).toStrictEqual(
+              [tag]
+            );
           }
         }
-      )
+      })
     );
   });
 });
