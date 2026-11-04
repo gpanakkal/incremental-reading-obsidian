@@ -472,6 +472,21 @@ function makeSimpleRepo(): SQLiteRepository {
 }
 
 /**
+ * Have the note hold `frontmatter`, both as the metadata cache reads it and as
+ * a frontmatter write hands it over, for an app stub whose own
+ * `processFrontMatter` never calls back.
+ * @returns the spy on the write, whose results say whether each one wrote
+ */
+function noteHolds(frontmatter: Record<string, unknown>) {
+  vi.spyOn(Obsidian, 'getFrontMatter').mockReturnValue(frontmatter as never);
+  return vi
+    .spyOn(Obsidian, 'updateFrontMatterIfNeeded')
+    .mockImplementation(async (_file, edit) =>
+      edit(structuredClone(frontmatter))
+    );
+}
+
+/**
  * Minimal Obsidian App stub. rowToReviewArticle reads frontmatter via
  * `app.metadataCache.getFileCache`. It no longer writes a note's missing
  * frontmatter back (0166), but `app.fileManager.processFrontMatter` still
@@ -6218,10 +6233,7 @@ describe('import', () => {
       (repo.query as ReturnType<typeof vi.fn>)
         .mockResolvedValueOnce([])
         .mockResolvedValue([{ id: 'existing' }]);
-      vi.spyOn(Obsidian, 'getFrontMatter').mockReturnValue({
-        'ir-id': 'existing',
-        tags: [ARTICLE_TAG],
-      } as never);
+      noteHolds({ 'ir-id': 'existing', tags: [ARTICLE_TAG] });
       const snippets = makeSnippetsStub();
       const manager = new ArticleManager(
         makeImportPluginWithSnippets(false, snippets),
@@ -6394,10 +6406,7 @@ describe('import', () => {
           makeImportPluginWithSnippets(false, snippets),
           repo
         );
-        vi.spyOn(Obsidian, 'getFrontMatter').mockReturnValue({
-          'ir-id': EXISTING_ID,
-          tags: [ARTICLE_TAG],
-        } as never);
+        noteHolds({ 'ir-id': EXISTING_ID, tags: [ARTICLE_TAG] });
 
         const result = await manager.import(
           IMPORT_FILE,
@@ -6429,13 +6438,8 @@ describe('import', () => {
           repo
         );
         vi.spyOn(manager, 'fetch').mockResolvedValue(null);
-        vi.spyOn(Obsidian, 'getFrontMatter').mockReturnValue({
-          'ir-id': EXISTING_ID,
-          tags: ['other'],
-        } as never);
-        const update = vi
-          .spyOn(Obsidian, 'updateFrontMatter')
-          .mockResolvedValue(undefined as never);
+        const held = { 'ir-id': EXISTING_ID, tags: ['other'] };
+        const update = noteHolds(held);
 
         const result = await manager.import(
           IMPORT_FILE,
@@ -6462,10 +6466,8 @@ describe('import', () => {
           expect.anything()
         );
         // Merged into the note's own tags
-        const frontmatter: Record<string, unknown> = { tags: ['other'] };
-        (update.mock.calls[0][1] as (fm: Record<string, unknown>) => void)(
-          frontmatter
-        );
+        const frontmatter: Record<string, unknown> = structuredClone(held);
+        expect(update.mock.calls[0][1](frontmatter)).toBe(true);
         expect(frontmatter.tags).toEqual(['other', ARTICLE_TAG]);
         // The row the note answers to is kept, never a second one made
         const writes = (repo.mutate as ReturnType<typeof vi.fn>).mock.calls as [
@@ -12047,6 +12049,79 @@ describe("reading a note's tags as Obsidian does", () => {
           [{ Tags: 'mine' }],
           [{ TAGS: ['mine'], tags: [ARTICLE_TAG] }],
           [{ Tags: null, tags: [ARTICLE_TAG] }],
+        ],
+      }
+    );
+  });
+
+  it('decides whether to put the article tag back by the note as it is, not as a stale metadata cache still holds it', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        frontmatterArb.map(unclaimed),
+        frontmatterArb.map(unclaimed),
+        fc.boolean(),
+        async (fresh, stale, deleted) => {
+          fc.pre(!snippetOrCard(fresh) && !snippetOrCard(stale));
+          vi.restoreAllMocks();
+          const { vault, repo, manager, before } = await wireArticles(
+            { [PATH]: { ...fresh, 'ir-id': 'x' } },
+            null
+          );
+          repo.mutate(
+            `INSERT INTO article (id, reference, due, interval, priority, deleted)
+             VALUES ('x', $1, 0, 1, 10, $2)`,
+            [PATH, deleted]
+          );
+          const tagged = obsidianTypeOf(fresh) === 'article';
+          // The cache still holds the note as it was before its tags changed
+          const getFileCache = vault.app.metadataCache.getFileCache;
+          const real = getFileCache.getMockImplementation()!;
+          let cacheIsStale = true;
+          getFileCache.mockImplementation((file) =>
+            cacheIsStale && file.path === PATH
+              ? { frontmatter: { ...stale, 'ir-id': 'x' } }
+              : real(file)
+          );
+          const file = vault.files.get(PATH)!;
+          const mtime = file.stat.mtime;
+
+          const article = await manager.import(
+            file,
+            DEFAULT_PRIORITY,
+            null,
+            false
+          );
+          cacheIsStale = false;
+
+          // Each write lands at a later mtime
+          expect(file.stat.mtime === mtime).toBe(tagged);
+          if (tagged) {
+            expect(vault.frontmatterOf(PATH)).toEqual(before[PATH]);
+          } else {
+            expect(
+              obsidianCarries(vault.frontmatterOf(PATH), ARTICLE_TAG)
+            ).toBe(true);
+          }
+          if (tagged && !deleted) expect(article).toBeNull();
+          else {
+            expect(article).toMatchObject({
+              articleId: 'x',
+              effect: deleted ? 'restored' : 'linked',
+            });
+          }
+          expect(repo.rows('article')).toMatchObject([{ id: 'x', deleted: 0 }]);
+        }
+      ),
+      {
+        numRuns: 60,
+        examples: [
+          // Cache tagged, note not: the tag goes back on
+          [{ tags: ['mine'] }, { tags: [ARTICLE_TAG] }, false],
+          // Cache untagged, note tagged: nothing to import, nothing written
+          [{ tags: [ARTICLE_TAG] }, { tags: ['mine'] }, false],
+          // A deleted row's note, tagged though the cache says not: brought
+          // back, the note left as it is
+          [{ Tags: [ARTICLE_TAG] }, {}, true],
         ],
       }
     );

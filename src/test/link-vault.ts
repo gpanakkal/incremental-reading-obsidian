@@ -18,8 +18,9 @@ const FIRST_MTIME = 1_700_000_000_000;
  * ends with the link's, those under the note's folder first, shorter paths
  * first. Case is ignored, spaces around a link not. New links are written in
  * `linkFormat`, as `MetadataCache.fileToLinktext` writes them (full paths by
- * default). `processFrontMatter` edits a note's frontmatter in place, and the
- * metadata cache and `cachedRead` read it as it is.
+ * default). `processFrontMatter` edits a copy of a note's frontmatter and keeps
+ * it once the edit returns, and the metadata cache and `cachedRead` read it as
+ * it is.
  */
 export function makeLinkVault(
   notes: Record<string, Record<string, unknown> | null> = {},
@@ -134,9 +135,12 @@ export function makeLinkVault(
     return dests.length === 1 && dests[0] === file ? name : full;
   };
 
+  // As Obsidian's: the edit gets a fresh parse of the note, and the note is
+  // written only once the edit returns, so an edit that throws leaves it as
+  // it was (`vault.process`, read from obsidian.asar)
   const processFrontMatter = vi.fn(
     async (file: TFile, edit: (fm: Record<string, unknown>) => void) => {
-      const fm = frontmatter.get(file.path) ?? {};
+      const fm = structuredClone(frontmatter.get(file.path) ?? {});
       edit(fm);
       frontmatter.set(file.path, fm);
       touch(file);

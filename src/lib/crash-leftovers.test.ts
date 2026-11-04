@@ -1178,13 +1178,15 @@ describe('resolveLeftover', () => {
         'left-1',
         { tags }
       );
-      const update = vi.spyOn(Obsidian, 'updateFrontMatter');
+      const file = vault.files.get(path)!;
+      const mtime = file.stat.mtime;
 
       expect(await resolveLeftover(deps, leftover, 'adopt', as)).toEqual({
         done: true,
       });
 
-      expect(update).toHaveBeenCalledTimes(written === null ? 0 : 1);
+      // Each write lands at a later mtime
+      expect(file.stat.mtime - mtime).toBe(written === null ? 0 : 1);
       expect(vault.frontmatterOf(path)?.tags).toEqual(written ?? tags);
     }
   );
@@ -1283,6 +1285,66 @@ describe('resolveLeftover', () => {
       });
     }
   );
+
+  it('decides what to write by the note as it is, not as a stale metadata cache still holds it, writing nothing when its tags are right already, and adopts it either way', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        tagsValueArb,
+        tagsValueArb,
+        typeArb,
+        async (fresh, stale, as) => {
+          vi.restoreAllMocks();
+          const path = 'notes/a.md';
+          const { vault, repo, deps, leftover } = await wireLeftover(
+            null,
+            path,
+            'left-1',
+            { tags: fresh }
+          );
+          const before = vault.frontmatterOf(path)!;
+          const right =
+            obsidianCarries(before, TAG_OF[as]) &&
+            KIND_RANK.every(
+              (other) => other === as || !obsidianCarries(before, TAG_OF[other])
+            );
+          // The cache still holds the note as it was before its tags changed
+          const getFileCache = vault.app.metadataCache.getFileCache;
+          const real = getFileCache.getMockImplementation()!;
+          let cacheIsStale = true;
+          getFileCache.mockImplementation((file) =>
+            cacheIsStale && file.path === path
+              ? { frontmatter: { ...before, tags: stale } }
+              : real(file)
+          );
+          const file = vault.files.get(path)!;
+          const mtime = file.stat.mtime;
+
+          const outcome = await resolveLeftover(deps, leftover, 'adopt', as);
+          cacheIsStale = false;
+
+          expect(outcome).toEqual({ done: true });
+          const after = vault.frontmatterOf(path)!;
+          expect(obsidianTypeOf(after)).toBe(as);
+          // Each write lands at a later mtime
+          expect(file.stat.mtime === mtime).toBe(right);
+          if (right) expect(after).toEqual(before);
+          const rows = repo.rows(TABLE_OF[as]) as { id: string }[];
+          expect(rows.map(({ id }) => id)).toContain('left-1');
+        }
+      ),
+      {
+        numRuns: 60,
+        examples: [
+          // Cache tagged, note not: the tag goes on all the same
+          [['other'], ['ir-article'], 'article'],
+          // Cache tagged, note tagged as another type too: that one comes off
+          [['ir-article', 'ir-card'], ['ir-article'], 'article'],
+          // Cache untagged, note tagged: nothing to write
+          [['ir-text-snippet'], ['other'], 'snippet'],
+        ],
+      }
+    );
+  });
 
   it('adopts nothing, and does nothing to the note, when its type is unknown and none is chosen', async () => {
     const path = 'notes/a.md';

@@ -40,6 +40,12 @@ import { parseSourceLink } from './source-link';
 import type { FrontMatterUpdates, NoteType, PluginFrontMatter } from './types';
 import { binarySearch, generateId } from './utils';
 
+/**
+ * Thrown from a `processFrontMatter` callback that has nothing to change, so
+ * the note is not written (see `ObsidianHelpers.updateFrontMatterIfNeeded`).
+ */
+class NoFrontmatterChange extends Error {}
+
 export class ObsidianHelpers {
   /**
    * Calculate the character offset where the body starts (after frontmatter).
@@ -805,6 +811,39 @@ export class ObsidianHelpers {
         app
       );
     };
+  }
+
+  /**
+   * Run `edit` on `file`'s frontmatter as the note holds it now, and write
+   * what it made of it only when it answers true. What to change is decided
+   * on what the write itself reads from the note, never on the metadata
+   * cache, which can still hold the note as it was a moment ago. A file with
+   * no frontmatter, a PDF say, is left alone.
+   * @returns whether the note was written
+   * @throws what `edit` or the write threw
+   */
+  static async updateFrontMatterIfNeeded(
+    file: TFile,
+    edit: (frontmatter: Record<string, unknown>) => boolean,
+    app: App
+  ): Promise<boolean> {
+    if (!supportsFrontmatter(file)) return false;
+    try {
+      await app.fileManager.processFrontMatter(
+        file,
+        (frontmatter: Record<string, unknown>) => {
+          // A callback that returns always has the note written, its YAML
+          // laid out anew; one that throws never does. `processFrontMatter`
+          // writes through `vault.process`, which writes only once the
+          // callback returns (read from obsidian.asar, not documented)
+          if (!edit(frontmatter)) throw new NoFrontmatterChange();
+        }
+      );
+      return true;
+    } catch (error) {
+      if (error instanceof NoFrontmatterChange) return false;
+      throw error;
+    }
   }
 
   /**

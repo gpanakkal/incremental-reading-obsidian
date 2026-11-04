@@ -694,23 +694,29 @@ async function adopt(
   const others = Object.values(TAG_OF).filter((t) => t !== tag);
   const isOther = (entry: unknown) =>
     others.some((other) => isTag(entry, other));
-  const cached = deps.app.metadataCache.getFileCache(file)?.frontmatter;
-  if (!hasTag(cached, tag) || others.some((other) => hasTag(cached, other))) {
-    await Obsidian.updateFrontMatter(
-      file,
-      (frontmatter) => {
-        // Where Obsidian reads tags from, which is where it reads the others
-        const key = tagsKeyOf(frontmatter);
-        const entries = tagEntries(frontmatter[key]);
-        const kept = entries.filter((entry) => !isOther(entry));
-        frontmatter[key] = withTag(
-          kept.length < entries.length ? kept : frontmatter[key],
-          tag
-        );
-      },
-      deps.app as App
-    );
-  }
+  // Decided on the note as the write reads it: the metadata cache may not
+  // have caught up with an edit made a moment ago
+  await Obsidian.updateFrontMatterIfNeeded(
+    file,
+    (frontmatter) => {
+      if (
+        hasTag(frontmatter, tag) &&
+        !others.some((other) => hasTag(frontmatter, other))
+      ) {
+        return false;
+      }
+      // Where Obsidian reads tags from, which is where it reads the others
+      const key = tagsKeyOf(frontmatter);
+      const entries = tagEntries(frontmatter[key]);
+      const kept = entries.filter((entry) => !isOther(entry));
+      frontmatter[key] = withTag(
+        kept.length < entries.length ? kept : frontmatter[key],
+        tag
+      );
+      return true;
+    },
+    deps.app as App
+  );
   await adoptRow(deps, file, id, type);
 }
 

@@ -370,40 +370,47 @@ function imported(
 }
 
 /**
- * Put the article tag on `file`, which lacks it, keeping its other tags.
+ * Put the article tag on `file` when it lacks it, keeping its other tags.
+ * Whether it lacks it is read off the note as the write reads it, not the
+ * metadata cache, which may not have caught up with an edit made just now.
  * @returns how to take it back: the tags put back as they were, when no one
  *   changed them since; else only the article tag taken off, so the rest of
- *   what changed is kept
+ *   what changed is kept. Null when the note had the tag, so nothing was
+ *   written
  */
 async function tagAsArticle(
   file: TFile,
   app: App
-): Promise<() => Promise<void>> {
-  let was: { value: unknown } | null = null;
-  let wrote: string | undefined;
-  // Where Obsidian reads tags from, or the note would still read as untagged
-  let key = 'tags';
-  await Obsidian.updateFrontMatter(
+): Promise<(() => Promise<void>) | null> {
+  // What the write found under the key it wrote, and what it left there
+  let change = undefined as
+    | { key: string; was: { value: unknown } | null; wrote: string }
+    | undefined;
+  await Obsidian.updateFrontMatterIfNeeded(
     file,
     (frontmatter) => {
-      key = tagsKeyOf(frontmatter);
-      was = Object.hasOwn(frontmatter, key)
+      if (typedAsArticle(frontmatter)) return false;
+      // Where Obsidian reads tags from, or the note would still read as
+      // untagged
+      const key = tagsKeyOf(frontmatter);
+      const was = Object.hasOwn(frontmatter, key)
         ? { value: structuredClone(frontmatter[key]) }
         : null;
       frontmatter[key] = Obsidian._mergeTags(frontmatter[key], ARTICLE_TAG);
-      wrote = JSON.stringify(frontmatter[key]);
+      change = { key, was, wrote: JSON.stringify(frontmatter[key]) };
+      return true;
     },
     app
   );
+  if (!change) return null;
+  const { key, was, wrote } = change;
   return async () => {
-    if (wrote === undefined) return;
-    const before = was;
     await Obsidian.updateFrontMatter(
       file,
       (frontmatter) => {
         if (JSON.stringify(frontmatter[key]) !== wrote) {
           stripFrontmatterTags(frontmatter, [ARTICLE_TAG]);
-        } else if (before) frontmatter[key] = before.value;
+        } else if (was) frontmatter[key] = was.value;
         else delete frontmatter[key];
       },
       app
@@ -952,41 +959,26 @@ export class ArticleManager extends ItemManager {
     // The note's own row, by its id. A deleted one is brought back; a live
     // one whose note lacks the article tag gets it back (see
     // `typedAsArticle`): the note is the article already, tag or no tag
-    if (
-      refMatch &&
-      refMatch.id === existingId &&
-      (refMatch.deleted || !typedAsArticle(frontmatter))
-    ) {
+    if (refMatch && refMatch.id === existingId) {
       const title = getContentSlice(
         file.basename,
         CONTENT_TITLE_SLICE_LENGTH,
         true
       );
+      const { id, deleted } = refMatch;
       return this.relinkAsArticle(
         file,
-        refMatch.id,
-        Boolean(refMatch.deleted),
-        refMatch.deleted
+        id,
+        Boolean(deleted),
+        deleted
           ? `Restored "${title}" as an article`
           : `Put the article tag back on "${title}"`,
         report,
-        writer
+        writer,
+        deleted
+          ? undefined
+          : () => this.alreadyAnArticle(file, id, report, writer)
       );
-    }
-    if (refMatch && refMatch.id === existingId) {
-      // Nothing left to import, but re-running it on an article is the only
-      // way a user can repair snippets and cards stranded by an earlier import.
-      const claimed = await writer.commit(
-        null,
-        this.inPlaceClaim(file, refMatch.id)
-      );
-      await claimed();
-      report.refuse({
-        notice: `Note is already an article; canceling import`,
-        reason: 'already an article',
-        skipped: true,
-      });
-      return null;
     } else if (refMatch) {
       // reference matches, but no ID or ID doesn't match
       // TODO: option to choose any one of the rows matching the id/reference
@@ -1300,6 +1292,8 @@ export class ArticleManager extends ItemManager {
    * {@link typedAsArticle}). A row that can't be saved puts the tag back as it
    * was. Says `message` once done, with an undo for a deleted row brought
    * back, which an undo deletes again.
+   * @param ifTagged run in place of all that when the note has the article
+   *   tag already, as the tag's write finds it, answering what it answers
    * @returns what the import did: `restored` or `linked`
    */
   private async relinkAsArticle(
@@ -1308,20 +1302,21 @@ export class ArticleManager extends ItemManager {
     deleted: boolean,
     message: string,
     report: ImportReport,
-    writer: RowWriter
-  ): Promise<ImportedArticle> {
-    const tagged = typedAsArticle(Obsidian.getFrontMatter(file, this.app));
+    writer: RowWriter,
+    ifTagged?: () => Promise<null>
+  ): Promise<ImportedArticle | null> {
     let untag: (() => Promise<void>) | undefined;
     const claimed = await withCompensation(async (step) => {
-      if (!tagged) {
-        untag = await step(
+      untag =
+        (await step(
           () => tagAsArticle(file, this.app),
-          (undo) => undo()
-        );
-      }
+          (undo) => undo?.()
+        )) ?? undefined;
+      if (!untag && ifTagged) return null;
       // Built once the tag is written, so the fingerprint is the one it left
       return writer.commit(relinkRow(file, id), this.inPlaceClaim(file, id));
     });
+    if (!claimed) return ifTagged ? ifTagged() : null;
     await this.afterImport(
       file.basename,
       'in place',
@@ -1334,6 +1329,29 @@ export class ArticleManager extends ItemManager {
     // Only a row brought back is undone, which takes the tag off with it
     const done = imported(id, deleted ? 'restored' : 'linked');
     return deleted && untag ? { ...done, untag } : done;
+  }
+
+  /**
+   * Refuse to import `file`, the note of the live article `id` and tagged as
+   * one: nothing is left to import. Still claims what an earlier import
+   * stranded, as re-running it on an article is the only way a user can
+   * repair snippets and cards left that way.
+   * @returns null, as the refused import does
+   */
+  private async alreadyAnArticle(
+    file: TFile,
+    id: string,
+    report: ImportReport,
+    writer: RowWriter
+  ): Promise<null> {
+    const claimed = await writer.commit(null, this.inPlaceClaim(file, id));
+    await claimed();
+    report.refuse({
+      notice: `Note is already an article; canceling import`,
+      reason: 'already an article',
+      skipped: true,
+    });
+    return null;
   }
 
   /**

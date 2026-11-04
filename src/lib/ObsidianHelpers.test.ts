@@ -6040,6 +6040,68 @@ describe('updateFrontMatterUndoably', () => {
     );
   });
 
+  it('undoes only the keys it wrote, keeping what changed elsewhere in the note since', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        frontmatterArb,
+        fc.record(
+          {
+            'ir-id': fc.uuid(),
+            tags: fc.subarray([...PLUGIN_TAGS], { minLength: 1 }),
+          },
+          { requiredKeys: [] }
+        ),
+        async (frontmatter, updates) => {
+          const path = 'notes/a.md';
+          const original = frontmatter ?? {};
+          const vault = makeItemVault({ [path]: structuredClone(frontmatter) });
+          const file = vault.files.get(path)!;
+          // The key Obsidian reads tags from, by its rule: the first named
+          // `tags` in any case
+          const tagsKey =
+            Object.keys(original).find((key) => /^tags$/i.test(key)) ?? 'tags';
+
+          const undo = await ObsidianHelpers.updateFrontMatterUndoably(
+            file,
+            updates,
+            vault.app as never
+          );
+          // Keys the update never wrote, or could have: any named `tags` in
+          // any case once it writes tags
+          const unwritten = Object.keys(original).filter(
+            (key) =>
+              !(key in updates) && !('tags' in updates && /^tags$/i.test(key))
+          );
+          // Edited by the user in between: every key the update never wrote,
+          // one it never saw, and the tags when the update left them alone
+          await vault.app.fileManager.processFrontMatter(file, (fm) => {
+            for (const key of unwritten) fm[key] = 'later';
+            fm.later = 1;
+            if (!('tags' in updates)) fm[tagsKey] = ['later'];
+          });
+          await undo();
+
+          expect(vault.frontmatterOf(path)).toEqual({
+            ...original,
+            ...Object.fromEntries(unwritten.map((key) => [key, 'later'])),
+            later: 1,
+            ...('tags' in updates ? {} : { [tagsKey]: ['later'] }),
+          });
+        }
+      ),
+      {
+        examples: [
+          // Tags alone, under a key spelled otherwise
+          [{ Tags: ['mine'] }, { tags: [ARTICLE_TAG] }],
+          // Tags written, and a key that only looks like theirs left alone
+          [{ tags: ['mine'], mytags: ['x'] }, { tags: [ARTICLE_TAG] }],
+          // No tags written, so a later tag edit is kept
+          [{ tags: ['mine'] }, { 'ir-id': 'i' }],
+        ],
+      }
+    );
+  });
+
   it('undoes nothing when the update never ran', async () => {
     const path = 'notes/a.md';
     const vault = makeItemVault({ [path]: { title: 'x' } });
@@ -6072,5 +6134,111 @@ describe('notify', () => {
         expect(notice.hides).toBe(persist ? 0 : 1);
       })
     );
+  });
+});
+
+describe('updateFrontMatterIfNeeded', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  const PATH = 'notes/a.md';
+  const noteArb = frontmatterArb.map((frontmatter) => frontmatter ?? {});
+
+  it('writes nothing, and answers false, when the edit declines, whatever it changed first', async () => {
+    await fc.assert(
+      fc.asyncProperty(noteArb, async (frontmatter) => {
+        const vault = makeItemVault({ [PATH]: structuredClone(frontmatter) });
+        const file = vault.files.get(PATH)!;
+        const mtime = file.stat.mtime;
+
+        const written = await ObsidianHelpers.updateFrontMatterIfNeeded(
+          file,
+          (fm) => {
+            fm.tags = ['changed'];
+            fm.extra = 1;
+            return false;
+          },
+          vault.app as never
+        );
+
+        expect(written).toBe(false);
+        expect(vault.frontmatterOf(PATH)).toEqual(frontmatter);
+        expect(file.stat.mtime).toBe(mtime);
+      })
+    );
+  });
+
+  it('hands the edit what the note holds, and writes what it made of it once, answering true, when it goes ahead', async () => {
+    await fc.assert(
+      fc.asyncProperty(noteArb, async (frontmatter) => {
+        const vault = makeItemVault({ [PATH]: structuredClone(frontmatter) });
+        const file = vault.files.get(PATH)!;
+        const mtime = file.stat.mtime;
+        let seen: unknown;
+
+        const written = await ObsidianHelpers.updateFrontMatterIfNeeded(
+          file,
+          (fm) => {
+            seen = structuredClone(fm);
+            fm.extra = 1;
+            return true;
+          },
+          vault.app as never
+        );
+
+        expect(written).toBe(true);
+        expect(seen).toEqual(frontmatter);
+        expect(vault.frontmatterOf(PATH)).toEqual({ ...frontmatter, extra: 1 });
+        expect(vault.processFrontMatter).toHaveBeenCalledOnce();
+        expect(file.stat.mtime).toBe(mtime + 1);
+      })
+    );
+  });
+
+  it('throws what the edit threw, leaving the note as it was', async () => {
+    const vault = makeItemVault({ [PATH]: { tags: ['a'] } });
+    const file = vault.files.get(PATH)!;
+    const mtime = file.stat.mtime;
+    const failure = new Error('edit failed');
+
+    await expect(
+      ObsidianHelpers.updateFrontMatterIfNeeded(
+        file,
+        (fm) => {
+          fm.tags = ['b'];
+          throw failure;
+        },
+        vault.app as never
+      )
+    ).rejects.toBe(failure);
+    expect(vault.frontmatterOf(PATH)).toEqual({ tags: ['a'] });
+    expect(file.stat.mtime).toBe(mtime);
+  });
+
+  it('throws what the write threw', async () => {
+    const vault = makeItemVault({ [PATH]: { tags: ['a'] } });
+    vault.fail('frontmatter');
+
+    await expect(
+      ObsidianHelpers.updateFrontMatterIfNeeded(
+        vault.files.get(PATH)!,
+        () => true,
+        vault.app as never
+      )
+    ).rejects.toThrow(/frontmatter failed/);
+  });
+
+  it('leaves a file without frontmatter alone, answering false', async () => {
+    const vault = makeItemVault({ 'notes/a.pdf': null });
+    const edit = vi.fn(() => true);
+
+    const written = await ObsidianHelpers.updateFrontMatterIfNeeded(
+      vault.files.get('notes/a.pdf')!,
+      edit,
+      vault.app as never
+    );
+
+    expect(written).toBe(false);
+    expect(edit).not.toHaveBeenCalled();
+    expect(vault.processFrontMatter).not.toHaveBeenCalled();
   });
 });
