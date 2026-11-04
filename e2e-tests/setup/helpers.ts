@@ -8,6 +8,11 @@ import { spawnSync, type ChildProcess } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import type { App } from 'obsidian';
 import * as path from 'path';
+import {
+  cleanupEnabled,
+  createOwnedCopy,
+  testVaultsDir,
+} from './vault-cleanup';
 
 /**
  * Thanks to qawatake for providing an example testing setup
@@ -15,14 +20,19 @@ import * as path from 'path';
  */
 export const appPath = path.resolve('./.obsidian-unpacked/main.js');
 export const sourceVaultPath = path.resolve('./e2e-tests/setup/test-vault');
-export const testVaultsDir = path.resolve('./e2e-tests/test-vaults');
+export { testVaultsDir };
 export const projectRoot = path.resolve('.');
 
 // Disable Chromium sandbox on Linux CI (required for GitHub Actions)
 export const sandboxArg =
   process.platform === 'linux' && process.env.CI ? ['--no-sandbox'] : [];
 
-export const shouldCleanup = process.env.E2E_CLEANUP === '1';
+/**
+ * Whether test vaults are deleted afterwards: always, unless the run sets
+ * `E2E_CLEANUP=0`. Desktop copies are deleted by the fixture in ./fixtures.ts;
+ * this is for state kept elsewhere, like the Android device's vault.
+ */
+export const shouldCleanup = cleanupEnabled();
 
 /**
  * Whether to keep Obsidian's windows off the desktop for this run.
@@ -79,13 +89,16 @@ export async function createVaultCopy(
   adminElevated?: boolean,
   pluginData: object = E2E_PLUGIN_DATA
 ) {
-  await fs.mkdir(testVaultsDir, { recursive: true });
   const id = crypto.randomUUID().slice(0, 8);
   const pathSegments = [testVaultsDir];
   if (subDirectory) pathSegments.push(subDirectory);
   const name = prefix ? `${prefix}-${id}` : id;
   const vaultPath = path.join(...pathSegments, name);
-  await fs.cp(sourceVaultPath, vaultPath, { recursive: true });
+  await createOwnedCopy(
+    vaultPath,
+    (target) => fs.cp(sourceVaultPath, target, { recursive: true }),
+    { keep: !shouldCleanup }
+  );
 
   // Ensure plugin files in the copied vault point to the freshly built plugin.
   // On Unix, the source vault contains symlinks which break after copying
@@ -608,7 +621,7 @@ export async function closeElectron(app: ElectronApplication) {
   ]);
 
   // Last resort. A surviving Electron keeps a lock on the vault directory, so
-  // the cleanup step that follows in afterEach fails on Windows with EBUSY —
+  // deleting it after the test (./fixtures.ts) fails on Windows with EBUSY —
   // and the next test's fresh-vault copy inherits a dirty user-data dir.
   if (proc.exitCode === null) killProcessTree(proc);
 }

@@ -1,8 +1,14 @@
 import { spawnSync } from 'node:child_process';
 import * as path from 'node:path';
+import {
+  cleanupEnabled,
+  sweepStaleCopies,
+  testVaultsDir,
+} from './vault-cleanup';
 
 /**
- * Kills Electron processes that earlier e2e runs left behind.
+ * Kills Electron processes that earlier e2e runs left behind, then deletes the
+ * vault copies nobody owns any more.
  *
  * Electron exits by itself once the worker that launched it dies (see
  * `exitWhenOwnerDies` in ./helpers.ts), but only once that watchdog is in. A
@@ -16,15 +22,29 @@ import * as path from 'node:path';
  * possibly another agent's in the same checkout — so this is safe to run at any
  * time. Matches test vaults in any checkout, not just this one, since the
  * leftovers that matter most are the ones in worktrees nobody is running.
+ *
+ * Vault copies are swept in this checkout only, by the same rule: a copy whose
+ * owning worker is gone (killed mid-test, or one whose own cleanup found it
+ * still locked). At teardown that is every copy this run made, since its
+ * workers have all exited. Skipped under `E2E_CLEANUP=0`, which keeps copies.
  */
-export default function globalCleanup() {
+export default async function globalCleanup() {
   const orphans = findOrphanedElectrons();
-  if (orphans.length === 0) return;
   for (const orphan of orphans) killTree(orphan.pid);
-  console.log(
-    `[e2e] Killed ${orphans.length} orphaned Electron process(es) left by an ` +
-      `earlier run: ${orphans.map((o) => o.pid).join(', ')}`
-  );
+  if (orphans.length > 0) {
+    console.log(
+      `[e2e] Killed ${orphans.length} orphaned Electron process(es) left by an ` +
+        `earlier run: ${orphans.map((o) => o.pid).join(', ')}`
+    );
+  }
+
+  if (!cleanupEnabled()) return;
+  const removed = await sweepStaleCopies(testVaultsDir);
+  if (removed.length > 0) {
+    console.log(
+      `[e2e] Deleted ${removed.length} test vault(s) no running test owns.`
+    );
+  }
 }
 
 interface ProcessInfo {

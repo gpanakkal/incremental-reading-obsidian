@@ -18,7 +18,11 @@ const config = {
     'Take a look at https://stryker-mutator.io/docs/stryker-js/vitest-runner for information about the vitest plugin.',
   mutate: ['src/**/*.ts', '!src/**/*.test.ts', '!src/test/**'],
   ignorePatterns: [
-    'e2e-tests/',
+    // The specs and their vaults are Playwright's; only the Node-side harness
+    // helpers in setup/ have unit tests.
+    'e2e-tests/*',
+    '!e2e-tests/setup/',
+    'e2e-tests/setup/test-vault/',
     'coverage/',
     'docs/',
     'reports/',

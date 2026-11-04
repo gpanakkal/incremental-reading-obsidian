@@ -1,16 +1,11 @@
-import test, {
-  expect,
-  type ElectronApplication,
-  type Page,
-} from '@playwright/test';
-import * as fs from 'node:fs/promises';
+import { expect, type ElectronApplication, type Page } from '@playwright/test';
 import { expectReviewHome, importArticle, openPluginSettings } from './helpers';
+import { test } from './setup/fixtures';
 import {
   closeElectron,
   createVaultCopy,
   launchElectron,
   openVault,
-  shouldCleanup,
 } from './setup/helpers';
 
 let app: ElectronApplication;
@@ -25,13 +20,6 @@ test.beforeEach(async () => {
 
 test.afterEach(async () => {
   if (app) await closeElectron(app);
-  if (shouldCleanup) {
-    // Best-effort, as in core.spec.ts: a surviving Electron child on Windows
-    // can still hold a handle inside the disposable vault.
-    await fs
-      .rm(vaultPath, { recursive: true, force: true, maxRetries: 3 })
-      .catch(() => {});
-  }
 });
 
 const ARTICLE = 'sources/Security Principles';

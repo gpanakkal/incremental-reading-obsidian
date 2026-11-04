@@ -1,4 +1,4 @@
-import test, {
+import {
   expect,
   type ElectronApplication,
   type Locator,
@@ -7,12 +7,12 @@ import test, {
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { executeCommandById, reviewTitle, setNativeMenus } from './helpers';
+import { test } from './setup/fixtures';
 import {
   closeElectron,
   createVaultCopy,
   launchElectron,
   openVault,
-  shouldCleanup,
 } from './setup/helpers';
 
 let app: ElectronApplication;
@@ -27,9 +27,6 @@ test.beforeEach(async () => {
 
 test.afterEach(async () => {
   if (app) await closeElectron(app);
-  if (shouldCleanup) {
-    await fs.rm(vaultPath, { recursive: true, force: true });
-  }
 });
 
 // #region HELPERS

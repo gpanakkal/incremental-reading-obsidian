@@ -1,5 +1,5 @@
 import { ARTICLE_TAG, MAX_SQL_QUERY_PARAMS } from '#/lib/constants';
-import test, {
+import {
   expect,
   type ElectronApplication,
   type Locator,
@@ -36,12 +36,12 @@ import {
   waitForReviewItem,
   type RepoWindow,
 } from './helpers';
+import { test } from './setup/fixtures';
 import {
   closeElectron,
   createVaultCopy,
   launchElectron,
   openVault,
-  shouldCleanup,
 } from './setup/helpers';
 
 let app: ElectronApplication;
@@ -71,15 +71,6 @@ test.beforeEach(async () => {
 
 test.afterEach(async () => {
   if (app) await closeElectron(app);
-  if (shouldCleanup) {
-    // Best-effort. On Windows a surviving Electron child can still hold a
-    // handle inside the vault, and an EBUSY here would fail an otherwise
-    // passing test during cleanup. The vault dir is disposable — the next run
-    // makes a fresh copy — so a leftover is not worth failing over.
-    await fs
-      .rm(vaultPath, { recursive: true, force: true, maxRetries: 3 })
-      .catch(() => {});
-  }
 });
 
 test('Can open the review interface by executing the command', async () => {

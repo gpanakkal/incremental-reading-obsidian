@@ -3,7 +3,7 @@ import {
   DATA_DIRECTORY,
   SNIPPET_TAG,
 } from '#/lib/constants';
-import test, {
+import {
   expect,
   type ElectronApplication,
   type Locator,
@@ -23,12 +23,12 @@ import {
   setPluginSetting,
   watchNotices,
 } from './helpers';
+import { test } from './setup/fixtures';
 import {
   closeElectron,
   createVaultCopy,
   launchElectron,
   openVault,
-  shouldCleanup,
 } from './setup/helpers';
 
 let app: ElectronApplication;
@@ -170,11 +170,6 @@ test.beforeEach(async () => {
 
 test.afterEach(async () => {
   if (app) await closeElectron(app);
-  if (shouldCleanup) {
-    await fs
-      .rm(vaultPath, { recursive: true, force: true, maxRetries: 3 })
-      .catch(() => {});
-  }
 });
 
 test.describe('Importing a note cards were made from', () => {

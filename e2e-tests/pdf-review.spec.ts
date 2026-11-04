@@ -1,6 +1,6 @@
 import { CLOZE_DELIMITERS } from '#/lib/constants';
 import { NOT_PURGED } from '#/lib/items/row-delete';
-import test, {
+import {
   expect,
   type ElectronApplication,
   type Locator,
@@ -22,12 +22,12 @@ import {
   setNativeMenus,
   watchNotices,
 } from './helpers';
+import { test } from './setup/fixtures';
 import {
   closeElectron,
   createVaultCopy,
   launchElectron,
   openVault,
-  shouldCleanup,
 } from './setup/helpers';
 
 let app: ElectronApplication;
@@ -103,11 +103,6 @@ test.beforeEach(async () => {
 
 test.afterEach(async () => {
   if (app) await closeElectron(app);
-  if (shouldCleanup) {
-    await fs
-      .rm(vaultPath, { recursive: true, force: true, maxRetries: 3 })
-      .catch(() => {});
-  }
 });
 
 test.describe('Reviewing a PDF article', () => {

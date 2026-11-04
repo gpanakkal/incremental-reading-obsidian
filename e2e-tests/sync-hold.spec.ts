@@ -5,22 +5,18 @@ import {
   DATABASE_FILE_PATH,
 } from '#/lib/constants';
 import { SYNC_HOLD_MESSAGES, syncExclusionMessage } from '#/lib/obsidian-sync';
-import test, {
-  expect,
-  type ElectronApplication,
-  type Page,
-} from '@playwright/test';
+import { expect, type ElectronApplication, type Page } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import initSqlJs, { type SqlJsStatic } from 'sql.js';
+import { test } from './setup/fixtures';
 import {
   closeElectron,
   createVaultCopy,
   launchElectron,
   openVault,
   projectRoot,
-  shouldCleanup,
 } from './setup/helpers';
 
 let app: ElectronApplication;
@@ -87,11 +83,6 @@ test.afterEach(async () => {
       })
       .catch(() => {});
     await closeElectron(app);
-  }
-  if (shouldCleanup) {
-    await fs
-      .rm(vaultPath, { recursive: true, force: true, maxRetries: 3 })
-      .catch(() => {});
   }
 });
 

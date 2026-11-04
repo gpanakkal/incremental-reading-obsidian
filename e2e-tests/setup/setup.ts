@@ -1,11 +1,10 @@
-import test, { type ElectronApplication } from '@playwright/test';
+import type { ElectronApplication } from '@playwright/test';
+import { test } from './fixtures';
 import {
   closeElectron,
   createVaultCopy,
-  deleteVaultCopy,
   launchElectron,
   openVault,
-  shouldCleanup,
 } from './helpers';
 
 let app: ElectronApplication;
@@ -18,9 +17,6 @@ test.beforeEach(async () => {
 
 test.afterEach(async () => {
   if (app) await closeElectron(app);
-  if (shouldCleanup) {
-    await deleteVaultCopy(vaultPath);
-  }
 });
 
 test('Set up test vault to make plugin ready to use when Obsidian opens', async () => {

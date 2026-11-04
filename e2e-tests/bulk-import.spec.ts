@@ -1,16 +1,11 @@
-import test, {
-  expect,
-  type ElectronApplication,
-  type Page,
-} from '@playwright/test';
-import * as fs from 'node:fs/promises';
+import { expect, type ElectronApplication, type Page } from '@playwright/test';
 import { executeCommandById } from './helpers';
+import { test } from './setup/fixtures';
 import {
   closeElectron,
   createVaultCopy,
   launchElectron,
   openVault,
-  shouldCleanup,
 } from './setup/helpers';
 
 let app: ElectronApplication;
@@ -35,11 +30,6 @@ test.beforeEach(async () => {
 
 test.afterEach(async () => {
   if (app) await closeElectron(app);
-  if (shouldCleanup) {
-    await fs
-      .rm(vaultPath, { recursive: true, force: true, maxRetries: 3 })
-      .catch(() => {});
-  }
 });
 
 test.describe('Bulk import from the review home', () => {

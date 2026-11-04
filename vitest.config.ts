@@ -29,10 +29,15 @@ export default defineConfig({
   },
   test: {
     setupFiles: ['./src/test/obsidian-globals.setup.ts'],
-    include: ['./src/**/*.test.{ts,tsx}'],
+    include: [
+      './src/**/*.test.{ts,tsx}',
+      // Node-side helpers of the e2e harness; the specs themselves are Playwright's.
+      './e2e-tests/setup/**/*.test.ts',
+    ],
     exclude: [
       '**/node_modules/**',
-      '**/e2e-tests/**',
+      '**/e2e-tests/**/*.spec.ts',
+      '**/e2e-tests/test-vaults/**',
       '.stryker-tmp/',
       'src/test/**',
     ],

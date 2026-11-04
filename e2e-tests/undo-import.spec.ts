@@ -4,7 +4,7 @@ import {
   AUTO_IMPORT_TAG,
   DATA_DIRECTORY,
 } from '#/lib/constants';
-import test, {
+import {
   expect,
   type ElectronApplication,
   type Locator,
@@ -20,12 +20,12 @@ import {
   setNativeMenus,
   setPluginSetting,
 } from './helpers';
+import { test } from './setup/fixtures';
 import {
   closeElectron,
   createVaultCopy,
   launchElectron,
   openVault,
-  shouldCleanup,
 } from './setup/helpers';
 
 let app: ElectronApplication;
@@ -82,12 +82,6 @@ test.beforeEach(async () => {
 
 test.afterEach(async () => {
   if (app) await closeElectron(app);
-  if (shouldCleanup) {
-    // Best-effort, as in core.spec.ts: a surviving child can hold a handle
-    await fs
-      .rm(vaultPath, { recursive: true, force: true, maxRetries: 3 })
-      .catch(() => {});
-  }
 });
 
 // #region HELPERS

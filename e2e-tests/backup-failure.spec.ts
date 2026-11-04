@@ -3,22 +3,18 @@ import {
   BACKUP_DIRECTORY,
   DATABASE_FILE_PATH,
 } from '#/lib/constants';
-import test, {
-  expect,
-  type ElectronApplication,
-  type Page,
-} from '@playwright/test';
+import { expect, type ElectronApplication, type Page } from '@playwright/test';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import initSqlJs from 'sql.js';
 import { executeCommandById } from './helpers';
+import { test } from './setup/fixtures';
 import {
   closeElectron,
   createVaultCopy,
   launchElectron,
   openVault,
   projectRoot,
-  shouldCleanup,
 } from './setup/helpers';
 
 let app: ElectronApplication;
@@ -43,11 +39,6 @@ test.beforeEach(async () => {
 
 test.afterEach(async () => {
   if (app) await closeElectron(app);
-  if (shouldCleanup) {
-    await fs
-      .rm(vaultPath, { recursive: true, force: true, maxRetries: 3 })
-      .catch(() => {});
-  }
 });
 
 // #region HELPERS
