@@ -260,6 +260,38 @@ const REDO = process.platform === 'darwin' ? 'Meta+Shift+z' : 'Control+y';
 /** Redo as Electron's Edit menu binds it on every platform. */
 const SHIFT_REDO = 'ControlOrMeta+Shift+z';
 
+/**
+ * Press CodeMirror's redo key with focus in the editor, which answers it with
+ * its own keymap.
+ *
+ * On macOS, Playwright's Cmd+Shift+Z doesn't reach CodeMirror's redo binding
+ * on CI, where Cmd+Z does reach undo: CodeMirror reads a Cmd+Shift+letter key
+ * on macOS from `keyCode` rather than `key` (w3c-keyname, as a real Mac
+ * reports the letter unshifted there). So on macOS this sends the keydown a
+ * real Cmd+Shift+Z makes, which is also what Obsidian's own Edit > Redo menu
+ * item sends the focused element there (read from obsidian.asar 1.15.0).
+ */
+async function pressEditorRedo() {
+  if (process.platform !== 'darwin') {
+    await window.keyboard.press(REDO);
+    return;
+  }
+  await window.evaluate(() => {
+    activeDocument.activeElement?.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        keyCode: 90,
+        which: 90,
+        code: 'KeyZ',
+        key: 'z',
+        metaKey: true,
+        shiftKey: true,
+        bubbles: true,
+        cancelable: true,
+      })
+    );
+  });
+}
+
 /** What holds focus, as the class list of the focused element and where it is. */
 async function focusedElement() {
   return await window.evaluate(() => {
@@ -396,7 +428,7 @@ for (const focusFirst of [true, false]) {
     await window.keyboard.press('ControlOrMeta+z');
     await expect.poll(reviewText, PROMPT).toBe(original);
 
-    await window.keyboard.press(REDO);
+    await pressEditorRedo();
     await expect.poll(reviewText, PROMPT).toContain(BURST);
   });
 }
