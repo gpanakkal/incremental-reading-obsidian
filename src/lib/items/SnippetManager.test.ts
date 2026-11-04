@@ -50,7 +50,7 @@ import type { TFile } from 'obsidian';
 import { resolve } from 'path';
 import initSqlJs, { type Database, type SqlJsStatic } from 'sql.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { tombstoneRowStatements } from './row-delete';
+import { deleteRowStatements, tombstoneRowStatements } from './row-delete';
 import { SnippetManager } from './SnippetManager';
 
 // #region HELPERS
@@ -2972,10 +2972,16 @@ describe('getHighlights for a PDF', () => {
           Number(deleted),
         ]
       );
+    const setArticleDeleted = (id: string, deleted: boolean) =>
+      db.exec('UPDATE article SET deleted = $1 WHERE id = $2', [
+        Number(deleted),
+        id,
+      ]);
     return {
       manager: new SnippetManager({ app: makeApp() } as never, repo),
       insertArticle,
       insertSnippet,
+      setArticleDeleted,
     };
   }
 
@@ -3011,6 +3017,31 @@ describe('getHighlights for a PDF', () => {
       },
     ]);
     expect(manager.offsetTracker.getHighlights(PDF.path)).toEqual(highlights);
+  });
+
+  it("finds the same snippets of the article at the PDF's path whether its row is live or trashed", async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.integer({ min: 1, max: 3 }), async (childCount) => {
+        const shownWhen = async (deleted: boolean) => {
+          const { manager, insertArticle, insertSnippet, setArticleDeleted } =
+            await makePdfManager();
+          insertArticle('pdf-article', PDF.path);
+          for (let i = 0; i < childCount; i++) {
+            insertSnippet(`child-${i}`, 'pdf-article', [
+              1_00000_00000 + i * 10,
+              1_00000_00000 + i * 10 + 5,
+            ]);
+          }
+          setArticleDeleted('pdf-article', deleted);
+          return (await manager.getHighlights(PDF)).map(({ id }) => id);
+        };
+
+        const live = await shownWhen(false);
+        expect(live).toHaveLength(childCount);
+        expect(await shownWhen(true)).toEqual(live);
+      }),
+      { numRuns: 10 }
+    );
   });
 
   it('finds none for a PDF that is no article', async () => {
@@ -5758,6 +5789,182 @@ describe('highlights in a note that lost its type tag', () => {
         }
       ),
       { numRuns: 4 }
+    );
+  });
+});
+
+describe('highlights in a note at the path of its own deleted row', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * The state of the row behind the note at {@link PARENT}, and whether the
+   * note claims it by its `ir-id`. A live row the note does not claim, and a
+   * row deleted for good that it does not claim, leave a tagged note claiming
+   * nothing: the case a type tag still decides (see `getItemType`).
+   */
+  const rowStateArb = fc.constantFrom(
+    { state: 'live' as const, claimsId: true },
+    { state: 'trashed' as const, claimsId: true },
+    { state: 'trashed' as const, claimsId: false },
+    { state: 'purged' as const, claimsId: true }
+  );
+
+  it('shows the live row’s snippets, or with the row deleted only what a plain note would, type tag or not', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom('article' as const, 'snippet' as const),
+        rowStateArb,
+        fc.boolean(),
+        fc.boolean(),
+        fc.integer({ min: 1, max: 3 }),
+        fc.integer({ min: 0, max: 2 }),
+        async (
+          table,
+          { state, claimsId },
+          typeTagged,
+          sourceTagged,
+          childCount,
+          orphanCount
+        ) => {
+          vi.restoreAllMocks();
+          const tags: string[] = [];
+          if (typeTagged) {
+            tags.push(table === 'article' ? ARTICLE_TAG : SNIPPET_TAG);
+          }
+          if (sourceTagged) tags.push(SOURCE_TAG);
+          const parentFm: Record<string, unknown> = { tags };
+          if (claimsId) parentFm['ir-id'] = 'row-1';
+
+          // Every snippet links back to the note it was taken from; the
+          // children name the row as their parent, the orphans none
+          const children = Array.from(
+            { length: childCount },
+            (_, i) => `child-${i}`
+          );
+          const orphans = Array.from(
+            { length: orphanCount },
+            (_, i) => `orphan-${i}`
+          );
+          const notes: Record<string, Record<string, unknown> | null> = {
+            [PARENT]: parentFm,
+          };
+          for (const id of [...children, ...orphans]) {
+            notes[`snippets/${id}.md`] = {
+              'ir-id': id,
+              tags: [SNIPPET_TAG],
+              [SOURCE_PROPERTY_NAME]: `[[${PARENT}]]`,
+            };
+          }
+          const { vault, repo, manager } = await wireSnippets(notes);
+          insertItemAt(repo, table, {
+            id: 'row-1',
+            reference: PARENT,
+            deleted: false,
+          });
+          for (const [i, id] of [...children, ...orphans].entries()) {
+            repo.mutate(
+              `INSERT INTO snippet (id, reference, due, interval, priority, parent, start_offset, end_offset) VALUES ($1, $2, 0, 1, 30, $3, $4, $5)`,
+              [
+                id,
+                `snippets/${id}.md`,
+                children.includes(id) ? 'row-1' : null,
+                i * 10,
+                i * 10 + 5,
+              ]
+            );
+          }
+          // Trashed as another device trashes it, its note not yet gone
+          // here; deleted for good as deleting it does, its snippets freed
+          if (state === 'trashed') {
+            repo.mutate(`UPDATE ${table} SET deleted = TRUE WHERE id = $1`, [
+              'row-1',
+            ]);
+          } else if (state === 'purged') {
+            for (const { query, params } of deleteRowStatements(
+              table,
+              'row-1'
+            )) {
+              repo.mutate(query, params);
+            }
+          }
+
+          const shown = (
+            await manager.getHighlights(vault.files.get(PARENT)!)
+          ).map(({ id }) => id);
+
+          // A plain note shows the parentless snippets taken from it only
+          // when it is a source; a purged row's children are parentless now
+          const parentless =
+            state === 'purged' ? [...children, ...orphans] : orphans;
+          const expected =
+            state === 'live' ? children : sourceTagged ? parentless : [];
+          expect(shown.sort()).toEqual([...expected].sort());
+          repo.dispose();
+        }
+      ),
+      { numRuns: 120 }
+    );
+  });
+
+  it('still finds the snippets taken from a tagged note no live row backs yet, or that moved while unwatched, by their source links', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom('article' as const, 'snippet' as const),
+        // Written before its row is stored, with or without its id yet; or
+        // moved here while no rename handler listened, its row still naming
+        // the old path
+        fc.constantFrom(
+          'unstored' as const,
+          'idless' as const,
+          'moved' as const
+        ),
+        fc.integer({ min: 1, max: 3 }),
+        async (table, how, orphanCount) => {
+          vi.restoreAllMocks();
+          const parentFm: Record<string, unknown> = {
+            tags: [table === 'article' ? ARTICLE_TAG : SNIPPET_TAG],
+          };
+          if (how !== 'idless') parentFm['ir-id'] = 'row-1';
+          const orphans = Array.from(
+            { length: orphanCount },
+            (_, i) => `orphan-${i}`
+          );
+          const notes: Record<string, Record<string, unknown> | null> = {
+            [PARENT]: parentFm,
+          };
+          for (const id of orphans) {
+            notes[`snippets/${id}.md`] = {
+              'ir-id': id,
+              tags: [SNIPPET_TAG],
+              [SOURCE_PROPERTY_NAME]: `[[${PARENT}]]`,
+            };
+          }
+          const { vault, repo, manager } = await wireSnippets(notes);
+          if (how === 'moved') {
+            insertItemAt(repo, table, {
+              id: 'row-1',
+              reference: 'notes/old.md',
+              deleted: false,
+            });
+          }
+          for (const [i, id] of orphans.entries()) {
+            repo.mutate(
+              `INSERT INTO snippet (id, reference, due, interval, priority, start_offset, end_offset) VALUES ($1, $2, 0, 1, 30, $3, $4)`,
+              [id, `snippets/${id}.md`, i * 10, i * 10 + 5]
+            );
+          }
+
+          const shown = (
+            await manager.getHighlights(vault.files.get(PARENT)!)
+          ).map(({ id }) => id);
+
+          expect(shown.sort()).toEqual([...orphans].sort());
+          repo.dispose();
+        }
+      ),
+      { numRuns: 30 }
     );
   });
 });

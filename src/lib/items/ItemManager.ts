@@ -212,6 +212,25 @@ export class ItemManager {
   }
 
   /**
+   * Whether note `file` claims, by its `ir-id` in the metadata cache, a row
+   * that is deleted, trashed or for good, while no live row has that id. The
+   * note is then no item's, whatever type tag it still carries: not a note
+   * written before its row was stored, nor one moved while no rename handler
+   * listened, the two a tag still types (see {@link getItemType}).
+   */
+  protected async claimsDeletedRow(file: TFile): Promise<boolean> {
+    const id = this.typingRowId(file);
+    if (id === null) return false;
+    const rows = (await this.repo.query(
+      `SELECT deleted FROM article WHERE id = $1
+       UNION ALL SELECT deleted FROM snippet WHERE id = $1
+       UNION ALL SELECT deleted FROM srs_card WHERE id = $1`,
+      [id]
+    )) as { deleted: unknown }[];
+    return rows.length > 0 && rows.every(({ deleted }) => Boolean(deleted));
+  }
+
+  /**
    * Call `onWrite` once database writes naming row `id` have landed: once
    * for the writes the repository reports together, as it reports a merge's
    * (each table and kind of write an event of its own, back to back), however

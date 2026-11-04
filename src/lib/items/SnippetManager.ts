@@ -845,8 +845,13 @@ export class SnippetManager extends ItemManager {
       parentEntry = await this.findSnippet(parentFile);
     }
 
-    // For articles/snippets with a DB entry, use the existing parent ID query
-    if (parentEntry) {
+    // For articles/snippets with a live DB entry, use the existing parent ID
+    // query. A note's deleted row has none of its children shown, type tag or
+    // not; a PDF's still does
+    if (
+      parentEntry &&
+      (!parentEntry.deleted || !supportsFrontmatter(parentFile))
+    ) {
       const results = (await this.repo.query(
         'SELECT * FROM snippet WHERE parent = $1 AND start_offset IS NOT NULL AND end_offset IS NOT NULL AND deleted = FALSE',
         [parentEntry.id]
@@ -872,11 +877,14 @@ export class SnippetManager extends ItemManager {
     }
 
     // For source notes, and notes whose tags say item but that no row backs,
-    // find snippets by the source property that names this note
+    // find snippets by the source property that names this note. A note whose
+    // row is deleted, trashed or for good, is backed by none, but is no item
+    // either: it reads as a plain note does, whatever tag it still carries
     if (
       Obsidian.isSourceNote(parentFile, this.app) ||
-      parentType === 'article' ||
-      parentType === 'snippet'
+      ((parentType === 'article' || parentType === 'snippet') &&
+        !parentEntry?.deleted &&
+        !(await this.claimsDeletedRow(parentFile)))
     ) {
       const highlights = await this.getOrphanSnippetHighlights(parentFile);
       return this.#loadHighlights(parentFile.path, highlights);

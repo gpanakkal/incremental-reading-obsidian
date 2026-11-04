@@ -264,6 +264,44 @@ test.describe("An item made from an article's note whose row is in the trash", (
   }
 });
 
+test.describe("Snippet highlights in an article's note whose row is in the trash", () => {
+  test('vanish while the row is trashed, type tag and all, and come back when it is restored', async () => {
+    await openNote(window, 'sources/Security Principles');
+    await executeCommandById(window, 'incremental-reading:import-article');
+    await finalizeArticleImport(window);
+    await openNote(window, 'sources/Security Principles');
+    await selectParagraph(window, BULLET_TEXT);
+    await executeCommandById(window, 'incremental-reading:extract-selection');
+    const painted = window.locator(
+      '.workspace-leaf.mod-active .ir-snippet-highlight'
+    );
+    await expect(painted.first()).toBeVisible();
+
+    // Trashed on another device, its note yet to follow: here the note keeps
+    // its tag and its ir-id, at the row's reference. Then restored there.
+    const setTrashed = (deleted: boolean) =>
+      window.evaluate(
+        async ({ notePath, deleted }) => {
+          const { app } = window as unknown as { app: PageApp };
+          const { repo } =
+            app.plugins.plugins['incremental-reading'].reviewManager;
+          await repo.mutate(
+            'UPDATE article SET deleted = $1 WHERE reference = $2',
+            [deleted, notePath]
+          );
+          await repo.onReloadFromDisk?.();
+        },
+        { notePath: NOTE_PATH, deleted }
+      );
+
+    await setTrashed(true);
+    await expect(painted).toHaveCount(0);
+
+    await setTrashed(false);
+    await expect(painted.first()).toBeVisible();
+  });
+});
+
 test.describe('Importing a note as a copy re-bases its links', () => {
   test('in the relative link format, a relative link and a card embed resolve from the copy as from the original, and Go to context lands on the embed', async () => {
     await setNewLinkFormat(window, 'relative');
