@@ -1,4 +1,4 @@
-import { ARTICLE_TAG } from '#/lib/constants';
+import { ARTICLE_TAG, SNIPPET_TAG } from '#/lib/constants';
 import { expect, type ElectronApplication, type Page } from '@playwright/test';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
@@ -85,9 +85,12 @@ async function writeVaultFile(at: string, content: string) {
     .toBe(true);
 }
 
-/** A note tagged as an article, holding `id`, which no row may hold. */
-const articleNote = (id: string, body: string) =>
-  `---\nir-id: ${id}\ntags: ${ARTICLE_TAG}\n---\n${body}\n`;
+/**
+ * A note tagged `tag`, an article by default, holding `id`, which no row
+ * may hold.
+ */
+const articleNote = (id: string, body: string, tag = ARTICLE_TAG) =>
+  `---\nir-id: ${id}\ntags: ${tag}\n---\n${body}\n`;
 
 /** The leftover modal's line for the note named `name`. */
 const lineOf = (name: string) =>
@@ -157,13 +160,25 @@ test.describe("A leftover at another item's path", () => {
 
   /**
    * Put the snippet `id` at `at`, deleted or not, due `due`, reviewed once,
-   * and a leftover note there holding another id; then open the leftover
-   * modal, save the note as an article, and wait for the question about the
-   * snippet.
+   * and a leftover note there holding another id, tagged `tag`, an article
+   * by default; do `meanwhile`, if given; then open the leftover modal, save
+   * the note as its tag's type, and wait for the question about the snippet.
    */
   async function adoptOverSnippet(
     at: string,
-    { id, deleted, due }: { id: string; deleted: boolean; due: number }
+    {
+      id,
+      deleted,
+      due,
+      tag,
+      meanwhile,
+    }: {
+      id: string;
+      deleted: boolean;
+      due: number;
+      tag?: string;
+      meanwhile?: () => Promise<void>;
+    }
   ) {
     await mutate(
       `INSERT INTO snippet (id, reference, due, interval, priority, deleted)
@@ -175,7 +190,8 @@ test.describe("A leftover at another item's path", () => {
        VALUES ('review-1', $1, $2)`,
       [id, due - 86_400_000]
     );
-    await writeVaultFile(at, articleNote('fictitious', 'Left over'));
+    await writeVaultFile(at, articleNote('fictitious', 'Left over', tag));
+    await meanwhile?.();
     await window.evaluate(() => {
       const { app } = window as unknown as { app: PageApp };
       void app.plugins.plugins['incremental-reading'].leftovers?.manage();
@@ -221,6 +237,29 @@ test.describe("A leftover at another item's path", () => {
     await expect(
       window.locator('#manage-leftovers-button .ir-leftover-count')
     ).toHaveCount(0);
+  });
+
+  test("Re-associate gives a note whose id isn't the live snippet's at its path, and whose bar showed no item, the snippet's bar", async () => {
+    await adoptOverSnippet('notes/Taken.md', {
+      id: 'live-snippet',
+      deleted: false,
+      due: Date.now() - 1_000,
+      // Typed as the row at its path is, so only the id tells them apart
+      tag: SNIPPET_TAG,
+      meanwhile: async () => {
+        await openFileInActiveLeaf(window, 'notes/Taken.md');
+        // The snippet's row is at its path, but the note claims another id
+        await expect(
+          actionBar().locator('.ir-action-bar-status')
+        ).toBeVisible();
+      },
+    });
+
+    await answer('.mod-cta');
+
+    await expect(window.locator('.ir-leftover-modal')).toHaveCount(0);
+    await expect(actionBar().locator('.lucide-ban')).toBeVisible();
+    await expect(actionBar().locator('.ir-action-bar-status')).toHaveCount(0);
   });
 
   test('Erase and import fresh, once confirmed, saves the note as a new article in place of the snippet', async () => {

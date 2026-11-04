@@ -31,7 +31,7 @@ import {
   itemOfNote,
   type RowWrite,
   rowWriteArb,
-  storedArticleAt,
+  storedItemAt,
 } from '#/test/row-writes';
 import {
   showSuccessNotices,
@@ -1482,12 +1482,11 @@ describe('the edit-mode bar on a tagged note whose row comes and goes', () => {
   const tableArb = fc.constantFrom('article', 'snippet', 'srs_card' as const);
   /**
    * A write to the database: one {@link rowWriteArb} makes, or row `x` of a
-   * table dismissed or restored. Row `y` stays off the note's path: the item
-   * is read by path (see `ReviewManager.getReviewItemFromFile`), and a row
-   * the note doesn't claim at its path names nothing the bar watches.
+   * table dismissed or restored. Row `y` may come to the note's path too:
+   * the note claims `x`, so `y` is no row of its own there.
    */
   const writeArb = fc.oneof(
-    rowWriteArb.filter((write) => write.id === 'x' || !write.atNote),
+    rowWriteArb,
     fc.record({ table: tableArb, dismissed: fc.boolean() })
   );
 
@@ -1540,7 +1539,7 @@ describe('the edit-mode bar on a tagged note whose row comes and goes', () => {
               continue;
             }
             expect(faceOf(dismissButton(panel.bar() as HTMLElement))).toBe(
-              faceFor(storedArticleAt(repo, panel.file.path))
+              faceFor(storedItemAt(repo, panel.file.path, 'x'))
             );
           }
           panel.view.destroy();
@@ -1566,6 +1565,36 @@ describe('the edit-mode bar on a tagged note whose row comes and goes', () => {
       reference: ROW_REFERENCE,
       deleted: false,
     });
+    await tick();
+
+    expect(panel.barButtons()).toEqual([DISMISS, PLUGIN_ICON]);
+  });
+
+  it("says it has no row for a live row at its path holding another id, and shows the item once its own id's row is there", async () => {
+    const { panel, repo } = await wireItemNote({
+      table: 'article',
+      row: 'absent',
+      atReference: true,
+      frontmatter: tagged(),
+      realLookup: true,
+    });
+    insertItemAt(repo, 'article', {
+      id: 'y',
+      reference: ROW_REFERENCE,
+      deleted: false,
+    });
+    // A write naming the row the note claims, which has the bar look again
+    insertItemAt(repo, 'snippet', {
+      id: 'x',
+      reference: 'elsewhere/other.md',
+      deleted: false,
+    });
+    await tick();
+    expectStatusText(dismissButton(panel.bar() as HTMLElement));
+
+    repo.mutate(`UPDATE snippet SET reference = $1 WHERE id = 'x'`, [
+      ROW_REFERENCE,
+    ]);
     await tick();
 
     expect(panel.barButtons()).toEqual([DISMISS, PLUGIN_ICON]);
@@ -1968,13 +1997,15 @@ describe('the edit-mode bar on a note its row alone types', () => {
           });
           await tick();
           const query = vi.spyOn(repo, 'query');
-          const claimsId = typeof irId === 'string';
+          // A number claims its string form, a row the write here does not name
+          const claimsId = irId !== undefined;
+          const claimsWritten = irId === 'x';
 
           flagRow(repo, 'article', true);
           await tick();
 
           expect(watchRow).toHaveBeenCalledTimes(claimsId ? 1 : 0);
-          expect(query).toHaveBeenCalledTimes(claimsId ? 1 : 0);
+          expect(query).toHaveBeenCalledTimes(claimsWritten ? 1 : 0);
           expect(panel.workspaceListenerCount(ROWS_RELOADED_EVENT)).toBe(
             claimsId ? 1 : 0
           );

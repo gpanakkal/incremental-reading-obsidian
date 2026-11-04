@@ -49,6 +49,7 @@ import { refreshHighlightsEffect } from '../extensions';
 import { ArticleManager } from './ArticleManager';
 import { idNotIn } from './id-exclusion';
 import { ItemManager } from './ItemManager';
+import { claimedId } from './note-holding';
 import { NOT_PURGED } from './row-delete';
 
 /** A snippet's offsets as its row holds them: none, for one without. */
@@ -1014,7 +1015,7 @@ export class SnippetManager extends ItemManager {
   #stillParentsNote(path: string, id: string): boolean {
     const file = this.app.vault.getFileByPath(path);
     if (!file || !supportsFrontmatter(file)) return true;
-    return Obsidian.getFrontMatter(file, this.app)?.['ir-id'] === id;
+    return claimedId(Obsidian.getFrontMatter(file, this.app)?.['ir-id']) === id;
   }
 
   /**

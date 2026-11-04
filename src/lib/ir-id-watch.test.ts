@@ -383,6 +383,11 @@ describe('readsAsTampering', () => {
     expect(readsAsTampering(at('a1'), [holder('article', 'a1')])).toBe(false);
   });
 
+  it('reads an ir-id YAML reads as a number by its string form, as the note bar does', () => {
+    expect(readsAsTampering(at(7), [holder('article', '7')])).toBe(false);
+    expect(readsAsTampering(at(7), [holder('article', '8')])).toBe(true);
+  });
+
   it('passes over a note carrying an id no row holds', () => {
     // A template or a duplicated file can carry one, and a note the plugin has
     // no row for is not a note it has any business claiming

@@ -1,5 +1,11 @@
 import type { ArticleManager } from '#/lib/items/ArticleManager';
 import type { CardManager } from '#/lib/items/CardManager';
+import {
+  claimedId,
+  claimsIdAt,
+  holdingOf,
+  type IdHolder,
+} from '#/lib/items/note-holding';
 import { NOT_PURGED, purgedReference } from '#/lib/items/row-delete';
 import type { SnippetManager } from '#/lib/items/SnippetManager';
 import type { ItemTable } from '#/lib/moved-note-scan';
@@ -25,8 +31,10 @@ import { stripFrontmatterTags } from './tags';
 import type { NoteType, SQLiteRepository } from './types';
 
 /**
- * Crash leftovers: notes holding an `ir-id` that no row holds, tagged with an
- * item type or not. Making an item writes its note before its row, the row being
+ * Crash leftovers: notes holding an `ir-id` that no live row at their path
+ * holds, tagged with an item type or not, copies aside (see `note-holding`,
+ * the rule the note bar reads a note by too, so a note it shows no item for
+ * is listed here). Making an item writes its note before its row, the row being
  * the commit point (see `withCompensation`), and a failure between the two is
  * undone; but a crash or a kill between them skips the undo, and leaves the
  * note. Nothing else reads such a note as an item — the moved-note scan looks
@@ -273,16 +281,17 @@ const TAG_OF: Readonly<Record<NoteType, string>> = {
 };
 
 /**
- * The `ir-id` the cache has for `file`, if any, and the item type its tags
- * name, if they name one. Tag-only by design: a leftover is a note no row
- * holds, so its tags are the only type it claims.
+ * The `ir-id` the cache has for `file`, if it claims one a row can hold (see
+ * `claimedId`), and the item type its tags name, if they name one. Tag-only
+ * by design: a leftover is a note no row holds, so its tags are the only type
+ * it claims.
  */
 function claimOf(
   app: Pick<App, 'metadataCache'>,
   file: TFile
 ): { id: string; type: NoteType | null } | null {
   const frontmatter = app.metadataCache.getFileCache(file)?.frontmatter;
-  const id: unknown = frontmatter?.['ir-id'];
+  const id = claimedId(frontmatter?.['ir-id']);
   const type = typeOfTags(frontmatter);
   return typeof id === 'string' ? { id, type } : null;
 }
@@ -343,22 +352,24 @@ interface Claim {
 /**
  * Of `claims`, those of leftovers, each with whether a row holds its id or
  * its path at all, deleted or not. A note is a leftover unless a live row
- * holding its id
- * points at it (its row) or elsewhere (a copy's original, or a row the
- * moved-note scan has yet to follow, neither of which takes this note),
- * though one whose path a row holding another id holds is one even then. So
- * a note whose id only deleted rows hold is one: its note was moved where the
- * plugin saw only a delete and a create, say, as a move outside Obsidian
- * while it runs is. A row deleted for good holds no id and no path here.
+ * holding its id points at it (its row), or points where a note holding the
+ * id is (a copy's original) while no live row holding another id holds the
+ * note's path (see `holdingOf`): a copy sitting where another item's note
+ * should be is asked about, with that row as its holder.
+ * So a note whose id only deleted rows hold is one: its note was moved where
+ * the plugin saw only a delete and a create, say, as a move outside Obsidian
+ * while it runs is. So is one whose id's live row points where no note
+ * holding the id is, and one at a path a row holding another id holds while
+ * no row holds its id. A row deleted for good holds no id and no path here.
  */
 async function leftoverClaims<C extends Claim>(
-  repo: SQLiteRepository,
+  { app, repo }: Pick<LeftoverDeps, 'app' | 'repo'>,
   claims: readonly C[]
 ): Promise<{ claim: C; rowed: boolean }[]> {
   /** Each id's rows not deleted for good, by whether each is live. */
-  const rowsOf = new Map<string, { reference: string; live: boolean }[]>();
-  /** The ids of the rows at each path. */
-  const idsAt = new Map<string, string[]>();
+  const rowsOf = new Map<string, IdHolder[]>();
+  /** The rows at each path, by id and whether each is live. */
+  const rowsAt = new Map<string, { id: string; live: boolean }[]>();
   for (let i = 0; i < claims.length; i += MAX_SQL_QUERY_PARAMS) {
     const batch = claims.slice(i, i + MAX_SQL_QUERY_PARAMS);
     const marks = batch.map((_, j) => `$${j + 1}`).join(', ');
@@ -373,22 +384,29 @@ async function leftoverClaims<C extends Claim>(
         rowsOf.set(id, [...(rowsOf.get(id) ?? []), { reference, live }]);
       }
       const atPath = (await repo.query(
-        `SELECT id, reference FROM ${table} WHERE reference IN (${marks})`,
+        `SELECT id, reference, deleted FROM ${table} WHERE reference IN (${marks})`,
         batch.map(({ path }) => path),
         { throwOnError: true }
-      )) as unknown as { id: string; reference: string }[];
-      for (const { id, reference } of atPath) {
-        idsAt.set(reference, [...(idsAt.get(reference) ?? []), id]);
+      )) as unknown as { id: string; reference: string; deleted: unknown }[];
+      for (const { id, reference, deleted } of atPath) {
+        const at = { id, live: !deleted };
+        rowsAt.set(reference, [...(rowsAt.get(reference) ?? []), at]);
       }
     }
   }
   return claims.flatMap((claim) => {
     const rows = rowsOf.get(claim.id) ?? [];
-    const live = rows.filter((row) => row.live);
-    if (live.some((row) => row.reference === claim.path)) return [];
-    const taken = (idsAt.get(claim.path) ?? []).some((id) => id !== claim.id);
-    if (live.length > 0 && !taken) return [];
-    return [{ claim, rowed: rows.length > 0 || taken }];
+    const others = (rowsAt.get(claim.path) ?? []).filter(
+      ({ id }) => id !== claim.id
+    );
+    const holding = holdingOf(
+      claim.path,
+      rows,
+      (reference) => claimsIdAt(app, reference, claim.id),
+      others.some(({ live }) => live)
+    );
+    if (holding !== 'unheld') return [];
+    return [{ claim, rowed: rows.length > 0 || others.length > 0 }];
   });
 }
 
@@ -623,13 +641,13 @@ export function failureDetail(failure: LeftoverFailure): string {
 export async function findLeftovers(
   deps: Pick<LeftoverDeps, 'app' | 'repo'>
 ): Promise<Leftover[]> {
-  const { app, repo } = deps;
+  const { app } = deps;
   const claims = app.vault.getMarkdownFiles().flatMap((file) => {
     const claim = claimOf(app, file);
     return claim ? [{ file, path: file.path, ...claim }] : [];
   });
   const leftovers: Leftover[] = [];
-  for (const { claim, rowed } of await leftoverClaims(repo, claims)) {
+  for (const { claim, rowed } of await leftoverClaims(deps, claims)) {
     const { file, id, type } = claim;
     const leftover: Leftover = { file, id, ...placeOf(file.path, type) };
     // Looked up only for the few whose id or path a row holds
@@ -767,17 +785,18 @@ async function adoptFresh(
 
 /**
  * Whether `leftover` is one still: its note where it was, holding the same id,
- * which no row holds.
+ * which no live row at its path holds, and no copy (see {@link leftoverClaims}).
  */
 async function isLeftover(
-  { app, repo }: Pick<LeftoverDeps, 'app' | 'repo'>,
+  deps: Pick<LeftoverDeps, 'app' | 'repo'>,
   { file, id }: Leftover
 ): Promise<boolean> {
+  const { app } = deps;
   const claim =
     app.vault.getFileByPath(file.path) === file ? claimOf(app, file) : null;
   return (
     claim?.id === id &&
-    (await leftoverClaims(repo, [{ path: file.path, id }])).length === 1
+    (await leftoverClaims(deps, [{ path: file.path, id }])).length === 1
   );
 }
 

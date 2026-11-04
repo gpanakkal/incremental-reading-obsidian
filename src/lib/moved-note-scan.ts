@@ -1,3 +1,4 @@
+import { claimedId } from '#/lib/items/note-holding';
 import {
   normalizePath,
   type MetadataCache,
@@ -440,11 +441,10 @@ export async function scanForMovedNotes({
 }: MovedNoteScanDeps): Promise<Relocation[]> {
   const breathe = pacer(pause, now, sliceMs, signal);
 
-  const irIdOf = (file: TFile) => {
-    const irId: unknown =
-      metadataCache.getFileCache(file)?.frontmatter?.['ir-id'];
-    return typeof irId === 'string' ? irId : undefined;
-  };
+  // Read as every reader reads it (see `claimedId`)
+  const irIdOf = (file: TFile) =>
+    claimedId(metadataCache.getFileCache(file)?.frontmatter?.['ir-id']) ??
+    undefined;
   // `getFileByPath` is a bare lookup: normalized as `ObsidianHelpers.getNote`
   // does it, or the scan disagrees with every other reader about a reference
   const noteAt: NoteAt = (path) => {

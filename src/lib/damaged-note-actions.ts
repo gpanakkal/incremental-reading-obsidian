@@ -1,3 +1,4 @@
+import { claimedId } from '#/lib/items/note-holding';
 import {
   normalizePath,
   type FileManager,
@@ -141,7 +142,9 @@ export function createDamagedNoteActions({
       if (!file || !cache) return false;
       const before = await liveAt(path);
       if (before.length !== 1) return false;
-      if (cache.frontmatter?.['ir-id'] === before[0].id) return true;
+      if (claimedId(cache.frontmatter?.['ir-id']) === before[0].id) {
+        return true;
+      }
       // A merge under way may be bringing a database that moves the row
       if (await refusedAction(repo, `restore the ir-id of "${file.name}"`)) {
         return false;
@@ -158,7 +161,7 @@ export function createDamagedNoteActions({
           // The file as it is now, which the cache may not have caught up
           // with: put back already, there is nothing to write
           carries = true;
-          if (frontmatter['ir-id'] === row.id) return;
+          if (claimedId(frontmatter['ir-id']) === row.id) return;
           reassociatedFrontmatter(frontmatter, row);
         }
       );

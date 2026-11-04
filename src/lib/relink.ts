@@ -1,3 +1,4 @@
+import { claimedId } from '#/lib/items/note-holding';
 import type IncrementalReadingPlugin from '#/main';
 import type { App, TFile } from 'obsidian';
 import { refusedPathWarning } from './item-path-guard';
@@ -215,10 +216,7 @@ export function vaultReader(app: App): RelinkVault<TFile> {
           | undefined)
       : undefined;
   return {
-    irIdOf: (file) => {
-      const irId = frontmatterOf(file)?.['ir-id'];
-      return typeof irId === 'string' ? irId : undefined;
-    },
+    irIdOf: (file) => claimedId(frontmatterOf(file)?.['ir-id']) ?? undefined,
     taggedTableOf: (file) => {
       const frontmatter = frontmatterOf(file);
       return (

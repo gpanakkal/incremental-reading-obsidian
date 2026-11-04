@@ -76,6 +76,7 @@ import {
 } from './ArticleManager';
 import { type CardSelection, CardManager } from './CardManager';
 import { type FileMove, followSourceLinks } from './follow-source-links';
+import { claimedId } from './note-holding';
 import { deleteRowStatements, NOT_PURGED, purgedReference } from './row-delete';
 import { SnippetManager } from './SnippetManager';
 
@@ -98,12 +99,12 @@ const refusedAt = (path: string) =>
   refusedCharsIn(path).length > 0 ? path : null;
 
 /**
- * The `ir-id` a note's frontmatter holds. An id is a string; anything else
- * there, a number say, matches no row by id, so it counts as no id.
+ * The `ir-id` a note's frontmatter holds, as every reader takes it (see
+ * `claimedId`): a number by its string form; a list or a map, which no row
+ * can hold, as no id.
  */
 function irIdOf(frontmatter: Record<string, unknown>): string | undefined {
-  const id = frontmatter['ir-id'];
-  return typeof id === 'string' ? id : undefined;
+  return claimedId(frontmatter['ir-id']) ?? undefined;
 }
 
 /** An item row's reading position, and which table the row is in. */
@@ -773,33 +774,42 @@ export default class ReviewManager {
   }
 
   /**
-   * Fetches a ReviewItem given a file.
-   * Returns null if the item is not found in the database, or its row there
-   * is deleted: the queue leaves a tombstone out, and so do review and the
-   * note bar, which go by this (0228).
+   * Fetches a ReviewItem given a file: the item of the live row the note is
+   * the note of, by its path and the `ir-id` it claims (see
+   * `ItemManager.findHeldRow`). Returns null for a note of no item type, one
+   * no live row holds by both, a row at its path holding another id or one
+   * holding its id elsewhere being none, and a tombstone's: the queue leaves
+   * a tombstone out, and so do review and the note bar, which go by this. A
+   * note claiming an id and shown nothing here is a leftover the
+   * leftover scan lists, unless it is a copy on a path no live row holds
+   * (see `crash-leftovers`).
    */
   async getReviewItemFromFile(file: TFile): Promise<ReviewItem | null> {
     const noteType = await this.articles.getItemType(file);
-    if (noteType === 'article') {
-      const row = await this.articles.findArticle(file);
-      if (!row || row.deleted) return null;
+    if (!noteType) return null;
+    const manager =
+      noteType === 'article'
+        ? this.articles
+        : noteType === 'snippet'
+          ? this.snippets
+          : this.cards;
+    const held = await manager.findHeldRow(file, noteType);
+    if (!held) return null;
+    if (held.table === 'article') {
       return {
-        data: ArticleManager.rowToBase(row),
+        data: ArticleManager.rowToBase(held.row as ArticleRow),
         file,
       } satisfies ReviewArticle;
-    } else if (noteType === 'snippet') {
-      const row = await this.snippets.findSnippet(file);
-      if (!row || row.deleted) return null;
+    } else if (held.table === 'snippet') {
       return {
-        data: SnippetManager.rowToBase(row),
+        data: SnippetManager.rowToBase(held.row as SnippetRow),
         file,
       } satisfies ReviewSnippet;
-    } else if (noteType === 'card') {
-      const row = await this.cards.findCard(file);
-      if (!row || row.deleted) return null;
-      return { data: CardManager.rowToDisplay(row), file } satisfies ReviewCard;
     }
-    return null;
+    return {
+      data: CardManager.rowToDisplay(held.row as SRSCardRow),
+      file,
+    } satisfies ReviewCard;
   }
   /**
    * Fetches a ReviewItem.

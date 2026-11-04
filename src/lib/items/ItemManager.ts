@@ -4,7 +4,6 @@ import {
   SOURCE_INDEX_TIMEOUT_MS,
   SOURCE_PROPERTY_NAME,
 } from '#/lib/constants';
-import { claimsIdentity } from '#/lib/ir-id-watch';
 import IRScheduler from '#/lib/IRScheduler';
 import { supportsFrontmatter } from '#/lib/mime';
 import type { ItemTable } from '#/lib/moved-note-scan';
@@ -48,6 +47,7 @@ import {
   type TFile,
 } from 'obsidian';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
+import { claimedId, claimsIdAt, heldRowOf, holdingOf } from './note-holding';
 import {
   notedLog,
   planUndo,
@@ -140,8 +140,63 @@ export class ItemManager {
   }
 
   /**
+   * The live row `file`, typed `type` (see {@link getItemType}), is the note
+   * of, with its table, or `null` for none. A note claiming an id is the note
+   * of the live row holding that id at its path, of whichever table (see
+   * `note-holding`), the tag not deciding which row the note holds: a row at
+   * its path holding another id, or one holding its id elsewhere, is none. A
+   * note claiming a list or a map, which no row can hold, has none. A note
+   * claiming none, or a file with no frontmatter, a PDF say, is known by its
+   * path alone: the live row of `type`'s table there.
+   */
+  async findHeldRow(
+    file: TFile,
+    type: NoteType
+  ): Promise<{
+    row: SnippetRow | SRSCardRow | ArticleRow;
+    table: Extract<TableName, 'srs_card' | 'snippet' | 'article'>;
+  } | null> {
+    const table: ItemTable = type === 'card' ? 'srs_card' : type;
+    const claimed = supportsFrontmatter(file)
+      ? claimedId(
+          this.app.metadataCache.getFileCache(file)?.frontmatter?.['ir-id']
+        )
+      : undefined;
+    if (claimed === null) return null;
+    if (claimed === undefined) {
+      const row =
+        table === 'article'
+          ? await this.findArticle(file)
+          : table === 'snippet'
+            ? await this.findSnippet(file)
+            : await this.findCard(file);
+      return row && !row.deleted ? { row, table } : null;
+    }
+    // Where the id's live rows point, one look by primary key per table, as
+    // `#heldType` looks; then the held row's columns
+    const holders = (await this.repo.query(
+      `SELECT 'article' AS item_table, reference FROM article WHERE id = $1 AND deleted = FALSE
+       UNION ALL SELECT 'snippet', reference FROM snippet WHERE id = $1 AND deleted = FALSE
+       UNION ALL SELECT 'srs_card', reference FROM srs_card WHERE id = $1 AND deleted = FALSE`,
+      [claimed]
+    )) as unknown as { item_table: ItemTable; reference: string }[];
+    const held = heldRowOf(
+      file.path,
+      holders.map((holder) => ({ ...holder, live: true }))
+    );
+    if (!held) return null;
+    const [row] = (await this.repo.query(
+      `SELECT * FROM ${held.item_table} WHERE id = $1 AND reference = $2 AND deleted = FALSE`,
+      [claimed, file.path]
+    )) as (SnippetRow | SRSCardRow | ArticleRow)[];
+    return row ? { row, table: held.item_table } : null;
+  }
+
+  /**
    * The type of item `file` is, if any. The note at a row's reference is that
-   * row's note iff it carries its id, tag or no tag. So a note carrying no type
+   * row's note iff it carries its id, tag or no tag (see `note-holding`, the
+   * rule the note bar's row and the leftover scan go by too, so a typed note
+   * the bar finds no row for is a leftover). So a note carrying no type
    * tag is typed by the live row its `ir-id` names while that row's
    * `reference` is the note's own path. A tagged note is typed by its tag, as
    * `getNoteType` reads it, unless it is a copy: its `ir-id` names a live row
@@ -207,8 +262,7 @@ export class ItemManager {
     file: TFile,
     cache: CachedMetadata | null = this.app.metadataCache.getFileCache(file)
   ): string | null {
-    const id: unknown = cache?.frontmatter?.['ir-id'];
-    return typeof id === 'string' ? id : null;
+    return claimedId(cache?.frontmatter?.['ir-id']) ?? null;
   }
 
   /**
@@ -268,7 +322,7 @@ export class ItemManager {
     cache: CachedMetadata | null,
     tagged: NoteType | null
   ): NoteType | null | Promise<NoteType | null> {
-    const id: unknown = cache?.frontmatter?.['ir-id'];
+    const id = claimedId(cache?.frontmatter?.['ir-id']);
     if (typeof id !== 'string') return tagged;
     if (this.app.vault.getFileByPath(file.path) !== file) return null;
     // One lookup by primary key per table
@@ -279,22 +333,24 @@ export class ItemManager {
       [id]
     );
     const typeOf = (found: RowTypes[]): NoteType | null => {
-      const live = found as unknown as { type: NoteType; reference: string }[];
-      const held = live.find(({ reference }) => reference === file.path);
+      const live = (
+        found as unknown as { type: NoteType; reference: string }[]
+      ).map((row) => ({ ...row, live: true }));
+      const held = heldRowOf(file.path, live);
       if (held) return tagged ?? held.type;
-      const copy = live.some(({ reference }) => this.#claimsAt(reference, id));
-      return copy ? null : tagged;
+      // A copy is no item wherever it sits, so the type hangs on the claimed
+      // id's rows alone, the one row the bars watch (see `typingRowId`): one
+      // sitting at a path a live row holding another id holds has no bar, as
+      // a copy elsewhere, and the leftover scan lists it (see `holdingOf`)
+      const holding = holdingOf(
+        file.path,
+        live,
+        (reference) => claimsIdAt(this.app, reference, id),
+        false
+      );
+      return holding === 'copy' ? null : tagged;
     };
     return Array.isArray(rows) ? typeOf(rows) : rows.then(typeOf);
-  }
-
-  /** Whether the vault holds a note at `path` whose `ir-id` is `id`. */
-  #claimsAt(path: string, id: string): boolean {
-    const note = this.app.vault.getFileByPath(path);
-    if (!note) return false;
-    const claimed: unknown =
-      this.app.metadataCache.getFileCache(note)?.frontmatter?.['ir-id'];
-    return claimed === id;
   }
 
   async findById(id: string): Promise<{
@@ -484,7 +540,7 @@ export class ItemManager {
       frontmatter: Record<string, unknown> | undefined
     ): string | null => {
       // A note at the path that is not the row's own: see `reconcileNote`
-      if (frontmatter?.['ir-id'] !== id) return null;
+      if (!frontmatter || claimedId(frontmatter['ir-id']) !== id) return null;
       const source = frontmatter[SOURCE_PROPERTY_NAME];
       if (typeof source !== 'string') return null;
       const link = parseSourceLink(source);
@@ -616,12 +672,9 @@ export class ItemManager {
     if (!this.app.metadataCache.getFileCache(file)) return true;
 
     const frontmatter = Obsidian.getFrontMatter(file, this.app);
-    const fileId: unknown = frontmatter?.['ir-id'];
-    const relation: IrIdRelation = !claimsIdentity(fileId)
-      ? 'none'
-      : fileId === row.id
-        ? 'same'
-        : 'other';
+    const fileId = claimedId(frontmatter?.['ir-id']);
+    const relation: IrIdRelation =
+      fileId === undefined ? 'none' : fileId === row.id ? 'same' : 'other';
     const action = reconcileAction({
       noteMtime: noteFingerprint(file),
       rowMtime: row.note_mtime ?? null,

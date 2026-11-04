@@ -62,6 +62,7 @@ import {
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
 import { idNotIn } from './id-exclusion';
 import { ItemManager } from './ItemManager';
+import { claimedId } from './note-holding';
 import { cardAfterUndo } from './review-undo';
 import { NOT_PURGED } from './row-delete';
 import SRSCard from './SRSCard';
@@ -830,8 +831,8 @@ export class CardManager extends ItemManager {
     const note = Obsidian.getNote(row.reference, this.app);
     if (!note) return null;
     const frontmatter = Obsidian.getFrontMatter(note, this.app);
-    const id = frontmatter?.['ir-id'];
-    if (id && id !== row.id) return null;
+    const id = claimedId(frontmatter?.['ir-id']);
+    if (id !== undefined && id !== row.id) return null;
     const source = frontmatter?.[SOURCE_PROPERTY_NAME];
     if (typeof source !== 'string') return null;
     const range = parseSelectionSubpath(parseSourceLink(source)?.subpath ?? '');

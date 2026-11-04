@@ -7,7 +7,7 @@ import {
   tombstoneRowStatements,
 } from '#/lib/items/row-delete';
 import { SnippetManager } from '#/lib/items/SnippetManager';
-import { evictedSpot } from '#/lib/moved-note-scan';
+import { evictedSpot, holdersOf } from '#/lib/moved-note-scan';
 import { makeItemVault, TestRepository } from '#/test/item-vault';
 import {
   frontmatterArb,
@@ -16,6 +16,7 @@ import {
   tagsValueArb,
 } from '#/test/obsidian-tags';
 import fc from 'fast-check';
+import type { TFile } from 'obsidian';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   ARTICLE_TAG,
@@ -39,6 +40,7 @@ import {
   leftoversMessage,
   resolveLeftover,
 } from './crash-leftovers';
+import { readsAsTampering } from './ir-id-watch';
 import { typeOfTags } from './item-tags';
 import { ObsidianHelpers as Obsidian } from './ObsidianHelpers';
 
@@ -122,6 +124,18 @@ const noteArb = fc.record({
 });
 type NoteCase = typeof noteArb extends fc.Arbitrary<infer T> ? T : never;
 
+/**
+ * The id a note's `ir-id` claims, spelled out: none for a falsy value or a
+ * list, a string as it is, any other scalar (a number, a boolean) by its
+ * string form.
+ */
+const idClaimed = (irId: unknown): string | null =>
+  !irId || typeof irId === 'object'
+    ? null
+    : typeof irId === 'string'
+      ? irId
+      : `${irId as number | boolean}`;
+
 const pathOf = (note: NoteCase, i: number) => `${note.folder}notes/n${i}.md`;
 
 /** The type a note's tags name, as `typeOfTags` ranks them. */
@@ -189,26 +203,18 @@ async function wireNotes(notes: NoteCase[]) {
   const repo = resetSharedRepo();
   const inserted = new Set<string>();
   for (const [i, note] of notes.entries()) {
-    if (note.hasRow && typeof note.id === 'string' && !inserted.has(note.id)) {
-      // Under another path, and maybe another table: the row holds the id
-      // wherever its note is
-      insertRow(
-        repo,
-        note.rowType,
-        note.id,
-        `elsewhere/${i}.md`,
-        note.deletedRow
-      );
+    const id = idClaimed(note.id);
+    if (note.hasRow && id !== null && !inserted.has(id)) {
+      // At the note's path, in any table: the row holds the note whatever
+      // its tags say. Later notes holding the id are copies of this one
+      insertRow(repo, note.rowType, id, pathOf(note, i), note.deletedRow);
       if (note.purgedRow) {
         const table = note.rowType === 'card' ? 'srs_card' : note.rowType;
-        for (const { query, params } of tombstoneRowStatements(
-          table,
-          note.id
-        )) {
+        for (const { query, params } of tombstoneRowStatements(table, id)) {
           repo.mutate(query, params);
         }
       }
-      inserted.add(note.id);
+      inserted.add(id);
     }
   }
   const plugin = { app: vault.app, settings: {} } as never;
@@ -399,26 +405,20 @@ const WORLD_PATHS = [
 ] as const;
 
 /**
- * Notes at some of a few paths, each holding one of a few ids, tagged any
- * way, and rows of any table holding those ids or another, at those paths or
- * another, live, deleted or deleted for good: one row per id and per path
- * in each table, as `id` and `reference` are unique in each.
+ * Rows of any table holding a {@link worldArb} world's ids or another, at
+ * `paths`, live, deleted or deleted for good: one row per id and per path in
+ * each table, as `id` and `reference` are unique in each.
  */
-const worldArb = fc.record({
-  notes: fc.uniqueArray(
-    fc.record({
-      path: fc.constantFrom(...WORLD_PATHS),
-      id: fc.constantFrom(...WORLD_IDS),
-      tags: leftoverTagsArb,
-    }),
-    { maxLength: 3, selector: ({ path }) => path }
-  ),
-  rows: fc
+function worldRowsArb(
+  paths: readonly string[],
+  ids: readonly string[] = [...WORLD_IDS, 'c']
+) {
+  return fc
     .array(
       fc.record<WorldRow>({
         kind: typeArb,
-        id: fc.constantFrom(...WORLD_IDS, 'c'),
-        path: fc.constantFrom(...WORLD_PATHS, 'gone/s.md'),
+        id: fc.constantFrom(...ids),
+        path: fc.constantFrom(...paths),
         state: fc.constantFrom('live', 'deleted', 'purged'),
       }),
       { maxLength: 4 }
@@ -434,17 +434,71 @@ const worldArb = fc.record({
                 (other.id === row.id || other.path === row.path)
             )
       )
-    ),
+    );
+}
+
+/**
+ * Notes at some of a few paths, each holding one of a few ids, tagged any
+ * way, and rows (see {@link worldRowsArb}) at those paths or another.
+ */
+const worldArb = fc.record({
+  notes: fc.uniqueArray(
+    fc.record({
+      path: fc.constantFrom(...WORLD_PATHS),
+      id: fc.constantFrom(...WORLD_IDS),
+      tags: leftoverTagsArb,
+    }),
+    { maxLength: 3, selector: ({ path }) => path }
+  ),
+  rows: worldRowsArb([...WORLD_PATHS, 'gone/s.md']),
 });
 type World = typeof worldArb extends fc.Arbitrary<infer T> ? T : never;
 
+/** The PDF a {@link barWorldArb} world may hold. */
+const WORLD_PDF = 'docs/d.pdf';
+
+/**
+ * A {@link worldArb} world whose notes' `ir-id` may also be missing, empty
+ * or a number (as YAML reads `ir-id: 7`), which rows may hold by its string
+ * form, with a PDF, which has no frontmatter, or not, and rows at its path
+ * too.
+ */
+const barWorldArb = fc.record({
+  notes: fc.uniqueArray(
+    fc.record({
+      path: fc.constantFrom(...WORLD_PATHS),
+      id: fc.constantFrom<string | number | undefined>(
+        ...WORLD_IDS,
+        undefined,
+        '',
+        7
+      ),
+      tags: leftoverTagsArb,
+    }),
+    { maxLength: 3, selector: ({ path }) => path }
+  ),
+  pdf: fc.boolean(),
+  rows: worldRowsArb(
+    [...WORLD_PATHS, WORLD_PDF, 'gone/s.md'],
+    [...WORLD_IDS, '7', 'c']
+  ),
+});
+
 /** A vault and {@link sharedRepo} holding `world`, and managers over them. */
-function wireWorld(world: World) {
-  const vault = makeItemVault(
-    Object.fromEntries(
-      world.notes.map(({ path, id, tags }) => [path, { 'ir-id': id, tags }])
-    )
-  );
+function wireWorld(world: {
+  notes: readonly { path: string; id: unknown; tags: string[] }[];
+  rows: readonly WorldRow[];
+  pdf?: boolean;
+}) {
+  const vault = makeItemVault({
+    ...Object.fromEntries(
+      world.notes.map(({ path, id, tags }) => [
+        path,
+        id === undefined ? { tags } : { 'ir-id': id, tags },
+      ])
+    ),
+    ...(world.pdf ? { [WORLD_PDF]: null } : {}),
+  });
   const repo = resetSharedRepo();
   for (const row of world.rows) {
     insertRow(repo, row.kind, row.id, row.path, row.state !== 'live');
@@ -753,7 +807,7 @@ describe('findLeftovers', () => {
     vi.restoreAllMocks();
   });
 
-  it('finds every note whose ir-id no live row holds, tagged as an item or not, and no other', async () => {
+  it('finds every note whose ir-id no live row holds, tagged as an item or not, and no other, an empty ir-id claiming none and a number claiming its string form', async () => {
     await fc.assert(
       fc.asyncProperty(fc.array(noteArb, { maxLength: 8 }), async (notes) => {
         vi.restoreAllMocks();
@@ -765,16 +819,18 @@ describe('findLeftovers', () => {
         const held = new Set<string>();
         const seen = new Set<string>();
         for (const note of notes) {
-          if (!note.hasRow || typeof note.id !== 'string') continue;
-          if (seen.has(note.id)) continue;
-          seen.add(note.id);
-          if (!note.purgedRow && !note.deletedRow) held.add(note.id);
+          const id = idClaimed(note.id);
+          if (!note.hasRow || id === null) continue;
+          if (seen.has(id)) continue;
+          seen.add(id);
+          if (!note.purgedRow && !note.deletedRow) held.add(id);
         }
-        const expected = notes.flatMap((note, i) =>
-          typeof note.id === 'string' && !held.has(note.id)
-            ? [{ path: pathOf(note, i), id: note.id }]
-            : []
-        );
+        const expected = notes.flatMap((note, i) => {
+          const id = idClaimed(note.id);
+          return id !== null && !held.has(id)
+            ? [{ path: pathOf(note, i), id }]
+            : [];
+        });
         expect(found.map(({ file, id }) => ({ path: file.path, id }))).toEqual(
           expected
         );
@@ -793,7 +849,7 @@ describe('findLeftovers', () => {
         const found = await findLeftovers(deps);
 
         const expected = rowless.flatMap((note) =>
-          typeof note.id === 'string'
+          idClaimed(note.id) !== null
             ? [typeOf(note) ?? typeOfFolder(note.folder)]
             : []
         );
@@ -1441,8 +1497,9 @@ describe('resolveLeftover', () => {
         'snippet',
         path
       );
-      // A row for it arrived meanwhile, say with the database from Sync
-      insertRow(repo, 'snippet', 'left-1', 'elsewhere.md');
+      // A row for it at its path arrived meanwhile, say with the database
+      // from Sync
+      insertRow(repo, 'snippet', 'left-1', path);
 
       expect(await resolveLeftover(deps, leftover, action)).toEqual({
         done: false,
@@ -2265,7 +2322,7 @@ describe('findLeftovers of moved notes', () => {
     vi.restoreAllMocks();
   });
 
-  it("lists a note whose id no live row holds, or whose path a row holding another id holds while its id's row is elsewhere, typed as the row holding its id, which it is matched with, else, typeless, as the row at its path", async () => {
+  it('lists a note no live row holds by both its path and its id, unless a live row holding its id points at a note holding it too while no live row holding another id holds its path (a copy), typed as the row holding its id, which it is matched with, else, typeless, as the row at its path', async () => {
     await fc.assert(
       fc.asyncProperty(worldArb, async (world) => {
         const { deps } = wireWorld(world);
@@ -2278,11 +2335,19 @@ describe('findLeftovers of moved notes', () => {
           const own = live.some(
             (row) => row.id === note.id && row.path === note.path
           );
-          const elsewhere = live.some((row) => row.id === note.id);
-          const atPath = kept.some(
+          const taken = live.some(
             (row) => row.path === note.path && row.id !== note.id
           );
-          if (own || (elsewhere && !atPath)) return [];
+          const copy =
+            !taken &&
+            live.some(
+              (row) =>
+                row.id === note.id &&
+                world.notes.some(
+                  (other) => other.path === row.path && other.id === note.id
+                )
+            );
+          if (own || copy) return [];
           const { target } = expectedPlan(world, note.path, note.id);
           const match = target?.by === 'id' ? target : null;
           const holder = target?.by === 'path' ? target : null;
@@ -2361,9 +2426,12 @@ describe('findLeftovers of moved notes', () => {
     }
   });
 
-  it('leaves out a note whose id a live row holds elsewhere though a deleted row of another table holding the same id is at its path', async () => {
+  it('leaves out a copy of the note a live row holding its id points at, though a deleted row of another table holding the same id is at its path', async () => {
     const { deps } = wireWorld({
-      notes: [{ path: 'notes/p.md', id: 'a', tags: [] }],
+      notes: [
+        { path: 'notes/p.md', id: 'a', tags: [] },
+        { path: 'notes/q.md', id: 'a', tags: [] },
+      ],
       rows: [
         { kind: 'article', id: 'a', path: 'notes/q.md', state: 'live' },
         { kind: 'snippet', id: 'a', path: 'notes/p.md', state: 'deleted' },
@@ -2371,6 +2439,47 @@ describe('findLeftovers of moved notes', () => {
     });
 
     expect(await findLeftovers(deps)).toEqual([]);
+  });
+
+  it('lists a note whose id a live row holds at a path no note holding it is at, matched with that row', async () => {
+    for (const kind of KIND_RANK) {
+      vi.restoreAllMocks();
+      const { leftover } = await wireMoved({ kind, live: true, choice: null });
+
+      expect(leftover).toMatchObject({
+        id: MOVED_ID,
+        type: kind,
+        match: {
+          kind,
+          id: MOVED_ID,
+          deleted: false,
+          reference: 'notes/old.md',
+        },
+      });
+    }
+  });
+
+  it('lists a copy of the note a live row holding its id points at while a live row holding another id is at its path, with that row as its holder, and leaves it out while only a deleted one is', async () => {
+    for (const deleted of [false, true]) {
+      vi.restoreAllMocks();
+      const { leftover } = await wireMoved({
+        kind: 'article',
+        live: true,
+        original: true,
+        pathRow: { kind: 'snippet', deleted },
+        choice: null,
+      });
+
+      if (deleted) {
+        expect(leftover).toBeUndefined();
+      } else {
+        expect(leftover).toMatchObject({
+          id: MOVED_ID,
+          holder: { kind: 'snippet', id: HOLDER_ID, deleted: false },
+        });
+        expect(leftover?.match).toBeUndefined();
+      }
+    }
   });
 
   it("lists a note moved while Obsidian was closed, its row deleted before, as one of its row's type the user made, matched with that row", async () => {
@@ -2385,12 +2494,171 @@ describe('findLeftovers of moved notes', () => {
   });
 });
 
+describe('findLeftovers and the note bar', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('lists exactly the notes the bar shows no item for, copies of a live note on a path no live row holds aside, and a tagged note says it has no row exactly when it is listed', async () => {
+    await fc.assert(
+      fc.asyncProperty(worldArb, async (world) => {
+        const { vault, repo, deps } = wireWorld(world);
+        const reviews = new ReviewManager(
+          { app: vault.app, settings: {} } as never,
+          repo
+        );
+
+        const listed = new Set(
+          (await findLeftovers(deps)).map(({ file }) => file.path)
+        );
+
+        const live = world.rows.filter((row) => row.state === 'live');
+        for (const note of world.notes) {
+          const file = vault.files.get(note.path)!;
+          const item = await reviews.getReviewItemFromFile(file);
+          const type = await reviews.articles.getItemType(file);
+          const held = live.some(
+            (row) => row.id === note.id && row.path === note.path
+          );
+          const taken = live.some(
+            (row) => row.path === note.path && row.id !== note.id
+          );
+          const copy =
+            !held &&
+            !taken &&
+            live.some(
+              (row) =>
+                row.id === note.id &&
+                world.notes.some(
+                  (other) => other.path === row.path && other.id === note.id
+                )
+            );
+          expect(listed.has(note.path)).toBe(item === null && !copy);
+          if (typeOfTags({ tags: note.tags })) {
+            // A tagged note's bar says it has no row: typed, with no item;
+            // a copy has no bar wherever it sits, listed on a path a live row
+            // holds
+            const copyAnywhere =
+              !held &&
+              live.some(
+                (row) =>
+                  row.id === note.id &&
+                  world.notes.some(
+                    (other) => other.path === row.path && other.id === note.id
+                  )
+              );
+            expect(type !== null && item === null).toBe(
+              listed.has(note.path) && !copyAnywhere
+            );
+          }
+        }
+      }),
+      { numRuns: 200 }
+    );
+  });
+
+  it('agrees with the bar, the item type and the ir-id watch on every note however its ir-id is written, a number read by its string form, rechecks a leftover by the same rule, and lists no PDF', async () => {
+    await fc.assert(
+      fc.asyncProperty(barWorldArb, async (world) => {
+        const { vault, repo, deps } = wireWorld(world);
+        const reviews = new ReviewManager(
+          { app: vault.app, settings: {} } as never,
+          repo
+        );
+        const leftovers = await findLeftovers(deps);
+        const listed = new Set(leftovers.map(({ file }) => file.path));
+        const liveAt = (path: string) =>
+          world.rows.filter((row) => row.state === 'live' && row.path === path);
+        const claimers: { file: TFile; id: string }[] = [];
+
+        for (const note of world.notes) {
+          const file = vault.files.get(note.path)!;
+          const item = await reviews.getReviewItemFromFile(file);
+          const type = await reviews.articles.getItemType(file);
+          const tagged = typeOfTags({ tags: note.tags });
+          const holders = await holdersOf(repo, [note.path]);
+          const tampered = readsAsTampering(
+            { path: note.path, irId: note.id },
+            holders.get(note.path) ?? []
+          );
+          if (note.id) {
+            // The id it claims, a number by its string form
+            const id = String(note.id);
+            claimers.push({ file, id });
+            const held = liveAt(note.path).some((row) => row.id === id);
+            const taken = liveAt(note.path).some((row) => row.id !== id);
+            // A copy's original: a note claiming the id where a live row
+            // holding it points; a note there claiming another id, or none,
+            // is not one. A copy on a path a live row holds is listed
+            const copy =
+              !held &&
+              !taken &&
+              world.rows.some(
+                (row) =>
+                  row.state === 'live' &&
+                  row.id === id &&
+                  world.notes.some(
+                    (other) =>
+                      other.path === row.path &&
+                      other.id !== undefined &&
+                      String(other.id) === id
+                  )
+              );
+            expect(listed.has(note.path)).toBe(!held && !copy);
+            expect(item?.data.id ?? null).toBe(held ? id : null);
+            if (!tagged) expect(type !== null).toBe(item !== null);
+            // The ir-id watch says a live row at the path holding another id
+            // had its id typed over exactly as the bar shows that row no face
+            expect(tampered).toBe(taken);
+          } else {
+            expect(listed.has(note.path)).toBe(false);
+            expect(type !== null).toBe(tagged !== null);
+            // No claim: known by its path, as the row of its tag's table. One
+            // that lost its id, the watch's other case, keeps that row's bar
+            const row = liveAt(note.path).find((at) => at.kind === type);
+            expect(item?.data.id ?? null).toBe(row?.id ?? null);
+          }
+        }
+
+        if (world.pdf) {
+          const pdf = vault.files.get(WORLD_PDF)!;
+          const item = await reviews.getReviewItemFromFile(pdf);
+          const type = await reviews.articles.getItemType(pdf);
+          expect(listed.has(WORLD_PDF)).toBe(false);
+          expect(item !== null).toBe(type !== null);
+          if (item) {
+            expect(liveAt(WORLD_PDF).map(({ id }) => id)).toContain(
+              item.data.id
+            );
+          }
+        }
+
+        // The recheck before a write resolves no note but a listed one
+        for (const { file, id } of claimers) {
+          if (listed.has(file.path)) continue;
+          const outcome = await resolveLeftover(
+            deps,
+            { file, id, type: null, kind: 'in-place' },
+            'strip'
+          );
+          expect(outcome.done).toBe(false);
+        }
+        const [first] = leftovers;
+        if (first) {
+          expect((await resolveLeftover(deps, first, 'strip')).done).toBe(true);
+        }
+      }),
+      { numRuns: 200 }
+    );
+  });
+});
+
 describe('resolveLeftover of a note moved away from its row', () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
-  it("re-associates the note with its row: the row live at the note's path with its schedule and history, the row's id and type tag in the note, a deleted row at the path moved aside, nothing else changed", async () => {
+  it("re-associates the note with its row, deleted or live with no note holding its id where it points: the row live at the note's path with its schedule and history, the row's id and type tag in the note, a deleted row at the path moved aside, nothing else changed", async () => {
     await fc.assert(
       fc.asyncProperty(
         typeArb,
@@ -2398,13 +2666,15 @@ describe('resolveLeftover of a note moved away from its row', () => {
         typeArb,
         fc.constantFrom('notes/new.md', `${DATA_DIRECTORY}/x/new.md`),
         fc.option(typeArb, { nil: null }),
-        async (kind, tags, as, at, deletedAtPath) => {
+        fc.boolean(),
+        async (kind, tags, as, at, deletedAtPath, live) => {
           vi.restoreAllMocks();
           const { vault, repo, deps, leftover, ask, purge, table } =
             await wireMoved({
               kind,
               at,
               tags,
+              live,
               pathRow: deletedAtPath && { kind: deletedAtPath, deleted: true },
               choice: 'reassociate',
             });
@@ -2452,6 +2722,28 @@ describe('resolveLeftover of a note moved away from its row', () => {
       ),
       { numRuns: 30 }
     );
+  });
+
+  it('does nothing, asking nothing and saying nothing, to a note that became a copy since it was found: a note holding its id came to where its live row points', async () => {
+    const { vault, repo, deps, leftover, notify, ask } = await wireMoved({
+      kind: 'snippet',
+      live: true,
+      choice: 'reassociate',
+    });
+    const original = vault.add('notes/old.md');
+    await vault.app.fileManager.processFrontMatter(original, (frontmatter) => {
+      frontmatter['ir-id'] = MOVED_ID;
+    });
+    const stored = repo.dump();
+    const frontmatter = structuredClone(vault.frontmatterOf('notes/new.md'));
+
+    const outcome = await resolveLeftover(deps, leftover, 'adopt', 'snippet');
+
+    expect(outcome).toEqual({ done: false });
+    expect(ask).not.toHaveBeenCalled();
+    expect(notify).not.toHaveBeenCalled();
+    expect(repo.dump()).toBe(stored);
+    expect(vault.frontmatterOf('notes/new.md')).toEqual(frontmatter);
   });
 
   it('asks about the row holding its id, and with no answer writes nothing and says nothing, answering that the user backed out', async () => {

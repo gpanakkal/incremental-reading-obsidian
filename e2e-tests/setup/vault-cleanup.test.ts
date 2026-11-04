@@ -44,15 +44,15 @@ function makeSleep() {
 
 let root: string;
 
-async function makeDir(name: string) {
-  const dir = path.join(root, name);
+async function makeDir(name: string, under = root) {
+  const dir = path.join(under, name);
   await fs.mkdir(path.join(dir, 'nested'), { recursive: true });
   await fs.writeFile(path.join(dir, 'nested', 'note.md'), 'body');
   return dir;
 }
 
-async function listRoot() {
-  return (await fs.readdir(root)).sort();
+async function listRoot(dir = root) {
+  return (await fs.readdir(dir)).sort();
 }
 
 const copyName = fc
@@ -252,9 +252,12 @@ describe('removeWithRetry', () => {
 
 describe('claimCopy / readOwner', () => {
   it('only ever puts a complete marker at the final path', async () => {
+    // A run still going after a timeout writes here, never into a later
+    // test's root
+    const base = root;
     await fc.assert(
       fc.asyncProperty(copyName, ownerRecord, async (name, record) => {
-        const vaultPath = path.join(root, name);
+        const vaultPath = path.join(base, name);
         const marker = ownerFile(vaultPath);
         const writes: string[] = [];
         const renames: [string, string, unknown][] = [];
@@ -276,14 +279,14 @@ describe('claimCopy / readOwner', () => {
         expect(writes).not.toContain(marker);
         expect(writes).toHaveLength(1);
         expect(renames).toEqual([[writes[0], marker, record]]);
-        expect(path.dirname(writes[0])).toBe(root);
+        expect(path.dirname(writes[0])).toBe(base);
         expect(await readOwner(vaultPath)).toEqual(record);
         // The temporary file is gone, leaving only the marker.
-        expect(await listRoot()).toEqual([path.basename(marker)]);
+        expect(await listRoot(base)).toEqual([path.basename(marker)]);
         await fs.rm(marker);
       })
     );
-  });
+  }, 30_000);
 
   it('shows a sweep running mid-write nothing to read or delete', async () => {
     const vaultPath = path.join(root, 'core-0123abcd');
@@ -310,29 +313,35 @@ describe('claimCopy / readOwner', () => {
   });
 
   it('records who owns a copy beside it, before the copy exists', async () => {
+    // A run still going after a timeout writes here, never into a later
+    // test's root
+    const base = root;
     await fc.assert(
       fc.asyncProperty(copyName, ownerRecord, async (name, record) => {
-        const vaultPath = path.join(root, name);
+        const vaultPath = path.join(base, name);
         await claimCopy(vaultPath, record);
         expect(existsSync(vaultPath)).toBe(false);
-        expect(path.dirname(ownerFile(vaultPath))).toBe(root);
+        expect(path.dirname(ownerFile(vaultPath))).toBe(base);
         expect(await readOwner(vaultPath)).toEqual(record);
         await fs.rm(ownerFile(vaultPath));
       })
     );
-  });
+  }, 30_000);
 
   it('reads no owner from a missing or unreadable marker', async () => {
+    // A run still going after a timeout writes here, never into a later
+    // test's root
+    const base = root;
     await fc.assert(
       fc.asyncProperty(copyName, markerSpec, async (name, marker) => {
         fc.pre(marker.kind !== 'record');
-        const vaultPath = path.join(root, name);
+        const vaultPath = path.join(base, name);
         await writeMarker(vaultPath, marker);
         expect(await readOwner(vaultPath)).toBeNull();
         await fs.rm(ownerFile(vaultPath), { force: true });
       })
     );
-  });
+  }, 30_000);
 
   it('reads no owner from a marker of the wrong shape', async () => {
     const vaultPath = path.join(root, 'core-0123abcd');
@@ -352,28 +361,32 @@ describe('claimCopy / readOwner', () => {
 });
 
 describe('sweepStaleCopies', () => {
+  // Real disk work per run: under a loaded full suite 40 runs can outlast the
+  // default 5s, and a timed-out property keeps running in the background
   it('removes copies nobody owns any more and keeps the rest', async () => {
+    // Each run works in a directory of its own under this test's root, so a
+    // run still going after a timeout never writes into a later test's root
+    const base = root;
     await fc.assert(
       fc.asyncProperty(
         fc.uniqueArray(entrySpec, { selector: (e) => e.name, maxLength: 6 }),
         async (entries) => {
-          await fs.rm(root, { recursive: true, force: true });
-          await fs.mkdir(root);
+          const dir = await fs.mkdtemp(path.join(base, 'run-'));
           const alive = new Map<number, boolean>();
           for (const entry of entries) {
-            const vaultPath = path.join(root, entry.name);
+            const vaultPath = path.join(dir, entry.name);
             await writeMarker(vaultPath, entry.marker);
-            if (entry.hasDir) await makeDir(entry.name);
+            if (entry.hasDir) await makeDir(entry.name, dir);
             if (entry.marker.kind === 'record')
               alive.set(entry.marker.pid, entry.ownerAlive);
           }
           // Not a test copy: never touched, whoever owns it.
-          await makeDir('codegen');
-          await fs.writeFile(path.join(root, 'notes.txt'), 'x');
+          await makeDir('codegen', dir);
+          await fs.writeFile(path.join(dir, 'notes.txt'), 'x');
 
           // Two entries can share a pid; the last one set wins for both.
           const isAlive = (pid: number) => alive.get(pid) ?? false;
-          const removed = await sweepStaleCopies(root, { isAlive });
+          const removed = await sweepStaleCopies(dir, { isAlive });
 
           const stale = (marker: MarkerSpec) =>
             marker.kind !== 'record' || (!marker.keep && !isAlive(marker.pid));
@@ -383,18 +396,19 @@ describe('sweepStaleCopies', () => {
             if (entry.hasDir) expected.add(entry.name);
             expected.add(path.basename(ownerFile(entry.name)));
           }
-          expect(await listRoot()).toEqual([...expected].sort());
+          expect(await listRoot(dir)).toEqual([...expected].sort());
           expect([...removed].sort()).toEqual(
             entries
               .filter((e) => e.hasDir && stale(e.marker))
               .map((e) => e.name)
               .sort()
           );
+          await fs.rm(dir, { recursive: true, force: true });
         }
       ),
       { numRuns: 40 }
     );
-  });
+  }, 30_000);
 
   it('keeps a copy and its marker when the copy cannot be removed yet', async () => {
     await makeDir('core-0123abcd');
@@ -451,6 +465,9 @@ describe('sweepStaleCopies', () => {
 
 describe('createOwnedCopy', () => {
   it('owns and tracks the copy before any of it exists', async () => {
+    // A run still going after a timeout writes here, never into a later
+    // test's root
+    const base = root;
     await fc.assert(
       fc.asyncProperty(
         fc.option(fc.stringMatching(/^[a-z]{1,8}$/), { nil: undefined }),
@@ -458,8 +475,8 @@ describe('createOwnedCopy', () => {
         ownerRecord,
         async (subDirectory, name, record) => {
           const vaultPath = subDirectory
-            ? path.join(root, subDirectory, name)
-            : path.join(root, name);
+            ? path.join(base, subDirectory, name)
+            : path.join(base, name);
           const tracker = new CopyTracker();
           const seen: unknown[] = [];
           await createOwnedCopy(
@@ -472,13 +489,13 @@ describe('createOwnedCopy', () => {
                 await readOwner(target),
                 tracker.takeSince(0)
               );
-              await makeDir(path.relative(root, target));
+              await makeDir(path.relative(base, target), base);
             },
             { ...record, tracker }
           );
           expect(seen).toEqual([vaultPath, false, record, [vaultPath]]);
           expect(existsSync(vaultPath)).toBe(true);
-          await fs.rm(path.join(root, subDirectory ?? name), {
+          await fs.rm(path.join(base, subDirectory ?? name), {
             recursive: true,
             force: true,
           });
@@ -487,7 +504,7 @@ describe('createOwnedCopy', () => {
       ),
       { numRuns: 20 }
     );
-  });
+  }, 30_000);
 
   it('leaves a copy that failed partway owned and tracked', async () => {
     const vaultPath = path.join(root, 'core-0123abcd');

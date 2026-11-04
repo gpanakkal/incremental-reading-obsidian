@@ -74,18 +74,24 @@ export function itemOfNote(
 }
 
 /**
- * Whether the live article row at `path` is dismissed, or `null` for none,
- * read straight from the table rather than through the plugin's lookup: what
- * the bar on a note tagged as an article at `path` owes the database, while
- * no row of another id stands at that path.
+ * Whether the live row holding `id` at `path` is dismissed, or `null` for
+ * none, read straight from the tables rather than through the plugin's
+ * lookup: what the bar on a note at `path` claiming `id` owes the database. A
+ * row at `path` holding another id, or one holding `id` elsewhere, is no
+ * row of the note's. Of rows of two tables there, an article's comes first,
+ * then a snippet's, as the plugin ranks them.
  */
-export function storedArticleAt(
+export function storedItemAt(
   repo: TestRepository,
-  path: string
+  path: string,
+  id: string
 ): boolean | null {
-  const [row] = repo.query(
-    'SELECT dismissed FROM article WHERE reference = $1 AND deleted = FALSE',
-    [path]
-  ) as unknown as { dismissed: unknown }[];
-  return row ? Boolean(row.dismissed) : null;
+  for (const table of ['article', 'snippet', 'srs_card']) {
+    const [row] = repo.query(
+      `SELECT dismissed FROM ${table} WHERE id = $1 AND reference = $2 AND deleted = FALSE`,
+      [id, path]
+    ) as unknown as { dismissed: unknown }[];
+    if (row) return Boolean(row.dismissed);
+  }
+  return null;
 }

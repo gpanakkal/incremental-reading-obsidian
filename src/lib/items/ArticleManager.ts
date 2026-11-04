@@ -83,6 +83,7 @@ import type { WebPage } from '#/lib/web-viewer';
 import { Keymap, type App, type TFile } from 'obsidian';
 import { idNotIn } from './id-exclusion';
 import { ItemManager } from './ItemManager';
+import { claimedId } from './note-holding';
 import { deleteRowStatements, NOT_PURGED } from './row-delete';
 import type { SnippetManager } from './SnippetManager';
 
@@ -938,7 +939,7 @@ export class ArticleManager extends ItemManager {
 
     const frontmatter = Obsidian.getFrontMatter(file, this.app);
     // Re-associate if the file already carries an ir-id
-    const existingId = frontmatter?.['ir-id'];
+    const existingId = claimedId(frontmatter?.['ir-id']) ?? undefined;
     // The rows first: a note with a snippet's or card's tag at the path of
     // one, though not claiming its id, is offered to it as an untagged one is
     const holders = await this.snippetOrCardHolders(file, existingId);
@@ -1818,7 +1819,7 @@ export class ArticleManager extends ItemManager {
 
     const frontmatter = Obsidian.getFrontMatter(file, this.app);
     // Re-associate if the source already carries an ir-id with a matching DB row
-    const existingId = frontmatter?.['ir-id'];
+    const existingId = claimedId(frontmatter?.['ir-id']) ?? undefined;
     // A copy of a snippet's or card's note is no article either, as the
     // import in place refuses one; only that import offers to make a stray
     // note the item's note again (see `reassociateOrRefuse`)
@@ -2700,9 +2701,10 @@ export function liveArticleLookup(
 ): { sql: string; params: string[] } | null {
   // A file with no frontmatter has no cache entry to carry one. Read as
   // `reconcileNote` reads it: anything falsy claims no id
-  const id: unknown =
-    app.metadataCache.getFileCache(file)?.frontmatter?.['ir-id'];
-  if (!id) {
+  const id = claimedId(
+    app.metadataCache.getFileCache(file)?.frontmatter?.['ir-id']
+  );
+  if (id === undefined) {
     return {
       sql: 'SELECT id FROM article WHERE reference = $1 AND deleted = FALSE',
       params: [file.path],
@@ -2732,5 +2734,5 @@ export function ownNoteKeepsRow(
   if (reference === path) return false;
   const file = app.vault.getFileByPath(reference);
   if (!file) return false;
-  return Obsidian.getFrontMatter(file, app)?.['ir-id'] === id;
+  return claimedId(Obsidian.getFrontMatter(file, app)?.['ir-id']) === id;
 }

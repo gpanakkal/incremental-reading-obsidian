@@ -9117,8 +9117,8 @@ describe('unimportMany', () => {
             seedArticle(repo, 'a', path, { deleted: true, reviews: 1 });
           }
           if (kind === 'non-string id at a live row') {
-            // A truthy id is a claim, and one no row's string id answers
-            seedArticle(repo, '7', path, { reviews: 1 });
+            // A number claims its string form, which this row doesn't hold
+            seedArticle(repo, '8', path, { reviews: 1 });
           }
           if (kind === 'copy') {
             // A copy of the article's note carries its id; the row, its

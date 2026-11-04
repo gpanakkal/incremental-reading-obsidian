@@ -1,3 +1,4 @@
+import { claimedId } from '#/lib/items/note-holding';
 import {
   MarkdownView,
   normalizePath,
@@ -28,8 +29,8 @@ export interface NoteClaim {
  *
  * Read exactly as `ArticleManager.rowToReviewArticle` and its siblings read it —
  * anything falsy is no claim — so the two paths cannot disagree about the same
- * note. A truthy value of the wrong type (a number the user typed in) is a claim,
- * and one no row can answer, since row ids are strings.
+ * note. A truthy value of another type (a number the user typed in) is a claim
+ * too, read by its string form (see `claimedId`).
  */
 export function claimsIdentity(irId: unknown): boolean {
   return Boolean(irId);
@@ -55,9 +56,10 @@ export function readsAsTampering(
   holders: readonly Holder[]
 ): boolean {
   const live = holders.filter((holder) => !holder.deleted);
+  const claimed = claimedId(claim.irId);
   // A tombstone holding the path has no note of its own there to have lost one
-  if (!claimsIdentity(claim.irId)) return live.length > 0;
-  return live.some((holder) => holder.id !== claim.irId);
+  if (claimed === undefined) return live.length > 0;
+  return live.some((holder) => holder.id !== claimed);
 }
 
 /**

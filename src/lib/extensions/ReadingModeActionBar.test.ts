@@ -16,7 +16,7 @@ import {
   itemOfNote,
   type RowWrite,
   rowWriteArb,
-  storedArticleAt,
+  storedItemAt,
 } from '#/test/row-writes';
 import ReviewView from '#/views/ReviewView';
 import fc from 'fast-check';
@@ -1352,13 +1352,15 @@ describe('registerReadingModeActionBar', () => {
             registerReadingModeActionBar(plugin as never);
             await flush();
             const query = vi.spyOn(repo, 'query');
-            const claimsId = typeof irId === 'string';
+            // A number claims its string form, a row the write here does not name
+            const claimsId = irId !== undefined;
+            const claimsWritten = irId === 'x';
 
             flagRow(repo, 'article', true);
             await flush();
 
             expect(watchRow).toHaveBeenCalledTimes(claimsId ? 1 : 0);
-            expect(query).toHaveBeenCalledTimes(claimsId ? 1 : 0);
+            expect(query).toHaveBeenCalledTimes(claimsWritten ? 1 : 0);
             plugin.runCleanup();
             watchRow.mockRestore();
           }
@@ -1531,12 +1533,11 @@ describe('registerReadingModeActionBar', () => {
     const tableArb = fc.constantFrom('article', 'snippet', 'srs_card' as const);
     /**
      * A write to the database: one {@link rowWriteArb} makes, or row `x` of a
-     * table dismissed or restored. Row `y` stays off the note's path: the
-     * item is read by path (see `ReviewManager.getReviewItemFromFile`), and a
-     * row the note doesn't claim at its path names nothing the bar watches.
+     * table dismissed or restored. Row `y` may come to the note's path too:
+     * the note claims `x`, so `y` is no row of its own there.
      */
     const writeArb = fc.oneof(
-      rowWriteArb.filter((write) => write.id === 'x' || !write.atNote),
+      rowWriteArb,
       fc.record({ table: tableArb, dismissed: fc.boolean() })
     );
 
@@ -1590,7 +1591,7 @@ describe('registerReadingModeActionBar', () => {
                 continue;
               }
               expect(faceOf(toggleOf(containerEl)!)).toBe(
-                faceFor(storedArticleAt(repo, file.path))
+                faceFor(storedItemAt(repo, file.path, 'x'))
               );
             }
             plugin.runCleanup();

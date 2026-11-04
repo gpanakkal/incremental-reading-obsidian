@@ -32,6 +32,11 @@ import {
   type SRSCardRow,
 } from '#/lib/types';
 import { getEndOfDay } from '#/lib/utils';
+import {
+  insertItemAt,
+  TestRepository as ItemRepository,
+  makeItemVault,
+} from '#/test/item-vault';
 import { makeLinkVault } from '#/test/link-vault';
 import { noteText } from '#/test/note-text';
 import fc from 'fast-check';
@@ -480,6 +485,12 @@ const TABLE_TAG = {
 
 const SCHEMA = readFileSync(resolve(__dirname, '../../db/schema.sql'), 'utf-8');
 let SQL: SqlJsStatic;
+/**
+ * A database with {@link SCHEMA} applied, made once: each repository starts
+ * from a copy of it, as running the schema for every property case would take
+ * most of a case's time, and under a loaded full suite outlast the timeout.
+ */
+let emptyDb: Uint8Array | undefined;
 
 /** A repository over a real in-memory database, with the disk write stubbed. */
 class TestRepository extends SQLJSRepository {
@@ -489,8 +500,13 @@ class TestRepository extends SQLJSRepository {
       dbFilePath: 'ir-test.sqlite',
       schema: SCHEMA,
     });
-    repo.db = new SQL.Database();
-    repo.db.exec(SCHEMA);
+    if (!emptyDb) {
+      const db = new SQL.Database();
+      db.exec(SCHEMA);
+      emptyDb = db.export();
+      db.close();
+    }
+    repo.db = new SQL.Database(emptyDb);
     repo.registerUpdateHook();
     return repo;
   }
@@ -890,6 +906,85 @@ const dumpItemTables = (repo: SQLiteRepository) =>
     repo.query(`SELECT * FROM ${table} ORDER BY id`)
   );
 
+/** The path of the note a bar is on, in {@link lookupWorldArb} worlds. */
+const BAR_PATH = 'notes/n.md';
+/** Where a second note may be, and a row may point. */
+const OTHER_PATH = 'notes/o.md';
+const ITEM_TABLES = ['article', 'snippet', 'srs_card'] as const;
+const TYPE_OF_TABLE = {
+  article: 'article',
+  snippet: 'snippet',
+  srs_card: 'card',
+} as const;
+const TAG_OF_TYPE: Record<NoteType, string> = {
+  article: ARTICLE_TAG,
+  snippet: SNIPPET_TAG,
+  card: CARD_TAG,
+};
+
+/**
+ * A note at {@link BAR_PATH} claiming an `ir-id` (`x` or `y`), none (absent or
+ * empty), or one no row can hold (a number), tagged as an item type or not; a
+ * second note at {@link OTHER_PATH} claiming an id or not, or none there; and
+ * rows of any table holding `x`, `y` or `z` at either path or one with no
+ * note, live or deleted. An id is held by one table at most, and a path by
+ * one row per table, as `id` and `reference` are unique.
+ */
+const lookupWorldArb = fc.record({
+  irId: fc.constantFrom<unknown>('x', 'y', '', 7, undefined),
+  tag: fc.constantFrom<NoteType | null>('article', 'snippet', 'card', null),
+  other: fc.constantFrom<{ irId?: string } | null>(
+    { irId: 'x' },
+    { irId: 'y' },
+    {},
+    null
+  ),
+  rows: fc
+    .array(
+      fc.record({
+        table: fc.constantFrom(...ITEM_TABLES),
+        id: fc.constantFrom('x', 'y', 'z'),
+        path: fc.constantFrom(BAR_PATH, OTHER_PATH, 'gone/g.md'),
+        deleted: fc.boolean(),
+      }),
+      { maxLength: 4 }
+    )
+    .map((rows) =>
+      rows.filter(
+        (row, i) =>
+          !rows
+            .slice(0, i)
+            .some(
+              (other) =>
+                other.id === row.id ||
+                (other.table === row.table && other.path === row.path)
+            )
+      )
+    ),
+});
+type LookupWorld =
+  typeof lookupWorldArb extends fc.Arbitrary<infer T> ? T : never;
+
+/**
+ * The item the bar on the note at {@link BAR_PATH} owes `world`, spelled out:
+ * for a note claiming an id, the live row holding that id at the note's path,
+ * of whichever table; for one claiming none, the live row at its path of the
+ * table its tag names; for one claiming what no row can hold, none.
+ */
+function expectedLookup(world: LookupWorld) {
+  const live = world.rows.filter((row) => !row.deleted);
+  const { irId, tag } = world;
+  if (irId === undefined || irId === '') {
+    const row = live.find(
+      (r) => r.path === BAR_PATH && TYPE_OF_TABLE[r.table] === tag
+    );
+    return row ? { id: row.id, type: tag } : null;
+  }
+  if (typeof irId !== 'string') return null;
+  const held = live.find((r) => r.id === irId && r.path === BAR_PATH);
+  return held ? { id: held.id, type: TYPE_OF_TABLE[held.table] } : null;
+}
+
 // #endregion
 
 describe('ReviewManager.getDue', () => {
@@ -1052,6 +1147,8 @@ describe('ReviewManager.anyDue', () => {
     vi.restoreAllMocks();
   });
 
+  // Real database work per case: ~1.5s alone, past the default 5s under a
+  // loaded full suite
   it('finds something due exactly when getDue does, by its cutoffs, writing nothing and saying nothing', async () => {
     const notify = vi.spyOn(Obsidian, 'notify');
     await fc.assert(
@@ -1098,7 +1195,7 @@ describe('ReviewManager.anyDue', () => {
       ),
       { numRuns: 200 }
     );
-  });
+  }, 20_000);
 
   it('writes nothing to the rows it reads, nor does getDue', async () => {
     vi.setSystemTime(YEAR_2000_MS);
@@ -2764,6 +2861,56 @@ describe('ReviewManager.getReviewItemFromFile', () => {
     expect(result!.data.type).toBe('card');
     expect(result!.data.id).toBe(row.id);
   });
+});
+
+describe('ReviewManager.getReviewItemFromFile by path and ir-id', () => {
+  let repo: ItemRepository;
+
+  beforeAll(async () => {
+    repo = await ItemRepository.create();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // Real database work per case: ~1.5s alone, past the default 5s under a
+  // loaded full suite
+  it("finds the row holding both the note's path and the id it claims, and none that holds only one of them", async () => {
+    await fc.assert(
+      fc.asyncProperty(lookupWorldArb, async (world) => {
+        for (const table of ITEM_TABLES)
+          repo.hardDelete(`DELETE FROM ${table}`);
+        const vault = makeItemVault({
+          [BAR_PATH]: {
+            ...(world.irId === undefined ? {} : { 'ir-id': world.irId }),
+            ...(world.tag ? { tags: [TAG_OF_TYPE[world.tag]] } : {}),
+          },
+          ...(world.other
+            ? {
+                [OTHER_PATH]:
+                  world.other.irId === undefined
+                    ? {}
+                    : { 'ir-id': world.other.irId },
+              }
+            : {}),
+        });
+        for (const { table, id, path, deleted } of world.rows) {
+          insertItemAt(repo, table, { id, reference: path, deleted });
+        }
+        const manager = new ReviewManager(makePlugin(vault.app), repo);
+
+        const item = await manager.getReviewItemFromFile(
+          vault.files.get(BAR_PATH)!
+        );
+
+        expect(item && { id: item.data.id, type: item.data.type }).toEqual(
+          expectedLookup(world)
+        );
+      }),
+      { numRuns: 200 }
+    );
+  }, 20_000);
 });
 
 describe('ReviewManager.getReviewItemFromFile for a note without its type tag', () => {
@@ -5481,6 +5628,26 @@ describe('ReviewManager reads the frontmatter of a renamed or created note witho
     );
   });
 
+  it('restores the row deleted at the path of a note created there claiming its id as a number, by its string form', async () => {
+    await fc.assert(
+      fc.asyncProperty(tableArb, async (table) => {
+        const wired = wireRenames({});
+        wired.insert(table, '7', 'IR/gone.md');
+        wired.repo.mutate(`UPDATE ${table} SET deleted = TRUE WHERE id = $1`, [
+          '7',
+        ]);
+
+        await wired.manager.handleCreation(
+          wired.add('IR/gone.md', { 'ir-id': 7, tags: [TABLE_TAG[table]] })
+        );
+
+        expect(wired.repo.rows(table)).toStrictEqual([
+          { id: '7', reference: 'IR/gone.md', deleted: false },
+        ]);
+      })
+    );
+  });
+
   it('leaves the rows alone for a created note with no ir-id, or no type tag', async () => {
     await fc.assert(
       fc.asyncProperty(
@@ -5489,7 +5656,7 @@ describe('ReviewManager reads the frontmatter of a renamed or created note witho
           fc.constant({ tags: ['ir-article'] }),
           fc.constant({ 'ir-id': 'row', tags: ['other'] }),
           fc.constant({ 'ir-id': 'row' }),
-          // Not an id: a number matches no row by id
+          // A number claims its string form, which no row here holds
           fc.constant({ 'ir-id': 7, tags: ['ir-article'] }),
           fc.constant({ 'ir-id': '', tags: ['ir-article'] })
         ),
@@ -6418,21 +6585,20 @@ describe('ReviewManager.articleIdAt', () => {
     );
   });
 
-  it("takes no number for an id, even one that reads as a live article's", () => {
+  it('takes a number for an id by its string form, as every reader of an ir-id does', () => {
     fc.assert(
       // 0 claims no id at all, as any falsy `ir-id` does
       fc.property(fc.integer().filter(Boolean), (id) => {
         const { files, repo, manager } = wireItem('article', 'a.md', {
           'b.md': { 'ir-id': id },
         });
-        // SQLite would compare the number as text against the id column
         repo.mutate(
           `INSERT INTO article (id, reference, due, interval, priority)
            VALUES ($1, 'b.md', 0, 86400000, 30)`,
           [String(id)]
         );
 
-        expect(manager.articleIdAt(files.get('b.md')!)).toBeNull();
+        expect(manager.articleIdAt(files.get('b.md')!)).toBe(String(id));
       })
     );
   });

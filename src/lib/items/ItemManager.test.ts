@@ -702,7 +702,8 @@ describe('getItemType', () => {
       fc.asyncProperty(noteCaseArb, async (note) => {
         const { manager, file, app, repo } = await wireNote(note);
         const query = vi.spyOn(repo, 'query');
-        const asks = typeof note.irId === 'string' ? 1 : 0;
+        // A number claims its string form, as typed
+        const asks = note.irId == null ? 0 : 1;
 
         await manager.getItemType(file);
         expect(query).toHaveBeenCalledTimes(asks);
@@ -740,14 +741,16 @@ describe('typingRowId', () => {
     vi.restoreAllMocks();
   });
 
-  it('names the ir-id of a note claiming one, tagged or not, and nothing for one claiming no id, reading no row', async () => {
+  it('names the ir-id of a note claiming one, tagged or not, a number by its string form, and nothing for one claiming no id, reading no row', async () => {
     await fc.assert(
       fc.asyncProperty(noteCaseArb, async (note) => {
         const { manager, file, repo } = await wireNote(note);
         const query = vi.spyOn(repo, 'query');
 
         expect(manager.typingRowId(file)).toBe(
-          typeof note.irId === 'string' ? note.irId : null
+          note.irId === 7
+            ? '7'
+            : ((note.irId as string | null | undefined) ?? null)
         );
         expect(query).not.toHaveBeenCalled();
       }),
