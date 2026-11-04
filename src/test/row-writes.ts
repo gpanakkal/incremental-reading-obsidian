@@ -1,5 +1,9 @@
+import type { ItemManager } from '#/lib/items/ItemManager';
+import ReviewManager from '#/lib/items/ReviewManager';
 import { tombstoneRowStatements } from '#/lib/items/row-delete';
+import type { ReviewItem } from '#/lib/types';
 import fc from 'fast-check';
+import type { TFile } from 'obsidian';
 import { insertItemAt, type TestRepository } from './item-vault';
 
 /**
@@ -50,4 +54,38 @@ export function applyRowWrite(
         repo.mutate(query, params);
       }
   }
+}
+
+/**
+ * The item a note bar shows for `file`, read as the plugin reads it
+ * (`ReviewManager.getReviewItemFromFile`) through `items`, an item layer
+ * over every item table: none for a note no row holds, or a tombstone's.
+ */
+export function itemOfNote(
+  items: ItemManager,
+  file: TFile
+): Promise<ReviewItem | null> {
+  const reader = Object.assign(Object.create(ReviewManager.prototype), {
+    articles: items,
+    snippets: items,
+    cards: items,
+  }) as ReviewManager;
+  return reader.getReviewItemFromFile(file);
+}
+
+/**
+ * Whether the live article row at `path` is dismissed, or `null` for none,
+ * read straight from the table rather than through the plugin's lookup: what
+ * the bar on a note tagged as an article at `path` owes the database, while
+ * no row of another id stands at that path.
+ */
+export function storedArticleAt(
+  repo: TestRepository,
+  path: string
+): boolean | null {
+  const [row] = repo.query(
+    'SELECT dismissed FROM article WHERE reference = $1 AND deleted = FALSE',
+    [path]
+  ) as unknown as { dismissed: unknown }[];
+  return row ? Boolean(row.dismissed) : null;
 }

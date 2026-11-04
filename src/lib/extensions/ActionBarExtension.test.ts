@@ -26,7 +26,13 @@ import {
   TestRepository,
   trackChangeListeners,
 } from '#/test/item-vault';
-import { applyRowWrite, rowWriteArb } from '#/test/row-writes';
+import {
+  applyRowWrite,
+  itemOfNote,
+  type RowWrite,
+  rowWriteArb,
+  storedArticleAt,
+} from '#/test/row-writes';
 import {
   showSuccessNotices,
   SUCCESS_NOTICE_LEVELS,
@@ -166,6 +172,17 @@ const tick = async () => {
   for (let i = 0; i < 10; i += 1) await Promise.resolve();
 };
 
+/** A promise with its settle functions, for reads a test lands by hand. */
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 const buttons = (container: HTMLElement) =>
   [...container.querySelectorAll('button')] as HTMLButtonElement[];
 
@@ -194,6 +211,17 @@ const RESTORE = 'archive-restore';
 const iconOf = (btn: Element) =>
   [...(iconSvg(btn)?.classList ?? [])].find((c) => c.startsWith('lucide-')) ??
   null;
+
+/** What the toggle shows: its icon, or `'status'` for plain status text. */
+const faceOf = (btn: Element) =>
+  btn.classList.contains('ir-action-bar-status') ? 'status' : iconName(btn);
+
+/**
+ * The face the toggle owes an item stored as `dismissed`: the action a click
+ * would take on it, or status text for a note no live row holds (`null`).
+ */
+const faceFor = (dismissed: boolean | null) =>
+  dismissed === null ? 'status' : dismissed ? RESTORE : DISMISS;
 
 function makeContainer(): HTMLElement {
   const el = document.createElement('div');
@@ -230,6 +258,11 @@ function mountPanel(
      * holds the note at `path`.
      */
     items?: { manager: ItemManager; vault: ItemVault; path: string };
+    /**
+     * The `ir-id` the note claims, short of a real item layer, whose row the
+     * bar then watches through `harness`'s change events. None by default.
+     */
+    claims?: string;
   } = {}
 ) {
   const file = options.items
@@ -267,6 +300,7 @@ function mountPanel(
       getFileByPath: (path: string) => vaultFiles.get(path) ?? null,
     },
     metadataCache: {
+      getFileCache: () => null,
       ...itemApp?.metadataCache,
       on: vi.fn((_name: string, listener: MetadataChangedListener) => {
         onChanged = listener;
@@ -289,12 +323,23 @@ function mountPanel(
   }));
   // Short of a real item layer, one with no rows: a note is typed by what
   // reading it answers, and a change by the tags the cache parsed
+  const getItemType = vi.fn(
+    options.noteType ?? (async (): Promise<NoteType | null> => 'article')
+  );
   const articles = options.items?.manager ?? {
-    getItemType: vi.fn(options.noteType ?? (async () => 'article' as const)),
+    getItemType,
+    // A note the cache has no parse of, as it has none here short of a
+    // reported change, is typed by reading it again
     itemTypeFromCache: (changed: TFile, cache: CachedMetadata | null) =>
-      Obsidian.noteTypeFromCache(changed, cache, app as never),
-    // With no rows, no note is typed by one
-    typingRowId: () => null,
+      cache === null
+        ? getItemType()
+        : Obsidian.noteTypeFromCache(changed, cache, app as never),
+    // With no rows, no note is typed by one: it claims only what it is given
+    typingRowId: () => options.claims ?? null,
+    watchRow: (id: string, onWrite: () => void) =>
+      harness.reviewManager.repo.onDataChange(({ ids }) => {
+        if (ids.includes(id)) onWrite();
+      }),
   };
   Object.assign(harness.reviewManager, { articles });
 
@@ -370,6 +415,11 @@ async function wireItemNote(spec: {
   frontmatter: Record<string, unknown>;
   /** Other notes in the vault, by path, with their frontmatter. */
   others?: Record<string, Record<string, unknown>>;
+  /**
+   * Whether the bar reads the note's item from that database, as the plugin
+   * does, rather than from a stand-in row that is always there.
+   */
+  realLookup?: boolean;
 }) {
   const path = spec.atReference ? ROW_REFERENCE : `copies/${ROW_REFERENCE}`;
   const vault = makeItemVault({ ...spec.others, [path]: spec.frontmatter });
@@ -382,7 +432,13 @@ async function wireItemNote(spec: {
     });
   }
   const manager = new ItemManager({ app: vault.app } as never, repo);
-  const panel = mountPanel(makeHarness(), {
+  const harness = makeHarness();
+  if (spec.realLookup) {
+    harness.reviewManager.getReviewItemFromFile.mockImplementation(
+      (...args: unknown[]) => itemOfNote(manager, args[0] as TFile)
+    );
+  }
+  const panel = mountPanel(harness, {
     items: { manager, vault, path },
   });
   /** Edit the note's frontmatter, then report the change as the cache does. */
@@ -392,7 +448,7 @@ async function wireItemNote(spec: {
       vault.app.metadataCache.getFileCache(panel.file)?.frontmatter
     );
   };
-  return { panel, repo, manager, vault, editNote };
+  return { panel, repo, manager, vault, editNote, harness };
 }
 
 /**
@@ -894,18 +950,23 @@ describe('renderStandaloneActionBarDOM', () => {
           const container = makeContainer();
           let stored = initial;
 
-          renderStandaloneActionBarDOM(file, harness.plugin, container);
+          const bar = renderStandaloneActionBarDOM(
+            file,
+            harness.plugin,
+            container
+          );
           await tick();
           expectDismissFace(dismissButton(container), stored);
 
-          // `undefined` is a click here; a boolean, a write made elsewhere
+          // `undefined` is a click here; a boolean, a write made elsewhere,
+          // which the bar's owner hears and has it look again for
           for (const step of steps) {
             if (step === undefined) {
               dismissButton(container).click();
               stored = !stored;
             } else {
               harness.setStored('watched', step);
-              harness.emit({ ids: ['watched'] });
+              bar.refresh();
               stored = step;
             }
             await tick();
@@ -917,30 +978,43 @@ describe('renderStandaloneActionBarDOM', () => {
     );
   });
 
-  describe('staying in sync with writes made elsewhere', () => {
-    it('relabels when another surface changes the stored state', async () => {
+  describe('looking again when its owner says to', () => {
+    /** A row as each step leaves it: dismissed or not, or gone (`null`). */
+    const rowStateArb = fc.option(fc.boolean(), { nil: null });
+
+    it('shows what each look finds: the item, dismissed or not, or no row at all', async () => {
       await fc.assert(
         fc.asyncProperty(
-          fc.boolean(),
-          fc.array(fc.boolean(), { minLength: 1, maxLength: 5 }),
-          async (initial, externalWrites) => {
+          rowStateArb,
+          fc.array(rowStateArb, { minLength: 1, maxLength: 6 }),
+          async (initial, steps) => {
             const file = makeFile();
-            const harness = makeHarness({
-              item: makeItem({ id: 'watched', dismissed: initial, file }),
-            });
+            const rowFor = (state: boolean | null) =>
+              state === null
+                ? null
+                : makeItem({ id: 'watched', dismissed: state, file });
+            const harness = makeHarness({ item: rowFor(initial) });
             const container = makeContainer();
 
-            renderStandaloneActionBarDOM(file, harness.plugin, container);
+            const bar = renderStandaloneActionBarDOM(
+              file,
+              harness.plugin,
+              container
+            );
             await tick();
 
-            for (const dismissed of externalWrites) {
-              harness.setStored('watched', dismissed);
-              harness.emit({ ids: ['watched'] });
+            for (const state of steps) {
+              harness.setRow(rowFor(state));
+              bar.refresh();
               await tick();
 
-              expect(iconName(dismissButton(container))).toBe(
-                dismissed ? RESTORE : DISMISS
-              );
+              const btn = dismissButton(container);
+              if (state === null) {
+                expectStatusText(btn);
+              } else {
+                expectDismissFace(btn, state);
+                expect(btn.disabled).toBe(false);
+              }
             }
             container.remove();
           }
@@ -948,27 +1022,116 @@ describe('renderStandaloneActionBarDOM', () => {
       );
     });
 
-    it('leaves the label alone for writes to other items', async () => {
-      const file = makeFile();
-      const harness = makeHarness({
-        item: makeItem({ id: 'watched', dismissed: false, file }),
-      });
-      const container = makeContainer();
+    it('reads once for a burst of calls to look again', async () => {
+      await fc.assert(
+        fc.asyncProperty(fc.integer({ min: 1, max: 8 }), async (calls) => {
+          const file = makeFile();
+          const harness = makeHarness({ item: makeItem({ file }) });
+          const container = makeContainer();
 
-      renderStandaloneActionBarDOM(file, harness.plugin, container);
-      await tick();
-      harness.reviewManager.getReviewItemFromFile.mockClear();
+          const bar = renderStandaloneActionBarDOM(
+            file,
+            harness.plugin,
+            container
+          );
+          await tick();
+          harness.reviewManager.getReviewItemFromFile.mockClear();
 
-      harness.emit({ ids: ['other-item', 'another'] });
-      await tick();
+          for (let i = 0; i < calls; i += 1) bar.refresh();
+          await tick();
 
-      expect(
-        harness.reviewManager.getReviewItemFromFile
-      ).not.toHaveBeenCalled();
-      expect(iconName(dismissButton(container))).toBe(DISMISS);
+          expect(
+            harness.reviewManager.getReviewItemFromFile
+          ).toHaveBeenCalledOnce();
+          container.remove();
+        })
+      );
     });
 
-    it('keeps the label and reports why when re-reading the item fails', async () => {
+    it('keeps its face, its focus and its button usable while a look is under way', async () => {
+      await fc.assert(
+        fc.asyncProperty(fc.boolean(), async (dismissed) => {
+          const file = makeFile();
+          const harness = makeHarness({ item: makeItem({ dismissed, file }) });
+          const container = makeContainer();
+          const bar = renderStandaloneActionBarDOM(
+            file,
+            harness.plugin,
+            container
+          );
+          await tick();
+          const btn = dismissButton(container);
+          btn.focus();
+
+          const read = deferred<ReviewItem | null>();
+          harness.reviewManager.getReviewItemFromFile.mockReturnValueOnce(
+            read.promise
+          );
+          bar.refresh();
+          await tick();
+
+          expect(dismissButton(container)).toBe(btn);
+          expectDismissFace(btn, dismissed);
+          expect(btn.disabled).toBe(false);
+          expect(document.activeElement).toBe(btn);
+          read.resolve(makeItem({ dismissed, file }));
+          await tick();
+          container.remove();
+        })
+      );
+    });
+
+    it('shows what the newest look found, however the reads land', async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          fc
+            .array(fc.boolean(), { minLength: 2, maxLength: 5 })
+            .chain((answers) =>
+              fc.tuple(
+                fc.constant(answers),
+                fc.shuffledSubarray(
+                  answers.map((_, i) => i),
+                  { minLength: answers.length }
+                )
+              )
+            ),
+          async ([answers, landingOrder]) => {
+            const file = makeFile();
+            const harness = makeHarness({ item: makeItem({ file }) });
+            const container = makeContainer();
+            // Each look waits on a read the test lands by hand, the one made
+            // on rendering first
+            const reads = answers.map(() => deferred<ReviewItem | null>());
+            for (const read of reads) {
+              harness.reviewManager.getReviewItemFromFile.mockReturnValueOnce(
+                read.promise
+              );
+            }
+            const bar = renderStandaloneActionBarDOM(
+              file,
+              harness.plugin,
+              container
+            );
+            for (let i = 1; i < reads.length; i += 1) {
+              bar.refresh();
+              await tick();
+            }
+            expect(
+              harness.reviewManager.getReviewItemFromFile
+            ).toHaveBeenCalledTimes(reads.length);
+            for (const i of landingOrder) {
+              reads[i].resolve(makeItem({ dismissed: answers[i], file }));
+              await tick();
+            }
+
+            expectDismissFace(dismissButton(container), answers.at(-1)!);
+            container.remove();
+          }
+        )
+      );
+    });
+
+    it('keeps the face and reports why when a look fails', async () => {
       const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
       await fc.assert(
         fc.asyncProperty(
@@ -982,20 +1145,22 @@ describe('renderStandaloneActionBarDOM', () => {
             });
             const container = makeContainer();
 
-            renderStandaloneActionBarDOM(file, harness.plugin, container);
+            const bar = renderStandaloneActionBarDOM(
+              file,
+              harness.plugin,
+              container
+            );
             await tick();
 
             harness.reviewManager.getReviewItemFromFile.mockRejectedValueOnce(
               reason
             );
-            harness.emit({ ids: ['watched'] });
+            bar.refresh();
             await tick();
 
-            expect(iconName(dismissButton(container))).toBe(
-              dismissed ? RESTORE : DISMISS
-            );
+            expectDismissFace(dismissButton(container), dismissed);
             expect(logged).toHaveBeenCalledExactlyOnceWith(
-              'Failed to refresh item status:',
+              expect.stringMatching(/refresh/),
               reason
             );
             container.remove();
@@ -1004,89 +1169,137 @@ describe('renderStandaloneActionBarDOM', () => {
       );
     });
 
-    it('keeps the label when the row disappears rather than blanking it', async () => {
+    it('reads nothing and repaints nothing once torn down, a look under way or asked for included', async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          fc.constantFrom('idle', 'asked', 'reading' as const),
+          async (when) => {
+            const file = makeFile();
+            const harness = makeHarness({
+              item: makeItem({ dismissed: false, file }),
+            });
+            const container = makeContainer();
+            const bar = renderStandaloneActionBarDOM(
+              file,
+              harness.plugin,
+              container
+            );
+            await tick();
+            const read = deferred<ReviewItem | null>();
+            harness.reviewManager.getReviewItemFromFile.mockClear();
+            harness.reviewManager.getReviewItemFromFile.mockReturnValueOnce(
+              read.promise
+            );
+            if (when !== 'idle') bar.refresh();
+            if (when === 'reading') await tick();
+
+            bar.dispose();
+            bar.refresh();
+            read.resolve(makeItem({ dismissed: true, file }));
+            await tick();
+
+            expect(
+              harness.reviewManager.getReviewItemFromFile
+            ).toHaveBeenCalledTimes(when === 'reading' ? 1 : 0);
+            expectDismissFace(dismissButton(container), false);
+            container.remove();
+          }
+        )
+      );
+    });
+
+    it('shows nothing of a failed first read that lands after teardown or before a newer read', async () => {
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      await fc.assert(
+        fc.asyncProperty(
+          fc.constantFrom('torn down', 'overtaken' as const),
+          async (then) => {
+            const file = makeFile();
+            const harness = makeHarness();
+            const first = deferred<ReviewItem | null>();
+            const second = deferred<ReviewItem | null>();
+            harness.reviewManager.getReviewItemFromFile
+              .mockReturnValueOnce(first.promise)
+              .mockReturnValueOnce(second.promise);
+            const container = makeContainer();
+            const bar = renderStandaloneActionBarDOM(
+              file,
+              harness.plugin,
+              container
+            );
+            await tick();
+            if (then === 'torn down') bar.dispose();
+            else bar.refresh();
+            await tick();
+
+            first.reject(new Error('db unavailable'));
+            await tick();
+            expect(iconName(dismissButton(container))).toBe('loader');
+
+            second.resolve(makeItem({ dismissed: true, file }));
+            await tick();
+            if (then === 'overtaken') {
+              expectDismissFace(dismissButton(container), true);
+            }
+            container.remove();
+          }
+        )
+      );
+    });
+
+    it('reports a failure after a failed first read as one to look again, leaving the face', async () => {
+      const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const harness = makeHarness({ lookupRejects: true });
+      const container = makeContainer();
+      const bar = renderStandaloneActionBarDOM(
+        makeFile(),
+        harness.plugin,
+        container
+      );
+      await tick();
+      const failedFace = dismissButton(container).textContent;
+      logged.mockClear();
+
+      bar.refresh();
+      await tick();
+
+      expect(logged).toHaveBeenCalledExactlyOnceWith(
+        expect.stringMatching(/refresh/),
+        expect.any(Error)
+      );
+      expectStatusText(dismissButton(container));
+      expect(dismissButton(container).textContent).toBe(failedFace);
+    });
+
+    it('subscribes to nothing itself, leaving its owner to say when to look again', async () => {
       const file = makeFile();
-      const harness = makeHarness({
-        item: makeItem({ id: 'watched', dismissed: true, file }),
-      });
+      const harness = makeHarness({ item: makeItem({ file }) });
       const container = makeContainer();
 
       renderStandaloneActionBarDOM(file, harness.plugin, container);
       await tick();
 
-      harness.setRow(null);
-      harness.emit({ ids: ['watched'] });
-      await tick();
-
-      expect(iconName(dismissButton(container))).toBe(RESTORE);
-    });
-
-    it('stops listening once torn down, and leaves no listener behind', async () => {
-      const file = makeFile();
-      const harness = makeHarness({
-        item: makeItem({ id: 'watched', dismissed: false, file }),
-      });
-      const container = makeContainer();
-
-      const teardown = renderStandaloneActionBarDOM(
-        file,
-        harness.plugin,
-        container
-      );
-      await tick();
-      expect(harness.listenerCount()).toBe(1);
-
-      teardown();
-      expect(harness.listenerCount()).toBe(0);
-
-      harness.setStored('watched', true);
-      harness.emit({ ids: ['watched'] });
-      await tick();
-
-      expect(iconName(dismissButton(container))).toBe(DISMISS);
-    });
-
-    it('never subscribes when torn down before the lookup resolves', async () => {
-      const file = makeFile();
-      const harness = makeHarness({ item: makeItem({ file }) });
-      const container = makeContainer();
-
-      const teardown = renderStandaloneActionBarDOM(
-        file,
-        harness.plugin,
-        container
-      );
-      teardown();
-      await tick();
-
-      expect(harness.listenerCount()).toBe(0);
       expect(harness.reviewManager.repo.onDataChange).not.toHaveBeenCalled();
     });
 
-    it('returns a teardown that is safe to call when there is no review manager', () => {
+    it('returns a bar that is safe to use when there is no review manager', () => {
       const container = makeContainer();
-      const teardown = renderStandaloneActionBarDOM(
+      const bar = renderStandaloneActionBarDOM(
         makeFile(),
         { reviewManager: undefined } as unknown as IncrementalReadingPlugin,
         container
       );
 
-      expect(() => teardown()).not.toThrow();
+      expect(() => {
+        bar.refresh();
+        bar.dispose();
+      }).not.toThrow();
       expect(buttons(container)).toHaveLength(0);
     });
   });
 });
 
 describe('the edit-mode action bar panel', () => {
-  it('watches the item for as long as the panel is on screen', async () => {
-    const harness = makeHarness({ item: makeItem({ id: 'watched' }) });
-    const panel = mountPanel(harness);
-    await tick();
-
-    expect(panel.barButtons()).toEqual([DISMISS, PLUGIN_ICON]);
-    expect(harness.listenerCount()).toBe(1);
-  });
-
   it('sits above the note on desktop, in a slot marked as its host', async () => {
     const harness = makeHarness({ item: makeItem({ id: 'watched' }) });
     const panel = mountPanel(harness);
@@ -1103,7 +1316,7 @@ describe('the edit-mode action bar panel', () => {
     const harness = makeHarness({
       item: makeItem({ id: 'watched', dismissed: true }),
     });
-    const panel = mountPanel(harness);
+    const panel = mountPanel(harness, { claims: 'watched' });
     await tick();
     expect(panel.barButtons()).toEqual([RESTORE, PLUGIN_ICON]);
 
@@ -1114,34 +1327,99 @@ describe('the edit-mode action bar panel', () => {
     expect(panel.barButtons()).toEqual([DISMISS, PLUGIN_ICON]);
   });
 
-  it('stops watching when the editor goes away', async () => {
+  it('reads the item again once per write naming the row the note claims, and never for one naming others', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(
+          fc.uniqueArray(fc.constantFrom('watched', 'other', 'another'), {
+            minLength: 1,
+          }),
+          { maxLength: 6 }
+        ),
+        async (writes) => {
+          const harness = makeHarness({ item: makeItem({ id: 'watched' }) });
+          const panel = mountPanel(harness, { claims: 'watched' });
+          await tick();
+          harness.reviewManager.getReviewItemFromFile.mockClear();
+
+          for (const ids of writes) {
+            harness.emit({ ids });
+            await tick();
+          }
+
+          expect(
+            harness.reviewManager.getReviewItemFromFile
+          ).toHaveBeenCalledTimes(
+            writes.filter((ids) => ids.includes('watched')).length
+          );
+          panel.view.destroy();
+        }
+      )
+    );
+  });
+
+  it('rebuilds nothing and reads nothing for an edit to the note', async () => {
     const harness = makeHarness({ item: makeItem({ id: 'watched' }) });
-    const panel = mountPanel(harness);
+    const panel = mountPanel(harness, { claims: 'watched' });
     await tick();
-    expect(harness.listenerCount()).toBe(1);
+    const toggle = dismissButton(panel.bar() as HTMLElement);
+    harness.reviewManager.getReviewItemFromFile.mockClear();
+
+    panel.view.dispatch({ changes: { from: 0, insert: 'more ' } });
+    await tick();
+
+    expect(dismissButton(panel.bar() as HTMLElement)).toBe(toggle);
+    expect(harness.reviewManager.getReviewItemFromFile).not.toHaveBeenCalled();
+  });
+
+  it('reads nothing for an update that carries no transaction, as focusing the editor makes', async () => {
+    const harness = makeHarness({ item: makeItem({ id: 'watched' }) });
+    const panel = mountPanel(harness, { claims: 'watched' });
+    await tick();
+    harness.reviewManager.getReviewItemFromFile.mockClear();
+
+    panel.view.focus();
+    // CodeMirror tells its extensions of a focus change after a short timeout
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await tick();
+
+    expect(panel.view.hasFocus).toBe(true);
+
+    expect(harness.reviewManager.getReviewItemFromFile).not.toHaveBeenCalled();
+  });
+
+  it('reads nothing more once the editor goes away', async () => {
+    const harness = makeHarness({ item: makeItem({ id: 'watched' }) });
+    const panel = mountPanel(harness, { claims: 'watched' });
+    await tick();
+    harness.reviewManager.getReviewItemFromFile.mockClear();
 
     panel.view.destroy();
+    harness.emit({ ids: ['watched'] });
+    await tick();
 
+    expect(harness.reviewManager.getReviewItemFromFile).not.toHaveBeenCalled();
     expect(harness.listenerCount()).toBe(0);
   });
 
-  it('replaces rather than stacks the watch when the panel re-renders', async () => {
+  it('reads once per write after re-rendering, not once per render it ever had', async () => {
     const harness = makeHarness({ item: makeItem({ id: 'watched' }) });
-    const panel = mountPanel(harness);
+    const panel = mountPanel(harness, { claims: 'watched' });
     await tick();
 
     panel.view.dispatch({ effects: setShowAnswerEffect.of(true) });
     await tick();
+    harness.reviewManager.getReviewItemFromFile.mockClear();
+    harness.emit({ ids: ['watched'] });
+    await tick();
 
-    expect(harness.reviewManager.repo.onDataChange).toHaveBeenCalledTimes(2);
-    expect(harness.listenerCount()).toBe(1);
+    expect(harness.reviewManager.getReviewItemFromFile).toHaveBeenCalledOnce();
   });
 
-  it('releases the watch when the bar switches into review mode', async () => {
+  it('reads nothing for a write once the bar has switched into review mode', async () => {
     const harness = makeHarness({ item: makeItem({ id: 'watched' }) });
-    const panel = mountPanel(harness);
+    const panel = mountPanel(harness, { claims: 'watched' });
     await tick();
-    expect(harness.listenerCount()).toBe(1);
 
     panel.view.dispatch({
       effects: [
@@ -1152,13 +1430,17 @@ describe('the edit-mode action bar panel', () => {
       ],
     });
     await tick();
+    harness.reviewManager.getReviewItemFromFile.mockClear();
+    harness.emit({ ids: ['watched'] });
+    await tick();
 
-    expect(harness.listenerCount()).toBe(0);
+    expect(panel.barButtons()).toEqual([]);
+    expect(harness.reviewManager.getReviewItemFromFile).not.toHaveBeenCalled();
   });
 
-  it('takes the bar, its host marking and its watch away with the file', async () => {
+  it('takes the bar and its host marking away with the file, and reads nothing for it after', async () => {
     const harness = makeHarness({ item: makeItem({ id: 'watched' }) });
-    const panel = mountPanel(harness);
+    const panel = mountPanel(harness, { claims: 'watched' });
     await tick();
     // Held across the teardown: the slot may be detached along with the panel,
     // and a class left behind on a detached node is still a class left behind.
@@ -1169,19 +1451,252 @@ describe('the edit-mode action bar panel', () => {
     // Any state change re-derives the panel, which a file-less editor has none of.
     panel.view.dispatch({ effects: setShowAnswerEffect.of(true) });
     await tick();
+    harness.reviewManager.getReviewItemFromFile.mockClear();
+    harness.emit({ ids: ['watched'] });
+    await tick();
 
     expect(panel.barButtons()).toEqual([]);
     expect(host?.classList.contains('ir-action-bar-host')).toBe(false);
-    expect(harness.listenerCount()).toBe(0);
+    expect(harness.reviewManager.getReviewItemFromFile).not.toHaveBeenCalled();
   });
 
   it('renders nothing and watches nothing without a plugin to render for', async () => {
     const harness = makeHarness({ item: makeItem({ id: 'watched' }) });
-    const panel = mountPanel(harness, { providePlugin: false });
+    const panel = mountPanel(harness, {
+      providePlugin: false,
+      claims: 'watched',
+    });
     await tick();
 
     expect(panel.barButtons()).toEqual([]);
     expect(harness.listenerCount()).toBe(0);
+  });
+});
+
+describe('the edit-mode bar on a tagged note whose row comes and goes', () => {
+  /** A tagged article note claiming row `x`, afresh: edits change it. */
+  const tagged = (): Record<string, unknown> => ({
+    'ir-id': 'x',
+    tags: [ARTICLE_TAG],
+  });
+  const tableArb = fc.constantFrom('article', 'snippet', 'srs_card' as const);
+  /**
+   * A write to the database: one {@link rowWriteArb} makes, or row `x` of a
+   * table dismissed or restored. Row `y` stays off the note's path: the item
+   * is read by path (see `ReviewManager.getReviewItemFromFile`), and a row
+   * the note doesn't claim at its path names nothing the bar watches.
+   */
+  const writeArb = fc.oneof(
+    rowWriteArb.filter((write) => write.id === 'x' || !write.atNote),
+    fc.record({ table: tableArb, dismissed: fc.boolean() })
+  );
+
+  const apply = (
+    repo: TestRepository,
+    write: RowWrite | { table: string; dismissed: boolean },
+    notePath: string
+  ) => {
+    if ('kind' in write) {
+      applyRowWrite(repo, write, notePath);
+    } else {
+      repo.mutate(`UPDATE ${write.table} SET dismissed = $1 WHERE id = 'x'`, [
+        write.dismissed,
+      ]);
+    }
+  };
+
+  /** Tombstone row `x` of `table`, or bring it back, with no note edit. */
+  const flagRow = (repo: TestRepository, table: string, deleted: boolean) => {
+    repo.mutate(`UPDATE ${table} SET deleted = $1 WHERE id = 'x'`, [deleted]);
+  };
+
+  it('shows what the database holds for the note after each write, with no edit to the note', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        tableArb,
+        fc.constantFrom('live', 'deleted', 'absent' as const),
+        fc.array(writeArb, { minLength: 1, maxLength: 4 }),
+        async (table, row, writes) => {
+          const { panel, repo, manager } = await wireItemNote({
+            table,
+            row,
+            atReference: true,
+            frontmatter: tagged(),
+            realLookup: true,
+          });
+          await tick();
+
+          for (const write of writes) {
+            try {
+              apply(repo, write, panel.file.path);
+            } catch {
+              // A row the table already holds by id or path: nothing written
+              continue;
+            }
+            await tick();
+
+            if ((await manager.getItemType(panel.file)) === null) {
+              expect(panel.hasBar()).toBe(false);
+              continue;
+            }
+            expect(faceOf(dismissButton(panel.bar() as HTMLElement))).toBe(
+              faceFor(storedArticleAt(repo, panel.file.path))
+            );
+          }
+          panel.view.destroy();
+        }
+      ),
+      { numRuns: 100 }
+    );
+  });
+
+  it('switches from saying it has no row to the item once a row with its id is stored', async () => {
+    const { panel, repo } = await wireItemNote({
+      table: 'article',
+      row: 'absent',
+      atReference: true,
+      frontmatter: tagged(),
+      realLookup: true,
+    });
+    await tick();
+    expect(panel.barButtons()).toEqual([null, PLUGIN_ICON]);
+
+    insertItemAt(repo, 'article', {
+      id: 'x',
+      reference: ROW_REFERENCE,
+      deleted: false,
+    });
+    await tick();
+
+    expect(panel.barButtons()).toEqual([DISMISS, PLUGIN_ICON]);
+  });
+
+  it('says it has no row once the row is deleted elsewhere, and shows the item again once it is revived', async () => {
+    const { panel, repo } = await wireItemNote({
+      table: 'article',
+      row: 'live',
+      atReference: true,
+      frontmatter: tagged(),
+      realLookup: true,
+    });
+    await tick();
+    expect(panel.barButtons()).toEqual([DISMISS, PLUGIN_ICON]);
+
+    flagRow(repo, 'article', true);
+    await tick();
+    expectStatusText(dismissButton(panel.bar() as HTMLElement));
+
+    flagRow(repo, 'article', false);
+    await tick();
+    expect(panel.barButtons()).toEqual([DISMISS, PLUGIN_ICON]);
+  });
+
+  it('keeps its button, and the focus on it, through a write naming its row', async () => {
+    const { panel, repo } = await wireItemNote({
+      table: 'article',
+      row: 'live',
+      atReference: true,
+      frontmatter: tagged(),
+      realLookup: true,
+    });
+    await tick();
+    const btn = dismissButton(panel.bar() as HTMLElement);
+    btn.focus();
+
+    repo.mutate(`UPDATE article SET dismissed = TRUE WHERE id = 'x'`);
+    await tick();
+
+    expect(dismissButton(panel.bar() as HTMLElement)).toBe(btn);
+    expect(document.activeElement).toBe(btn);
+    expectDismissFace(btn, true);
+    panel.view.destroy();
+  });
+
+  it('reads nothing for a write naming another row', async () => {
+    const { panel, repo, harness } = await wireItemNote({
+      table: 'article',
+      row: 'absent',
+      atReference: true,
+      frontmatter: tagged(),
+      realLookup: true,
+    });
+    await tick();
+    harness.reviewManager.getReviewItemFromFile.mockClear();
+
+    insertItemAt(repo, 'article', {
+      id: 'y',
+      reference: 'elsewhere/other.md',
+      deleted: false,
+    });
+    await tick();
+
+    expect(harness.reviewManager.getReviewItemFromFile).not.toHaveBeenCalled();
+    expect(panel.barButtons()).toEqual([null, PLUGIN_ICON]);
+  });
+
+  it('looks again once a database swapped in from disk has been taken in', async () => {
+    const { panel, repo } = await wireItemNote({
+      table: 'article',
+      row: 'deleted',
+      atReference: true,
+      frontmatter: tagged(),
+      realLookup: true,
+    });
+    await tick();
+    expect(panel.barButtons()).toEqual([null, PLUGIN_ICON]);
+
+    // Taken in with no change reported for any row
+    await repo.takeIn(`UPDATE article SET deleted = FALSE WHERE id = 'x'`);
+    panel.app.workspace.trigger(ROWS_RELOADED_EVENT);
+    await tick();
+
+    expect(panel.barButtons()).toEqual([DISMISS, PLUGIN_ICON]);
+  });
+
+  it('looks again when an edit gives the note another id, as an import does', async () => {
+    const { panel, repo, editNote } = await wireItemNote({
+      table: 'article',
+      row: 'absent',
+      atReference: true,
+      frontmatter: { tags: [ARTICLE_TAG] },
+      realLookup: true,
+    });
+    await tick();
+    // Stored before the note names it: no row the note claims was written
+    insertItemAt(repo, 'article', {
+      id: 'y',
+      reference: ROW_REFERENCE,
+      deleted: false,
+    });
+    await tick();
+    expect(panel.barButtons()).toEqual([null, PLUGIN_ICON]);
+
+    await editNote((fm) => {
+      fm['ir-id'] = 'y';
+    });
+    await tick();
+
+    expect(panel.barButtons()).toEqual([DISMISS, PLUGIN_ICON]);
+  });
+
+  it('reads nothing more for an edit that keeps the note its id and type', async () => {
+    const { panel, harness, editNote } = await wireItemNote({
+      table: 'article',
+      row: 'live',
+      atReference: true,
+      frontmatter: tagged(),
+      realLookup: true,
+    });
+    await tick();
+    harness.reviewManager.getReviewItemFromFile.mockClear();
+
+    await editNote((fm) => {
+      fm.title = 'renamed';
+    });
+    await tick();
+
+    expect(harness.reviewManager.getReviewItemFromFile).not.toHaveBeenCalled();
+    expect(panel.barButtons()).toEqual([DISMISS, PLUGIN_ICON]);
   });
 });
 

@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { ObsidianHelpers } from '#/lib/ObsidianHelpers';
 import { ARTICLE_TAG, CARD_TAG } from '#/lib/constants';
+import type { StandaloneActionBar } from '#/lib/extensions/ActionBarExtension';
 import * as ActionBarExtension from '#/lib/extensions/ActionBarExtension';
 import { ItemManager } from '#/lib/items/ItemManager';
 import * as ObsidianPdf from '#/lib/pdf/obsidian-pdf';
@@ -10,7 +11,13 @@ import {
   TestRepository,
   trackChangeListeners,
 } from '#/test/item-vault';
-import { applyRowWrite, rowWriteArb } from '#/test/row-writes';
+import {
+  applyRowWrite,
+  itemOfNote,
+  type RowWrite,
+  rowWriteArb,
+  storedArticleAt,
+} from '#/test/row-writes';
 import ReviewView from '#/views/ReviewView';
 import fc from 'fast-check';
 import {
@@ -32,6 +39,11 @@ type FakeLeaf = {
     getViewType: ReturnType<typeof vi.fn>;
   };
 };
+
+/** A stand-in for a rendered bar, with nothing to read and nothing to stop. */
+function idleBar(): StandaloneActionBar {
+  return { refresh: () => {}, dispose: () => {} };
+}
 
 function makeContainerEl(): HTMLElement {
   return document.createElement('div');
@@ -185,6 +197,36 @@ function pdfBars(container: HTMLElement): Element[] {
   return Array.from(container.querySelectorAll('.ir-pdf-leaf-bar'));
 }
 
+/** The toggle of the bar in `container`, if there is one. */
+function toggleOf(container: HTMLElement): HTMLButtonElement | null {
+  return container.querySelector('.ir-action-bar button');
+}
+
+/**
+ * The icon a button shows, by its id without any `lucide-` prefix, or null for
+ * a text-only button.
+ */
+const iconName = (btn: Element) =>
+  [...(btn.querySelector(':scope > svg.svg-icon')?.classList ?? [])]
+    .find((c) => c !== 'svg-icon')
+    ?.replace(/^lucide-/, '') ?? null;
+
+/** The toggle's icon while a click would dismiss the item. */
+const DISMISS = 'ban';
+/** The toggle's icon while a click would restore a dismissed item. */
+const RESTORE = 'archive-restore';
+
+/** What the toggle shows: its icon, or `'status'` for plain status text. */
+const faceOf = (btn: Element) =>
+  btn.classList.contains('ir-action-bar-status') ? 'status' : iconName(btn);
+
+/**
+ * The face the toggle owes an item stored as `dismissed`: the action a click
+ * would take on it, or status text for a note no live row holds (`null`).
+ */
+const faceFor = (dismissed: boolean | null) =>
+  dismissed === null ? 'status' : dismissed ? RESTORE : DISMISS;
+
 /** Where the row {@link wireItemNote} makes, id `x`, says its note is. */
 const ROW_REFERENCE = 'items/note.md';
 
@@ -218,14 +260,29 @@ async function wireItemNote(spec: {
   // The note reads as that vault has it, through the plugin's app too
   Object.assign(plugin.app, { vault: vault.app.vault });
   const manager = new ItemManager({ app: vault.app } as never, repo);
-  Object.assign(plugin.reviewManager, { articles: manager });
+  // The item the bar shows, as the plugin reads it from that database
+  const lookup = vi.fn((note: TFile) => itemOfNote(manager, note));
+  Object.assign(plugin.reviewManager, {
+    articles: manager,
+    getReviewItemFromFile: lookup,
+  });
   /** Edit the note's frontmatter, as the cache then reports. */
   const editNote = async (edit: (fm: Record<string, unknown>) => void) => {
     await vault.app.fileManager.processFrontMatter(file, edit);
     plugin.emitMetadataChanged(file);
     await flush();
   };
-  return { plugin, containerEl, editNote, repo, manager, file, leaf, vault };
+  return {
+    plugin,
+    containerEl,
+    editNote,
+    repo,
+    manager,
+    file,
+    leaf,
+    vault,
+    lookup,
+  };
 }
 
 // #endregion
@@ -235,7 +292,7 @@ describe('registerReadingModeActionBar', () => {
     vi.spyOn(
       ActionBarExtension,
       'renderStandaloneActionBarDOM'
-    ).mockImplementation(() => () => {});
+    ).mockImplementation(idleBar);
   });
 
   afterEach(() => {
@@ -325,7 +382,7 @@ describe('registerReadingModeActionBar', () => {
         vi.spyOn(
           ActionBarExtension,
           'renderStandaloneActionBarDOM'
-        ).mockImplementation(() => () => {});
+        ).mockImplementation(idleBar);
         const leaf = makeMarkdownLeaf({ mode });
         const plugin = makePlugin([leaf]);
         registerReadingModeActionBar(plugin as never);
@@ -402,7 +459,7 @@ describe('registerReadingModeActionBar', () => {
         vi.spyOn(
           ActionBarExtension,
           'renderStandaloneActionBarDOM'
-        ).mockImplementation(() => () => {});
+        ).mockImplementation(idleBar);
         const containerEl = makeContainerEl();
         const leaf = makeMarkdownLeaf({ containerEl });
         const plugin = makePlugin([leaf]);
@@ -612,7 +669,7 @@ describe('registerReadingModeActionBar', () => {
           async (kind, hasFile, itemType) => {
             const render = vi
               .spyOn(ActionBarExtension, 'renderStandaloneActionBarDOM')
-              .mockImplementation(() => () => {});
+              .mockImplementation(idleBar);
             render.mockClear();
             const container = makeContainerEl();
             const file = hasFile ? ({ path: 'x' } as TFile) : null;
@@ -743,7 +800,7 @@ describe('registerReadingModeActionBar', () => {
       vi.spyOn(
         ActionBarExtension,
         'renderStandaloneActionBarDOM'
-      ).mockImplementation(() => teardown);
+      ).mockImplementation(() => ({ refresh: () => {}, dispose: teardown }));
       const leaf = makePdfLeaf();
       const plugin = makePlugin([leaf]);
       registerReadingModeActionBar(plugin as never);
@@ -763,7 +820,7 @@ describe('registerReadingModeActionBar', () => {
       const teardown = vi.fn();
       const render = vi
         .spyOn(ActionBarExtension, 'renderStandaloneActionBarDOM')
-        .mockImplementation(() => teardown);
+        .mockImplementation(() => ({ refresh: () => {}, dispose: teardown }));
       const leaf = makePdfLeaf();
       const plugin = makePlugin([leaf]);
       registerReadingModeActionBar(plugin as never);
@@ -879,7 +936,7 @@ describe('registerReadingModeActionBar', () => {
       const teardown = vi.fn();
       const render = vi
         .spyOn(ActionBarExtension, 'renderStandaloneActionBarDOM')
-        .mockImplementation(() => teardown);
+        .mockImplementation(() => ({ refresh: () => {}, dispose: teardown }));
       const containerEl = makeContainerEl();
       const leaf = makeMarkdownLeaf({ containerEl });
       const plugin = makePlugin([leaf]);
@@ -951,7 +1008,7 @@ describe('registerReadingModeActionBar', () => {
       vi.spyOn(
         ActionBarExtension,
         'renderStandaloneActionBarDOM'
-      ).mockImplementation(() => teardown);
+      ).mockImplementation(() => ({ refresh: () => {}, dispose: teardown }));
       const containerEl = makeContainerEl();
       const plugin = makePlugin([makeMarkdownLeaf({ containerEl })]);
       registerReadingModeActionBar(plugin as never);
@@ -1007,7 +1064,7 @@ describe('registerReadingModeActionBar', () => {
           async (initial, changes) => {
             const render = vi
               .spyOn(ActionBarExtension, 'renderStandaloneActionBarDOM')
-              .mockImplementation(() => () => {});
+              .mockImplementation(idleBar);
             render.mockClear();
             const containerEl = makeContainerEl();
             const file = { path: 'note.md' } as TFile;
@@ -1457,6 +1514,334 @@ describe('registerReadingModeActionBar', () => {
 
       expect(watchRow).toHaveBeenCalledOnce();
       expect(listeners.count(repo)).toBe(1);
+    });
+  });
+
+  describe('the item a tagged note shows, as its row comes and goes', () => {
+    beforeEach(() => {
+      // The real bar, reading the item from the database
+      vi.mocked(ActionBarExtension.renderStandaloneActionBarDOM).mockRestore();
+    });
+
+    /** A tagged article note claiming row `x`, afresh: edits change it. */
+    const tagged = (): Record<string, unknown> => ({
+      'ir-id': 'x',
+      tags: [ARTICLE_TAG],
+    });
+    const tableArb = fc.constantFrom('article', 'snippet', 'srs_card' as const);
+    /**
+     * A write to the database: one {@link rowWriteArb} makes, or row `x` of a
+     * table dismissed or restored. Row `y` stays off the note's path: the
+     * item is read by path (see `ReviewManager.getReviewItemFromFile`), and a
+     * row the note doesn't claim at its path names nothing the bar watches.
+     */
+    const writeArb = fc.oneof(
+      rowWriteArb.filter((write) => write.id === 'x' || !write.atNote),
+      fc.record({ table: tableArb, dismissed: fc.boolean() })
+    );
+
+    const apply = (
+      repo: TestRepository,
+      write: RowWrite | { table: string; dismissed: boolean },
+      notePath: string
+    ) => {
+      if ('kind' in write) {
+        applyRowWrite(repo, write, notePath);
+      } else {
+        repo.mutate(`UPDATE ${write.table} SET dismissed = $1 WHERE id = 'x'`, [
+          write.dismissed,
+        ]);
+      }
+    };
+
+    /** Tombstone row `x` of `table`, or bring it back, with no note edit. */
+    const flagRow = (repo: TestRepository, table: string, deleted: boolean) => {
+      repo.mutate(`UPDATE ${table} SET deleted = $1 WHERE id = 'x'`, [deleted]);
+    };
+
+    it('shows what the database holds for the note after each write, with no edit to the note', async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          tableArb,
+          fc.constantFrom('live', 'deleted', 'absent' as const),
+          fc.array(writeArb, { minLength: 1, maxLength: 4 }),
+          async (table, row, writes) => {
+            const { plugin, containerEl, repo, manager, file } =
+              await wireItemNote({
+                table,
+                row,
+                atReference: true,
+                frontmatter: tagged(),
+              });
+            registerReadingModeActionBar(plugin as never);
+            await flush();
+
+            for (const write of writes) {
+              try {
+                apply(repo, write, file.path);
+              } catch {
+                // A row the table already holds by id or path: nothing written
+                continue;
+              }
+              await flush();
+
+              if ((await manager.getItemType(file)) === null) {
+                expect(toggleOf(containerEl)).toBeNull();
+                continue;
+              }
+              expect(faceOf(toggleOf(containerEl)!)).toBe(
+                faceFor(storedArticleAt(repo, file.path))
+              );
+            }
+            plugin.runCleanup();
+          }
+        ),
+        { numRuns: 40 }
+      );
+    }, 30_000);
+
+    it('switches from saying it has no row to the item once a row with its id is stored', async () => {
+      const { plugin, containerEl, repo } = await wireItemNote({
+        table: 'article',
+        row: 'absent',
+        atReference: true,
+        frontmatter: tagged(),
+      });
+      registerReadingModeActionBar(plugin as never);
+      await flush();
+      expect(faceOf(toggleOf(containerEl)!)).toBe('status');
+
+      insertItemAt(repo, 'article', {
+        id: 'x',
+        reference: ROW_REFERENCE,
+        deleted: false,
+      });
+      await flush();
+
+      expect(faceOf(toggleOf(containerEl)!)).toBe(DISMISS);
+      expect(toggleOf(containerEl)!.disabled).toBe(false);
+    });
+
+    it('says it has no row once the row is deleted elsewhere, and shows the item again once it is revived', async () => {
+      const { plugin, containerEl, repo } = await wireItemNote({
+        table: 'article',
+        row: 'live',
+        atReference: true,
+        frontmatter: tagged(),
+      });
+      registerReadingModeActionBar(plugin as never);
+      await flush();
+      expect(faceOf(toggleOf(containerEl)!)).toBe(DISMISS);
+
+      flagRow(repo, 'article', true);
+      await flush();
+      expect(faceOf(toggleOf(containerEl)!)).toBe('status');
+      expect(toggleOf(containerEl)!.disabled).toBe(true);
+
+      flagRow(repo, 'article', false);
+      await flush();
+      expect(faceOf(toggleOf(containerEl)!)).toBe(DISMISS);
+    });
+
+    it('looks again for a write the leaf hears of while a sweep of the workspace overtakes it', async () => {
+      const { plugin, containerEl, repo } = await wireItemNote({
+        table: 'article',
+        row: 'absent',
+        atReference: true,
+        frontmatter: tagged(),
+      });
+      registerReadingModeActionBar(plugin as never);
+      await flush();
+
+      insertItemAt(repo, 'article', {
+        id: 'x',
+        reference: ROW_REFERENCE,
+        deleted: false,
+      });
+      // Starts a sync of every leaf after the one the write started
+      plugin.app.workspace.triggerLayoutChange();
+      await flush();
+
+      expect(faceOf(toggleOf(containerEl)!)).toBe(DISMISS);
+    });
+
+    it('reads nothing for a sweep of the workspace once it has looked again for a write', async () => {
+      const { plugin, containerEl, repo, lookup } = await wireItemNote({
+        table: 'article',
+        row: 'live',
+        atReference: true,
+        frontmatter: tagged(),
+      });
+      registerReadingModeActionBar(plugin as never);
+      await flush();
+      repo.mutate(`UPDATE article SET dismissed = TRUE WHERE id = 'x'`);
+      await flush();
+      expect(faceOf(toggleOf(containerEl)!)).toBe(RESTORE);
+      lookup.mockClear();
+
+      plugin.app.workspace.triggerLayoutChange();
+      await flush();
+
+      expect(lookup).not.toHaveBeenCalled();
+    });
+
+    it('reads nothing for a write naming another row', async () => {
+      const { plugin, containerEl, repo, lookup } = await wireItemNote({
+        table: 'article',
+        row: 'absent',
+        atReference: true,
+        frontmatter: tagged(),
+      });
+      registerReadingModeActionBar(plugin as never);
+      await flush();
+      lookup.mockClear();
+
+      insertItemAt(repo, 'article', {
+        id: 'y',
+        reference: 'elsewhere/other.md',
+        deleted: false,
+      });
+      await flush();
+
+      expect(lookup).not.toHaveBeenCalled();
+      expect(faceOf(toggleOf(containerEl)!)).toBe('status');
+    });
+
+    it('reads nothing more once the leaf closes or the plugin unloads', async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          fc.constantFrom('closed', 'unloaded' as const),
+          async (end) => {
+            const { plugin, repo, lookup } = await wireItemNote({
+              table: 'article',
+              row: 'absent',
+              atReference: true,
+              frontmatter: tagged(),
+            });
+            registerReadingModeActionBar(plugin as never);
+            await flush();
+            if (end === 'closed') {
+              plugin.app.workspace.iterateAllLeaves.mockImplementation(
+                () => {}
+              );
+              plugin.app.workspace.triggerLayoutChange();
+            } else {
+              plugin.runCleanup();
+            }
+            await flush();
+            lookup.mockClear();
+
+            insertItemAt(repo, 'article', {
+              id: 'x',
+              reference: ROW_REFERENCE,
+              deleted: false,
+            });
+            await flush();
+
+            expect(lookup).not.toHaveBeenCalled();
+            plugin.runCleanup();
+          }
+        ),
+        { numRuns: 4 }
+      );
+    });
+
+    it('looks again once a database swapped in from disk has been taken in', async () => {
+      const { plugin, containerEl, repo } = await wireItemNote({
+        table: 'article',
+        row: 'deleted',
+        atReference: true,
+        frontmatter: tagged(),
+      });
+      const resync = registerReadingModeActionBar(plugin as never);
+      await flush();
+      expect(faceOf(toggleOf(containerEl)!)).toBe('status');
+
+      // Taken in with no change reported for any row
+      await repo.takeIn(`UPDATE article SET deleted = FALSE WHERE id = 'x'`);
+      resync();
+      await flush();
+
+      expect(faceOf(toggleOf(containerEl)!)).toBe(DISMISS);
+    });
+
+    it('looks again when an edit gives the note another id, as an import does', async () => {
+      const { plugin, containerEl, repo, editNote } = await wireItemNote({
+        table: 'article',
+        row: 'absent',
+        atReference: true,
+        frontmatter: { tags: [ARTICLE_TAG] },
+      });
+      registerReadingModeActionBar(plugin as never);
+      await flush();
+      // Stored before the note names it: no row the note claims was written
+      insertItemAt(repo, 'article', {
+        id: 'y',
+        reference: ROW_REFERENCE,
+        deleted: false,
+      });
+      await flush();
+      expect(faceOf(toggleOf(containerEl)!)).toBe('status');
+
+      await editNote((fm) => {
+        fm['ir-id'] = 'y';
+      });
+
+      expect(faceOf(toggleOf(containerEl)!)).toBe(DISMISS);
+    });
+
+    it('reads nothing more for an edit that keeps the note its id and type', async () => {
+      const { plugin, containerEl, editNote, lookup } = await wireItemNote({
+        table: 'article',
+        row: 'live',
+        atReference: true,
+        frontmatter: tagged(),
+      });
+      registerReadingModeActionBar(plugin as never);
+      await flush();
+      lookup.mockClear();
+
+      await editNote((fm) => {
+        fm.title = 'renamed';
+      });
+
+      expect(lookup).not.toHaveBeenCalled();
+      expect(faceOf(toggleOf(containerEl)!)).toBe(DISMISS);
+    });
+
+    it("keeps a PDF's bar naming the action a click would take as its row is dismissed and restored elsewhere", async () => {
+      vi.spyOn(ObsidianPdf, 'isPdfView').mockReturnValue(true);
+      const vault = makeItemVault({});
+      const repo = await TestRepository.create();
+      const file = { path: 'papers/Paper.pdf', extension: 'pdf' } as TFile;
+      insertItemAt(repo, 'article', {
+        id: 'p',
+        reference: file.path,
+        deleted: false,
+      });
+      const contentEl = makeContainerEl();
+      const plugin = makePlugin([makePdfLeaf({ contentEl, file })]);
+      const manager = new ItemManager({ app: vault.app } as never, repo);
+      Object.assign(plugin.reviewManager, {
+        articles: manager,
+        getReviewItemFromFile: (pdf: TFile) => itemOfNote(manager, pdf),
+      });
+      // The PDF hook listens on the real repository
+      plugin.reviewManager.repo = repo as never;
+      registerReadingModeActionBar(plugin as never);
+      await flush();
+      expect(faceOf(toggleOf(contentEl)!)).toBe(DISMISS);
+
+      for (const dismissed of [true, false]) {
+        repo.mutate(`UPDATE article SET dismissed = $1 WHERE id = 'p'`, [
+          dismissed,
+        ]);
+        await flush();
+        expect(faceOf(toggleOf(contentEl)!)).toBe(
+          dismissed ? RESTORE : DISMISS
+        );
+      }
+      plugin.runCleanup();
     });
   });
 

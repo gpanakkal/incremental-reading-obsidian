@@ -12,6 +12,7 @@ import {
 import {
   renderStandaloneActionBarDOM,
   ROWS_RELOADED_EVENT,
+  type StandaloneActionBar,
 } from './ActionBarExtension';
 
 /**
@@ -70,7 +71,7 @@ function targetOf(view: View): BarTarget | null {
 class LeafActionBarController {
   private barEl: HTMLElement | null = null;
   private mountedFile: TFile | null = null;
-  private teardown: (() => void) | null = null;
+  private bar: StandaloneActionBar | null = null;
   /**
    * The newest sync, or `null` once disposed. A lookup that answers after a
    * newer sync started is stale (the leaf may show another file by now) and is
@@ -83,18 +84,36 @@ class LeafActionBarController {
    * the note untouched, so each batch of them re-checks the leaf.
    */
   private followed: { id: string; stop: () => void } | null = null;
+  /**
+   * Whether a sync has been asked to have the bar read its item again, and
+   * none has got as far as the bar since. Kept here, not with the sync, so a
+   * newer sync overtaking that one still has the bar look again.
+   */
+  private lookAgain = false;
 
   constructor(
     private readonly leaf: WorkspaceLeaf,
     private readonly plugin: IncrementalReadingPlugin
   ) {}
 
-  async sync(): Promise<void> {
+  /**
+   * Put a bar on the leaf or take it off, as what it shows earns one.
+   *
+   * @param lookAgain whether a bar already on the leaf reads its item again:
+   * after a database write that can change the item and leave the note's type
+   * as it was (a tagged note is an article with its row or without it). A note
+   * that has come to claim another id, as an import writes, has it read again
+   * too: another row may hold it now.
+   */
+  async sync(lookAgain: boolean): Promise<void> {
     const thisSync = {};
     this.latestSync = thisSync;
     const target = targetOf(this.leaf.view);
     const items = this.plugin.reviewManager.articles;
-    this.follow(target && items.typingRowId(target.file));
+    const claimed = target && items.typingRowId(target.file);
+    const before = this.followed?.id ?? null;
+    this.follow(claimed);
+    if (lookAgain || claimed !== before) this.lookAgain = true;
     if (!target) {
       this.unmount();
       return;
@@ -129,7 +148,7 @@ class LeafActionBarController {
     if (id === null) return;
     const stop = this.plugin.reviewManager.articles.watchRow(
       id,
-      () => void this.sync()
+      () => void this.sync(true)
     );
     this.followed = { id, stop };
   }
@@ -151,20 +170,24 @@ class LeafActionBarController {
       this.mountedFile === file &&
       container.contains(this.barEl)
     ) {
+      if (this.lookAgain) this.bar?.refresh();
+      this.lookAgain = false;
       return;
     }
+    // A bar built afresh reads its item anyway
     this.unmount();
     const bar = createDiv();
     bar.className = `ir-action-bar ir-action-bar-panel ${className}`;
-    this.teardown = renderStandaloneActionBarDOM(file, this.plugin, bar);
+    this.bar = renderStandaloneActionBarDOM(file, this.plugin, bar);
     container.prepend(bar);
     this.barEl = bar;
     this.mountedFile = file;
   }
 
   private unmount(): void {
-    this.teardown?.();
-    this.teardown = null;
+    this.bar?.dispose();
+    this.bar = null;
+    this.lookAgain = false;
     this.barEl?.remove();
     this.barEl = null;
     this.mountedFile = null;
@@ -201,9 +224,13 @@ export function registerReadingModeActionBar(
   /**
    * Re-checks the leaves `include` picks and drops the controllers of leaves
    * that have closed. A note's type is read from disk, so the rest are left
-   * alone when their answer can't have changed.
+   * alone when their answer can't have changed. With `lookAgain`, the bars
+   * already up read their items again too (see `LeafActionBarController.sync`).
    */
-  const syncLeaves = (include: (ctrl: LeafActionBarController) => boolean) => {
+  const syncLeaves = (
+    include: (ctrl: LeafActionBarController) => boolean,
+    lookAgain = false
+  ) => {
     if (unloaded) return;
     const liveLeaves = new Set<WorkspaceLeaf>();
     plugin.app.workspace.iterateAllLeaves((leaf) => {
@@ -214,7 +241,7 @@ export function registerReadingModeActionBar(
         ctrl = new LeafActionBarController(leaf, plugin);
         controllers.set(leaf, ctrl);
       }
-      if (include(ctrl)) void ctrl.sync();
+      if (include(ctrl)) void ctrl.sync(lookAgain);
     });
     for (const [leaf, ctrl] of controllers) {
       if (!liveLeaves.has(leaf)) {
@@ -245,10 +272,11 @@ export function registerReadingModeActionBar(
   plugin.registerEvent(workspace.on('file-open', queueSyncAll));
   plugin.registerEvent(workspace.on('active-leaf-change', queueSyncAll));
   // A PDF is an article only by its row, which a rename or an import settles
-  // after the workspace events for it have fired. A note claiming an id
-  // watches that row from its controller.
+  // after the workspace events for it have fired, and its bar reads the item
+  // again on each write, as one may have dismissed or restored it. A note
+  // claiming an id watches that row from its controller.
   const unsubscribe = plugin.reviewManager.repo.onDataChange(() =>
-    syncLeaves((ctrl) => ctrl.showsPdf())
+    syncLeaves((ctrl) => ctrl.showsPdf(), true)
   );
   // A note's type is in its frontmatter, and importing a note in place gives
   // it an `ir-id` through the cache with no workspace event, so the bar of a
@@ -268,7 +296,8 @@ export function registerReadingModeActionBar(
   });
   syncAll();
   return () => {
-    syncAll();
+    // Any row may have changed, the items of the bars up included
+    syncLeaves(() => true, true);
     // Edit-mode bars are CodeMirror's, out of reach here: they hear it
     workspace.trigger(ROWS_RELOADED_EVENT);
   };

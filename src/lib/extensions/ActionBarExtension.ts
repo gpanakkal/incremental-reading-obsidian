@@ -55,6 +55,12 @@ export const setReviewCallbacks = StateEffect.define<ReviewCallbacks>();
 const setNoteTypeEffect = StateEffect.define<NoteType | null>();
 
 /**
+ * Tells the bar on screen to read its note's item again: `noteTypePlugin`
+ * holds the watches that say when, so the panel needs none of its own.
+ */
+const lookAgainEffect = StateEffect.define<null>();
+
+/**
  * The workspace event raised once a database swapped in from disk has been
  * taken in, which replaces rows without reporting a change to any of them, so
  * that edit-mode bars on notes typed by their rows look again (see
@@ -115,7 +121,7 @@ function createActionBarPanel(
     dom.className = 'ir-action-bar ir-action-bar-panel';
 
     // Initial render
-    let teardown = renderActionBar(view, dom, noteType);
+    let bar = renderActionBar(view, dom, noteType);
 
     return {
       dom,
@@ -124,7 +130,7 @@ function createActionBarPanel(
         dom.parentElement?.classList.add('ir-action-bar-host');
       },
       destroy() {
-        teardown();
+        bar.dispose();
         const host = dom.parentElement;
         dom.remove();
         if (host && !host.querySelector('.ir-action-bar')) {
@@ -146,28 +152,54 @@ function createActionBarPanel(
           const { file } = info;
           if (!file) return;
 
-          teardown();
-          teardown = renderActionBar(update.view, dom, noteType);
+          bar.dispose();
+          bar = renderActionBar(update.view, dom, noteType);
+          return;
         }
+
+        const asked = update.transactions.some((tr) =>
+          tr.effects.some((effect) => effect.is(lookAgainEffect))
+        );
+        if (asked) bar.refresh();
       },
     };
   };
 }
 
-/** Teardown for a bar that subscribed to nothing. */
-const noTeardown = () => {};
+/**
+ * A rendered bar: how to have it read its note's item again, and how to let
+ * it go.
+ */
+export interface StandaloneActionBar {
+  /**
+   * Read the item again and show what was found, once for however many calls
+   * come together. The newest read wins.
+   */
+  refresh(): void;
+  /**
+   * Stop for good: no read starts after this, and none under way repaints.
+   * Call it whenever the bar's DOM is discarded or rendered again.
+   */
+  dispose(): void;
+}
+
+/** A bar with nothing to read again and nothing to let go of. */
+const idleBar: StandaloneActionBar = {
+  refresh: () => {},
+  dispose: () => {},
+};
 
 /**
  * Render the action bar contents based on context.
  *
- * @returns a teardown for whatever the rendered bar subscribed to. Call it
- * before re-rendering into the same container, and when the bar goes away.
+ * @returns the rendered bar. Dispose of it before re-rendering into the same
+ * container, and when the bar goes away.
  */
 function renderActionBar(
   view: EditorView,
   container: HTMLElement,
   noteType: NoteType
-): () => void {
+): StandaloneActionBar {
   const state = view.state.field(actionBarStateField);
   const plugin = view.state.facet(irPluginFacet);
 
@@ -176,7 +208,7 @@ function renderActionBar(
   if (state.isReviewMode) {
     // Review mode: use callbacks from ReviewContext
     renderReviewModeActions(view, container, noteType, state);
-    return noTeardown;
+    return idleBar;
   }
   // Standalone mode: basic actions via ReviewManager
   return renderStandaloneModeActions(view, container, plugin);
@@ -301,120 +333,107 @@ function renderReviewModeActions(
  * Render actions for standalone mode (normal Obsidian tabs).
  * Can be called from both CodeMirror panel (edit mode) and reading mode DOM injection.
  *
- * @returns a teardown that stops watching the item. Call it whenever this DOM
- * is discarded or re-rendered, or the bar goes on reacting to writes for a
- * button that is no longer on screen.
+ * The toggle shows what one read of the note's item found: the action a click
+ * would take on it, or that no live row holds the note. That DOM outlives the
+ * read. The edit-mode bar is a CodeMirror panel kept across switches to
+ * reading mode and back, and the note's row can be stored, tombstoned,
+ * revived, dismissed or restored with the note untouched: by review, the queue
+ * table, the leftover modal, an import, a merge from another device. So the
+ * bar reads again whenever its owner calls `refresh`. The owner already
+ * watches the row the note claims, to type the note by it, so the bar holds no
+ * watch of its own.
+ *
+ * @returns the bar, to read again through and to dispose of whenever this DOM
+ * is discarded or re-rendered
  */
 export function renderStandaloneActionBarDOM(
   file: TFile,
   plugin: IncrementalReadingPlugin,
   container: HTMLElement
-): () => void {
+): StandaloneActionBar {
   const { reviewManager } = plugin;
-  if (!reviewManager) return noTeardown;
+  if (!reviewManager) return idleBar;
 
   // Create dismiss button with loading state, then fetch actual status
   const dismissToggleBtn = createFaceButton(FACES.loading, async () => {});
   dismissToggleBtn.disabled = true;
   container.appendChild(dismissToggleBtn);
 
-  let disposed = false;
-  let unsubscribe: (() => void) | null = null;
-  const dispose = () => {
-    disposed = true;
-    unsubscribe?.();
-    unsubscribe = null;
+  // Update button label based on dismissed status
+  const updateButtonLabel = (isDismissed: boolean) => {
+    showFace(dismissToggleBtn, isDismissed ? FACES.unDismiss : FACES.dismiss);
   };
 
-  // Fetch dismissed status and update button
-  void (async () => {
+  let disposed = false;
+  /** Bumped by each read started, so only the newest one is shown. */
+  let latest = 0;
+  /** Whether a read is asked for and yet to start. */
+  let asked = false;
+  /** Whether any read has been shown, a failed one included. */
+  let shown = false;
+
+  /** Read the item and show what was found, unless a newer read started. */
+  const look = async () => {
+    const thisRead = ++latest;
     try {
       const item = await reviewManager.getReviewItemFromFile(file);
-      if (disposed) return;
-
+      if (disposed || thisRead !== latest) return;
+      shown = true;
       if (!item) {
         showFace(dismissToggleBtn, FACES.notInDatabase);
+        dismissToggleBtn.disabled = true;
+        return;
+      }
+      updateButtonLabel(item.data.dismissed);
+      dismissToggleBtn.disabled = false;
+    } catch (error) {
+      // A failed read once something is on screen leaves it alone: the click
+      // handler reads again before acting. Nothing awaits this, so an error
+      // let through would surface as an uncaught one.
+      if (shown) {
+        console.error('Failed to refresh item status:', error);
+        return;
+      }
+      console.error('Failed to fetch item status:', error);
+      if (disposed || thisRead !== latest) return;
+      shown = true;
+      showFace(dismissToggleBtn, FACES.error);
+    }
+  };
+  void look();
+
+  dismissToggleBtn.onclick = async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    try {
+      // Re-fetch to get current status (may have changed)
+      const item: ReviewItem | null =
+        await reviewManager.getReviewItemFromFile(file);
+
+      if (!item) {
+        Obsidian.notify('Item not found in database', { kind: 'error' });
         return;
       }
 
-      // Update button label based on dismissed status
-      const updateButtonLabel = (isDismissed: boolean) => {
-        showFace(
-          dismissToggleBtn,
-          isDismissed ? FACES.unDismiss : FACES.dismiss
-        );
-      };
+      const isDismissed = item.data.dismissed;
+      if (isDismissed) {
+        await reviewManager.unDismissItem(item);
+        Obsidian.notify('Item restored to queue', { kind: 'success' });
+        updateButtonLabel(false);
+      } else {
+        await reviewManager.dismissItem(item);
+        Obsidian.notify('Item dismissed', { kind: 'success' });
+        updateButtonLabel(true);
+      }
 
-      updateButtonLabel(item.data.dismissed);
-      dismissToggleBtn.disabled = false;
-
-      // This DOM outlives the single read above. The edit-mode bar is a
-      // CodeMirror panel built once per editor and kept across switches to
-      // reading mode and back, so a label painted from one read is whatever
-      // was true when the editor was created â€” or when this button was last
-      // clicked. Anything else that dismisses or restores the item (the
-      // reading-mode bar, review, the queue table, a command) leaves it
-      // describing the wrong action, while the click handler below re-reads
-      // and does the right one. Re-read on every write touching this row so
-      // the label keeps naming the action a click would actually take.
-      const watchedId = item.data.id;
-      unsubscribe = reviewManager.repo.onDataChange((event) => {
-        if (!event.ids.includes(watchedId)) return;
-        void (async () => {
-          try {
-            const current = await reviewManager.getReviewItemFromFile(file);
-            // A row that has gone (deleted, or the note untagged) leaves the
-            // last known label alone: the click handler re-reads before
-            // acting and reports for itself, which beats a button relabelled
-            // by a lookup that found nothing.
-            if (disposed || !current) return;
-            updateButtonLabel(current.data.dismissed);
-          } catch (error) {
-            // A failed re-read leaves the label alone too. Nothing awaits
-            // this, so an error let through would surface as an uncaught one.
-            console.error('Failed to refresh item status:', error);
-          }
-        })();
-      });
-
-      // Set up click handler with current item reference
-      dismissToggleBtn.onclick = async (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-
-        try {
-          // Re-fetch to get current status (may have changed)
-          const item: ReviewItem | null =
-            await reviewManager.getReviewItemFromFile(file);
-
-          if (!item) {
-            Obsidian.notify('Item not found in database', { kind: 'error' });
-            return;
-          }
-
-          const isDismissed = item.data.dismissed;
-          if (isDismissed) {
-            await reviewManager.unDismissItem(item);
-            Obsidian.notify('Item restored to queue', { kind: 'success' });
-            updateButtonLabel(false);
-          } else {
-            await reviewManager.dismissItem(item);
-            Obsidian.notify('Item dismissed', { kind: 'success' });
-            updateButtonLabel(true);
-          }
-
-          await invalidateCacheOnMatch(item.file, reviewManager);
-        } catch (error) {
-          if (isRefusal(error)) return;
-          console.error('Failed to toggle dismiss status:', error);
-          Obsidian.notify('Failed to update item', { kind: 'error' });
-        }
-      };
+      await invalidateCacheOnMatch(item.file, reviewManager);
     } catch (error) {
-      console.error('Failed to fetch item status:', error);
-      showFace(dismissToggleBtn, FACES.error);
+      if (isRefusal(error)) return;
+      console.error('Failed to toggle dismiss status:', error);
+      Obsidian.notify('Failed to update item', { kind: 'error' });
     }
-  })();
+  };
 
   // Open in review button. Modifier keys and a middle click pick the pane the
   // way Obsidian's own links do; `learn` still reuses an open review tab, so
@@ -435,22 +454,34 @@ export function renderStandaloneActionBarDOM(
   );
   container.appendChild(openInReviewBtn);
 
-  return dispose;
+  return {
+    refresh() {
+      if (asked) return;
+      asked = true;
+      queueMicrotask(() => {
+        asked = false;
+        if (!disposed) void look();
+      });
+    },
+    dispose() {
+      disposed = true;
+    },
+  };
 }
 
 /**
  * Render actions for standalone mode (normal Obsidian tabs) from a CodeMirror EditorView.
  *
- * @returns the bar's teardown, or a no-op when there was nothing to render.
+ * @returns the bar, or an idle one when there was nothing to render.
  */
 function renderStandaloneModeActions(
   view: EditorView,
   container: HTMLElement,
   plugin: IncrementalReadingPlugin | null
-): () => void {
-  if (!plugin) return noTeardown;
+): StandaloneActionBar {
+  if (!plugin) return idleBar;
   const { info } = Obsidian.getFileInfoFromState(view.state);
-  if (!info?.file) return noTeardown;
+  if (!info?.file) return idleBar;
   return renderStandaloneActionBarDOM(info.file, plugin, container);
 }
 
@@ -653,6 +684,11 @@ function createPriorityInput(
  * naming it, and once per database swapped in from disk, which reports no
  * write ({@link ROWS_RELOADED_EVENT}). A note claiming no id watches nothing:
  * no database write can change what it is.
+ *
+ * Each such recheck also has the bar on screen read the note's item again,
+ * since a write can change the item and leave the type as it was: a tagged
+ * note is an article with its row or without it. So does a change to the id
+ * the note claims, as an import writes: another row may hold it now.
  */
 const noteTypePlugin = ViewPlugin.define((view) => {
   let destroyed = false;
@@ -693,9 +729,15 @@ const noteTypePlugin = ViewPlugin.define((view) => {
     });
   };
 
+  /** Have the bar on screen, if there is one, read its item again. */
+  const lookAgain = () => {
+    view.dispatch({ effects: lookAgainEffect.of(null) });
+  };
+
   /**
-   * Type the open note again from its cached parse, after a database write.
-   * Only a watch calls it, and `destroy` stops that first.
+   * Type the open note again from its cached parse, after a database write,
+   * and have the bar read its item again. Only a watch calls it, and
+   * `destroy` stops that first.
    */
   const recheck = () => {
     const { info } = Obsidian.getFileInfoFromState(view.state);
@@ -707,6 +749,7 @@ const noteTypePlugin = ViewPlugin.define((view) => {
         info.app.metadataCache.getFileCache(info.file)
       )
     );
+    lookAgain();
   };
 
   /**
@@ -749,7 +792,10 @@ const noteTypePlugin = ViewPlugin.define((view) => {
         const itemLayer = items();
         if (!itemLayer) return;
         settle(itemLayer.itemTypeFromCache(changedFile, cache));
-        follow(app, itemLayer.typingRowId(changedFile, cache));
+        const claimed = itemLayer.typingRowId(changedFile, cache);
+        const before = followed?.id ?? null;
+        follow(app, claimed);
+        if (claimed !== before) lookAgain();
       }
     );
   };
