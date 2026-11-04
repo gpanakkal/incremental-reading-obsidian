@@ -4991,6 +4991,66 @@ describe('adoptLeftover', () => {
   });
 });
 
+describe('a snippet made from a note at the path of a trashed row', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  const SOURCE = 'notes/source.md';
+
+  it('stands alone at the default priority, whether the note carries a type tag or its ir-id, made or adopted as a leftover', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom('article' as const, 'snippet' as const),
+        // A card's tag refuses a snippet (see `create`); a tag of the row's
+        // own type is the case a tag decides: half the runs
+        fc.oneof(
+          fc.subarray([ARTICLE_TAG, SNIPPET_TAG, 'other']),
+          fc.subarray(['other'])
+        ),
+        fc.boolean(),
+        fc.integer({ min: MINIMUM_PRIORITY, max: MAXIMUM_PRIORITY }),
+        fc.constantFrom('create' as const, 'adopt' as const),
+        async (table, tags, claimsId, priority, how) => {
+          vi.restoreAllMocks();
+          const frontmatter: Record<string, unknown> = { tags };
+          if (claimsId) frontmatter['ir-id'] = 'trashed-1';
+          const { vault, repo, manager, snip } = await wireSnippets({
+            [SOURCE]: frontmatter,
+            'snippets/left.md': { 'ir-id': 'left-1', tags: [SNIPPET_TAG] },
+          });
+          repo.mutate(
+            `INSERT INTO ${table} (id, reference, deleted, due, interval, priority) VALUES ('trashed-1', $1, TRUE, 0, 86400000, $2)`,
+            [SOURCE, priority]
+          );
+
+          let id: string;
+          if (how === 'create') {
+            const made = await snip(SOURCE);
+            expect(made).not.toBeNull();
+            id = made!.data.id;
+          } else {
+            vi.spyOn(Obsidian, 'getSourceFile').mockReturnValue(
+              vault.files.get(SOURCE)!
+            );
+            await manager.adoptLeftover(
+              vault.files.get('snippets/left.md')!,
+              'left-1'
+            );
+            id = 'left-1';
+          }
+
+          expect(
+            repo.rows('snippet').find((row) => row.id === id)
+          ).toMatchObject({ parent: null, priority: DEFAULT_PRIORITY });
+          repo.dispose();
+        }
+      ),
+      { numRuns: 60 }
+    );
+  });
+});
 describe('undoReview', () => {
   afterEach(() => {
     vi.restoreAllMocks();

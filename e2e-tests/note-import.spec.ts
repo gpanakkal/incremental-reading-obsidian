@@ -76,6 +76,8 @@ type PageApp = {
         reviewManager: {
           repo: {
             query(sql: string, params?: unknown[]): Record<string, unknown>[];
+            mutate(sql: string, params?: unknown[]): Promise<void>;
+            onReloadFromDisk?(): Promise<void>;
           };
         };
       }
@@ -198,6 +200,68 @@ test.describe('Importing a note cards were made from', () => {
     await expect(activeTabTitle(window)).toHaveText('Security Principles');
     await expect(cardEmbed(window)).toBeInViewport();
   });
+});
+
+test.describe("An item made from an article's note whose row is in the trash", () => {
+  for (const kind of ['card', 'snippet'] as const) {
+    test(`a ${kind} has no parent in the queue`, async () => {
+      await openNote(window, 'sources/Security Principles');
+      await executeCommandById(window, 'incremental-reading:import-article');
+      await finalizeArticleImport(window);
+      const articleId = () =>
+        window.evaluate((notePath) => {
+          const { app } = window as unknown as { app: PageApp };
+          const { repo } =
+            app.plugins.plugins['incremental-reading'].reviewManager;
+          return repo.query('SELECT id FROM article WHERE reference = $1', [
+            notePath,
+          ])[0]?.id as string | undefined;
+        }, NOTE_PATH);
+      await expect.poll(articleId).toBeDefined();
+
+      // Trashed on another device, its note yet to follow: here the note
+      // keeps its tag and its ir-id, at the row's reference
+      await window.evaluate(
+        async (id) => {
+          const { app } = window as unknown as { app: PageApp };
+          const { repo } =
+            app.plugins.plugins['incremental-reading'].reviewManager;
+          await repo.mutate('UPDATE article SET deleted = TRUE WHERE id = $1', [
+            id,
+          ]);
+          await repo.onReloadFromDisk?.();
+        },
+        (await articleId())!
+      );
+
+      await openNote(window, 'sources/Security Principles');
+      await selectParagraph(window, BULLET_TEXT);
+      const table = kind === 'card' ? 'srs_card' : 'snippet';
+      await executeCommandById(
+        window,
+        kind === 'card'
+          ? 'incremental-reading:create-card'
+          : 'incremental-reading:extract-selection'
+      );
+      await expect
+        .poll(() =>
+          window.evaluate((table) => {
+            const { app } = window as unknown as { app: PageApp };
+            const { repo } =
+              app.plugins.plugins['incremental-reading'].reviewManager;
+            return repo.query(`SELECT id FROM ${table}`).length;
+          }, table)
+        )
+        .toBe(1);
+
+      await executeCommandById(window, 'incremental-reading:learn');
+      const row = window.locator(`.ir-queue-row[data-type="${kind}"]`);
+      await expect(row).toHaveCount(1);
+      await expect(
+        row.locator('.ir-queue-cell[data-column="parent"]')
+      ).not.toContainText(NOTE_PATH);
+    });
+  }
 });
 
 test.describe('Importing a note as a copy re-bases its links', () => {

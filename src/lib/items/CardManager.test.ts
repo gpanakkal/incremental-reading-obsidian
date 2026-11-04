@@ -6244,7 +6244,7 @@ describe('the parent of a card made from a note', () => {
     { nil: undefined }
   );
 
-  it('is the row of the article or snippet the note is, typed by its tags or, carrying none, by the live row at its path that holds its ir-id', async () => {
+  it('is the live row of the article or snippet the note is, typed by its tags or, carrying none, by the live row at its path that holds its ir-id', async () => {
     await fc.assert(
       fc.asyncProperty(
         // A note with no type tag is the case the rows decide: half the runs
@@ -6299,11 +6299,13 @@ describe('the parent of a card made from a note', () => {
           const type =
             TYPE_TAGS.find(([tag]) => tags.includes(tag))?.[1] ??
             (holder ? TYPE_OF_TABLE[holder.table] : null);
-          // The row of that type at the note's path, a tagged note's
-          // tombstone there included; a card's note is no parent
+          // The live row of that type at the note's path; a tombstone there,
+          // tagged note or not, and a card's note are no parent
           const parent =
             type === 'article' || type === 'snippet'
-              ? rows.find((row) => row.table === type && row.here)
+              ? rows.find(
+                  (row) => row.table === type && row.here && !row.deleted
+                )
               : undefined;
           expect(card).not.toBeNull();
           expect(
@@ -6317,6 +6319,79 @@ describe('the parent of a card made from a note', () => {
   });
 });
 
+describe('a card made from a note at the path of a trashed row', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const SOURCE = 'notes/source.md';
+
+  it('stands alone, whether the note carries a type tag or its ir-id, made or adopted as a leftover', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom('article' as const, 'snippet' as const),
+        // A tag of the row's own type is the case a tag decides: half the runs
+        fc.oneof(
+          fc.subarray([ARTICLE_TAG, SNIPPET_TAG, CARD_TAG, 'other']),
+          fc.subarray(['other'])
+        ),
+        fc.boolean(),
+        fc.constantFrom('create' as const, 'adopt' as const),
+        async (table, tags, claimsId, how) => {
+          vi.restoreAllMocks();
+          const frontmatter: Record<string, unknown> = { tags };
+          if (claimsId) frontmatter['ir-id'] = 'trashed-1';
+          const vault = makeItemVault({
+            [SOURCE]: frontmatter,
+            'cards/left.md': { 'ir-id': 'left-1', tags: [CARD_TAG] },
+          });
+          const repo = await TestRepository.create();
+          insertItemAt(repo, table, {
+            id: 'trashed-1',
+            reference: SOURCE,
+            deleted: true,
+          });
+          const manager = new CardManager(
+            { app: vault.app, settings: {} } as never,
+            repo
+          );
+
+          let id: string;
+          if (how === 'create') {
+            const card = await (
+              manager as unknown as {
+                createFileAndEntry(
+                  text: string,
+                  source: TFile
+                ): Promise<{ data: { id: string } } | null>;
+              }
+            ).createFileAndEntry(
+              `${LEFT} answer ${RIGHT}`,
+              vault.files.get(SOURCE)!
+            );
+            expect(card).not.toBeNull();
+            id = card!.data.id;
+          } else {
+            vi.spyOn(Obsidian, 'getSourceFile').mockReturnValue(
+              vault.files.get(SOURCE)!
+            );
+            await manager.adoptLeftover(
+              vault.files.get('cards/left.md')!,
+              'left-1'
+            );
+            id = 'left-1';
+          }
+
+          expect(
+            repo.rows('srs_card').find((row) => row.id === id)
+          ).toMatchObject({ parent: null });
+          repo.dispose();
+        }
+      ),
+      { numRuns: 60 }
+    );
+  });
+});
 describe('the note fingerprint a new card records', () => {
   afterEach(() => {
     vi.restoreAllMocks();

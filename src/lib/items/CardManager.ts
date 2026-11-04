@@ -843,7 +843,10 @@ export class CardManager extends ItemManager {
   /**
    * The id of the row of the article or snippet note `file`, if it is one: by
    * its tags, or, carrying none, by the live row holding it (see
-   * `getItemType`), as a snippet's parent is found.
+   * `getItemType`), as a snippet's parent is found. A trashed row is no
+   * parent: a tagged note at its path keeps its tag's type, as a note written
+   * before its row is stored must, but a card made from it stands alone, as
+   * one made from the same note untagged does.
    */
   private async findParentId(file: TFile) {
     const parentType = await this.getItemType(file);
@@ -853,7 +856,7 @@ export class CardManager extends ItemManager {
     } else if (parentType === 'snippet') {
       entry = await this.findSnippet(file);
     }
-    return entry ? entry.id : null;
+    return entry && !entry.deleted ? entry.id : null;
   }
 
   /**

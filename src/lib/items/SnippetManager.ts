@@ -453,19 +453,19 @@ export class SnippetManager extends ItemManager {
     if (await refusedWrite(this.repo, 'create the snippet')) return null;
 
     // Its parent is the row behind the note, if any. A note whose tags say
-    // item but that no row backs (a copy of an item's note, one whose row was
-    // purged, one synced ahead of its row) is taken as a plain note is: the
-    // snippet is parentless, found by its source link, and adopted once the
-    // note is imported (see `adoptOrphans`)
+    // item but that no live row backs (a copy of an item's note, one whose row
+    // was trashed or purged, one synced ahead of its row) is taken as a plain
+    // note is: the snippet is parentless, found by its source link, and
+    // adopted once the note is imported (see `adoptOrphans`)
     let currentFileEntry: IArticleBase | ISnippetBase | null = null;
     if (parentType === 'article') {
       const articleRow = await this.findArticle(currentFile);
-      if (articleRow) {
+      if (articleRow && !articleRow.deleted) {
         currentFileEntry = ArticleManager.rowToBase(articleRow);
       }
     } else if (parentType === 'snippet') {
       const snippetRow = await this.findSnippet(currentFile);
-      if (snippetRow) {
+      if (snippetRow && !snippetRow.deleted) {
         currentFileEntry = SnippetManager.rowToBase(snippetRow);
       }
     }
@@ -736,15 +736,18 @@ export class SnippetManager extends ItemManager {
    * Give the note `file`, which holds the `ir-id` `id` no row does, a row of
    * its own: a snippet whose making was cut short before its row was saved
    * (see `crash-leftovers`). Due tomorrow, as a new one is, the child of the
-   * item its `source` links to, if any, at that item's priority. Its
+   * live item its `source` links to, if any, at that item's priority; a
+   * trashed one is no parent, as for a snippet just made (see `create`). Its
    * selection's offsets are not known, so it has no highlight.
    */
   async adoptLeftover(file: TFile, id: string): Promise<void> {
     const dueTime = Date.now() + TEXT_REVIEW_INTERVALS.TOMORROW;
     const source = Obsidian.getSourceFile(file, this.app);
-    const articleRow = source ? await this.findArticle(source) : null;
+    const live = <T extends { deleted: boolean }>(row: T | null) =>
+      row && !row.deleted ? row : null;
+    const articleRow = source ? live(await this.findArticle(source)) : null;
     const snippetRow =
-      source && !articleRow ? await this.findSnippet(source) : null;
+      source && !articleRow ? live(await this.findSnippet(source)) : null;
     const parent = articleRow
       ? ArticleManager.rowToBase(articleRow)
       : snippetRow
