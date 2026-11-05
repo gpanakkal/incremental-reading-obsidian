@@ -16,3 +16,44 @@
 :root {
   --vp-home-hero-name-color: var(--vp-c-brand-1);
 }
+
+/* Hero: let the heading use the full width when there's no hero image,
+   so the name and text lines don't wrap on desktop. */
+@media (min-width: 960px) {
+  .VPHero:not(.has-image) .main {
+    width: 100%;
+  }
+
+  .VPHero .heading .name,
+  .VPHero .heading .text {
+    max-width: none;
+  }
+}
+
+.hero-platform {
+  display: inline-block;
+  margin-bottom: 16px;
+  border: 1px solid var(--vp-c-brand-soft);
+  border-radius: 999px;
+  padding: 2px 12px;
+  background-color: var(--vp-c-brand-soft);
+  color: var(--vp-c-brand-1);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 24px;
+}
+
+/* Phones: shrink the heading with the viewport so "Make learning inevitable"
+   fits on one line (it's about 11x its font size wide). */
+@media (max-width: 639px) {
+  .VPHero .heading .name,
+  .VPHero .heading .text {
+    font-size: min(32px, calc(8.5vw - 5px));
+    line-height: 1.25;
+  }
+}
+
+/* Buttons placed in page content shouldn't pick up link styling. */
+.vp-doc .VPButton {
+  text-decoration: none;
+}
