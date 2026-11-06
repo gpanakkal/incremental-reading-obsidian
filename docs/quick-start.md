@@ -4,7 +4,7 @@ import { VPButton } from 'vitepress/theme';
 
 # Quick start
 
-This page takes you from installing the plugin to finishing your first review session. It only takes a few minutes.
+From installing the plugin to finishing your first review session, all in a few minutes.
 
 ## Installation
 
