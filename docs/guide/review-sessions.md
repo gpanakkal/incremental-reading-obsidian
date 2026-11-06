@@ -15,14 +15,14 @@ The rest of this page covers each step in more detail. For every button, see the
 
 ## Start a session
 
-The ribbon icon and the **Learn** command both open the review tab on its home screen, which lists the items that are due. Select **Begin Review** to start. If nothing is due, the button is disabled.
-
-When the queue runs out, a summary shows how many articles, snippets, and cards you reviewed and lists anything you skipped.
+The ribbon icon and the **Learn** command both open the review tab on its home screen (configurable to open on the first due item instead).
 
 To go straight to the first due item instead, turn on **Skip home screen** in [settings](/reference/settings#reviews).
 
 > [!TIP]
 > Running **Learn** while the review tab is already focused switches between the home screen and the current item.
+
+On desktop, the status bar shows **Ready for review** whenever something is due. Configurable in [settings](/reference/settings).
 
 ## Read and extract snippets
 
@@ -31,6 +31,13 @@ When an article or snippet comes up, read as much as you want. It doesn't have t
 The snippet becomes a new note, and the passage stays highlighted in the original. It's scheduled for review the next day.
 
 Extract generously early on. It's easier to throw away a snippet later than to go back and find a passage you skipped.
+
+### Reading PDFs
+
+A PDF article opens in Obsidian's PDF viewer inside the review tab. Making snippets and cards works in largely the same way as in Markdown articles. Since cards can't be embedded into PDFs, highlights are applied instead.
+
+> [!NOTE]
+> A scanned PDF has no text to select, so nothing can be extracted from it. See [PDFs](/guide/importing#pdfs) for this and other limitations.
 
 ## Mark reviewed
 
@@ -44,6 +51,8 @@ You don't need to finish an article in one sitting. It will come back, and you c
 - **Stop scheduling this item for review** (dismiss) takes the item out of the queue for good. Use it when you've got everything you need from an article or snippet, or when a card isn't worth keeping.
 
 Dismissing doesn't delete anything. To bring a dismissed item back, open its note and select **Un-dismiss** in the bar at the top. In the review tab, the same button is called **Restore item to queue**.
+
+To remove an article from the plugin entirely, [un-import it](/guide/importing#un-import-articles) instead.
 
 ## Revise snippets
 
@@ -60,6 +69,8 @@ When a snippet is short and clear, turn it into one or more spaced repetition ca
 2. Run **Create spaced repetition card**, or select the card icon in the action bar.
 
 The whole paragraph or list item containing your selection becomes the card, with your selection as the blank. In the original note, the paragraph is replaced with an embed of the card, so the note still reads the same. See [Embedding cards into other notes](/guide/outside-review#embed-cards-into-other-notes).
+
+Cards from PDFs work a little differently. See [Reading PDFs](#reading-pdfs).
 
 Tips for good cards:
 
@@ -82,22 +93,28 @@ After you show the answer, choose a grade:
 
 | Button | When to choose it |
 |---|---|
-| **🔁 Forgot** | You didn't recall the answer. (In the command list, this grade is called **Again**.) |
-| **👎 Hard** | You recalled roughly the right answer, but it took time and effort. |
-| **👍 Good** | The answer came to you fairly quickly, but not effortlessly. |
-| **✅ Easy** | You recalled the answer immediately. |
+| **Forgot** | You didn't recall the answer. (In the command list, this grade is called **Again**.) |
+| **Hard** | You recalled roughly the right answer, but it took time and effort. |
+| **Good** | The answer came to you fairly quickly, but not effortlessly. |
+| **Easy** | You recalled the answer immediately. |
 
 The grade determines when the card comes back. Cards you forget can come back within the same session, a few minutes later. See the spaced repetition options in [settings](/reference/settings#spaced-repetition).
 
+To see how far out each grade would put the card, such as `10m` or `4d`, turn on **Show intervals on grade buttons**. A `~` marks an interval that fuzzing can change.
+
 ## Filter by item type
 
-The three icons on the left of the action bar turn articles, snippets, and cards on or off for the session. For example, turn off articles and snippets on a busy day to review only your cards. Their tooltips show which types are included ("Reviewing cards", "Not reviewing articles", and so on).
+Select the filter icon (a funnel) on the left of the action bar to choose which item types the session includes. **Articles**, **Snippets**, and **Cards** each have a toggle. For example, turn off articles and snippets on a busy day to review only your cards.
+
+The same filter is on the home screen, where it also narrows the **Upcoming** table, so **Begin Review** starts with just the types you've chosen.
 
 The **Review: toggle reviewing cards only** command does the same with one keypress.
 
 ## Undo a mistake
 
-Select **Undo** in the action bar or run **Undo last action**. You can undo marking an item reviewed, grading a card, skipping, dismissing, and creating a snippet or card. The button's tooltip tells you what will be undone.
+Select **Undo** in the action bar or run **Undo last action**. You can undo marking an item reviewed, grading a card, skipping, dismissing, creating a snippet or card, and importing articles, including bulk imports. The button's tooltip tells you what will be undone.
+
+To stop a double-click or a repeated hotkey from acting on the next item by accident, the action bar and review commands ignore presses for a moment after the item on screen changes. Adjust or turn this off with **Repeat action guard** in [settings](/reference/settings#reviews).
 
 ## Change an item's schedule
 
