@@ -11,7 +11,7 @@ import * as Notices from '#/lib/notices';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import * as ReassociatePrompt from '#/lib/reassociate-prompt';
 import type { NoteType } from '#/lib/types';
-import { Notice } from '#/test/__mocks__/obsidian';
+import { DropdownComponent, Notice } from '#/test/__mocks__/obsidian';
 import { makeItemVault, TestRepository } from '#/test/item-vault';
 import fc from 'fast-check';
 import { type App, Component, MarkdownRenderer, type TFile } from 'obsidian';
@@ -1187,6 +1187,78 @@ describe('LeftoverModal', () => {
 
     expect(modal.contentEl.childElementCount).toBe(0);
     expect(footer()).toBeNull();
+  });
+
+  it('measures each type once on opening, then fits a line only when what its dropdown shows changes, every dropdown fitted to what it shows', () => {
+    fc.assert(
+      fc.property(
+        mixedLeftoversArb,
+        fc.array(userActionArb, { maxLength: 12 }),
+        (leftovers, actions) => {
+          document.body.innerHTML = '';
+          // A width of its own for each text, as measuring gives
+          const widthOf = (text: string) =>
+            `${text.length}.${text.codePointAt(0) ?? 0}px`;
+          // As Obsidian's: fits the select to the option it shows, if any
+          const resizeToFit = (select: HTMLSelectElement) => {
+            const shown = select.options[select.selectedIndex];
+            if (shown)
+              select.style.setProperty(
+                '--dropdown-fitted-width',
+                widthOf(shown.text)
+              );
+          };
+          const setValue = vi
+            .spyOn(DropdownComponent.prototype, 'setValue')
+            .mockImplementation(function (this: DropdownComponent, value) {
+              this.selectEl.value = value;
+              resizeToFit(this.selectEl);
+              return this;
+            });
+          // Runs no further than Confirm's turning every line off
+          const { modal, rows, confirmButton } = openModal(
+            leftovers,
+            () => new Promise<boolean>(() => {})
+          );
+          const dropdowns = () =>
+            rows().flatMap((row) => dropdownOf(row) ?? []);
+          // Obsidian fits a dropdown to the option the user picks itself
+          for (const select of dropdowns())
+            select.addEventListener('change', () => resizeToFit(select));
+          const expectFitted = () => {
+            for (const select of dropdowns()) {
+              expect(
+                select.style.getPropertyValue('--dropdown-fitted-width')
+              ).toBe(widthOf(select.options[select.selectedIndex].text));
+            }
+          };
+          // Every type, and "Save as…", measured once, on the first line
+          expect(setValue).toHaveBeenCalledTimes(dropdowns()[0].options.length);
+          expectFitted();
+
+          const lines = leftovers.map(lineModel);
+          const shows = (line: LineModel) =>
+            line.other ? '' : (line.type ?? '');
+          for (const action of actions) {
+            const before = lines.map(shows);
+            const picked = action.do === 'pick';
+            setValue.mockClear();
+            act(modal, rows(), lines, action);
+            // A pick is the user's, which the dropdown fits itself to
+            const changed = picked
+              ? 0
+              : lines.filter((line, i) => shows(line) !== before[i]).length;
+            expect(setValue).toHaveBeenCalledTimes(changed);
+            expectFitted();
+          }
+          setValue.mockClear();
+          confirmButton().click();
+          expect(setValue).not.toHaveBeenCalled();
+          expectFitted();
+          setValue.mockRestore();
+        }
+      )
+    );
   });
 });
 

@@ -31,6 +31,7 @@ import {
   setIcon,
   ToggleComponent,
 } from 'obsidian';
+import { DropdownFitter } from './DropdownFitter';
 
 /** A type a leftover can be saved as from the modal. */
 export type SaveType = Extract<NoteType, 'article' | 'snippet'>;
@@ -226,6 +227,8 @@ export class LeftoverModal extends Modal {
   #closed = false;
   /** The preview open, if one is. */
   #open: OpenPreview | null = null;
+  /** Shows the lines' types in their dropdowns (see {@link DropdownFitter}). */
+  readonly #fitter = new DropdownFitter();
 
   /**
    * @param resolve does what was chosen for a leftover, answering `true` once
@@ -255,7 +258,10 @@ export class LeftoverModal extends Modal {
       { cls: 'ir-leftover-all-text', text: 'Save all' },
       (on) => this.#keepAll(on)
     );
-    this.#rows = this.#leftovers.map((leftover) => this.#addRow(leftover));
+    // One batch, or each line's dropdown lays the list out anew as it's added
+    this.#rows = this.#fitter.batch(() =>
+      this.#leftovers.map((leftover) => this.#addRow(leftover))
+    );
     // In `modalEl`, below the content, where Obsidian puts its own
     const buttons = createDiv({
       cls: 'modal-button-container',
@@ -412,7 +418,7 @@ export class LeftoverModal extends Modal {
 
     row.show = () => {
       const { type, other } = row;
-      dropdown?.setValue(other ? '' : (type ?? ''));
+      if (dropdown) this.#fitter.show(dropdown, other ? '' : (type ?? ''));
       showBox();
       for (const [button, action] of [
         [strip, 'strip'],
