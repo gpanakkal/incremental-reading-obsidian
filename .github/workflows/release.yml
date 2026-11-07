@@ -12,6 +12,13 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require tag on main
+        run: |
+          git fetch origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
+          || { echo "Tag is not on main; skipping release"; exit 1; }
       - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
