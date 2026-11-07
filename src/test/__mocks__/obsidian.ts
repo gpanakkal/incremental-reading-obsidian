@@ -266,6 +266,10 @@ export class Setting {
     cb(new ExtraButtonComponent(this.controlEl));
     return this;
   }
+  addButton(cb: (component: ButtonComponent) => unknown) {
+    cb(new ButtonComponent(this.controlEl));
+    return this;
+  }
   addText(cb: (component: TextComponent) => unknown) {
     cb(new TextComponent(this.controlEl));
     return this;

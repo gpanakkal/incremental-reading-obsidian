@@ -673,4 +673,23 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 15,
+    description: 'Mark a database restored from a backup with a restore epoch',
+    up: (db) => {
+      db.exec(`
+        -- At most one row: the epoch of the latest restore from a backup,
+        -- max(previous + 1, now), and the device and time it was made. No row
+        -- reads as never restored (epoch 0). A device receiving a file at a
+        -- higher epoch takes it on whole instead of merging it. Not a synced
+        -- row table: no row stamps.
+        CREATE TABLE IF NOT EXISTS restore_epoch (
+          id INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
+          epoch INTEGER NOT NULL,
+          device TEXT,
+          restored_at INTEGER
+        );
+      `);
+    },
+  },
 ];

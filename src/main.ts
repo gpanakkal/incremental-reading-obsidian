@@ -156,6 +156,7 @@ import {
   readWebPage,
 } from './lib/web-viewer';
 import { createBackupFailurePrompt } from './views/BackupFailurePrompt';
+import { BackupRestoreModal } from './views/BackupRestoreModal';
 import { BulkImportModal } from './views/BulkImportModal';
 import { ImportModal } from './views/ImportModal';
 import { LeftoverWatch } from './views/LeftoverModal';
@@ -1571,6 +1572,17 @@ export default class IncrementalReadingPlugin extends Plugin {
       mode: 'import',
     });
     openModal(modal);
+    return modal;
+  }
+
+  /**
+   * The picker of backups to restore in place of the database, from the
+   * review home.
+   * @param origin what it was asked for from (see `uiWindow`)
+   */
+  openBackupRestore(origin?: UiOrigin): BackupRestoreModal {
+    const modal = new BackupRestoreModal(this.app, this.reviewManager.repo);
+    openModal(modal, origin);
     return modal;
   }
 

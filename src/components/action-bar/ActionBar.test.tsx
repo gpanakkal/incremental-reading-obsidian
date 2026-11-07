@@ -111,6 +111,7 @@ function mountBar({
   reviewView = { showMoreOptionsMenu, leaf },
   leftovers,
   openBulkImport = vi.fn(),
+  openBackupRestore = vi.fn(),
 }: {
   showMoreOptionsMenu?: () => void;
   actions?: ReturnType<typeof makeActions>;
@@ -120,6 +121,8 @@ function mountBar({
   leftovers?: ReturnType<typeof makeLeftoverWatch>;
   /** Opens the bulk import dialog with its filter bar. */
   openBulkImport?: () => void;
+  /** Opens the picker of backups to restore. */
+  openBackupRestore?: (origin?: unknown) => void;
 } = {}): HTMLElement {
   return mount(
     <ReviewContextProvider
@@ -129,6 +132,7 @@ function mountBar({
           app: {},
           leftovers,
           openBulkImport,
+          openBackupRestore,
           ...GRADE_INTERVALS_ON,
         } as never
       }
@@ -162,6 +166,10 @@ function moreOptionsButton(container: HTMLElement): HTMLButtonElement | null {
 
 function bulkImportButton(container: HTMLElement) {
   return container.querySelector<HTMLButtonElement>('#bulk-import-button');
+}
+
+function restoreBackupButton(container: HTMLElement) {
+  return container.querySelector<HTMLButtonElement>('#restore-backup-button');
 }
 
 function beginReviewButton(container: HTMLElement): HTMLButtonElement {
@@ -681,6 +689,7 @@ vi.mock('lucide-react', async () => {
     ArrowLeft: () => null,
     ArrowRight: () => null,
     Ban: () => null,
+    DatabaseBackup: () => null,
     FileQuestionMark: () => null,
     CalendarSync: () => h('svg', { 'data-icon': 'calendar-sync' }),
     Flag: () => h('svg', { 'data-icon': 'flag' }),
@@ -951,6 +960,74 @@ describe('ActionBar', () => {
     });
   });
 
+  describe('restore backup button', () => {
+    it('shows on the home screen alone', () => {
+      fc.assert(
+        fc.property(fc.constantFrom(...PAGES), (page) => {
+          wireQueue();
+          if (page === 'home') reduxState.page = 'home';
+          else wireCurrentItem();
+
+          const container = mountBar();
+
+          expect(restoreBackupButton(container) !== null).toBe(page === 'home');
+          render(null, container);
+          Object.assign(reduxState, defaultReduxState);
+        })
+      );
+    });
+
+    it('sits in the leading zone with the other upkeep, after the leftover button', () => {
+      wireQueue();
+      const container = mountBar({ leftovers: makeLeftoverWatch(2) });
+
+      const restore = restoreBackupButton(container)!;
+      const leftover = queryLeftoverButton(container)!;
+      expect(restore.parentElement).toBe(zone(container, 'lead'));
+      expect(
+        leftover.compareDocumentPosition(restore) &
+          Node.DOCUMENT_POSITION_FOLLOWING
+      ).toBeTruthy();
+    });
+
+    it("opens the backup picker in the review tab's window, whether or not anything is due", () => {
+      fc.assert(
+        fc.property(
+          fc.record({
+            totalRows: fc.nat(3),
+            isLoading: fc.boolean(),
+            isError: fc.boolean(),
+          }),
+          (queue) => {
+            wireQueue(queue);
+            const openBackupRestore = vi.fn();
+            // What says which window the picker opens in (see `uiWindow`)
+            const containerEl = {};
+            const container = mountBar({
+              openBackupRestore,
+              reviewView: {
+                showMoreOptionsMenu: vi.fn(),
+                leaf: makeLeaf(),
+                containerEl,
+              },
+            });
+
+            const button = restoreBackupButton(container)!;
+            expect(button.disabled).toBe(false);
+            expect(openBackupRestore).not.toHaveBeenCalled();
+            button.click();
+
+            expect(openBackupRestore).toHaveBeenCalledExactlyOnceWith(
+              containerEl
+            );
+            expect(dispatch).not.toHaveBeenCalled();
+            render(null, container);
+          }
+        )
+      );
+    });
+  });
+
   describe('home button', () => {
     it('returns to the home screen', () => {
       reduxState.page = 'review';
@@ -1003,6 +1080,7 @@ describe('ActionBar', () => {
         bulkImportButton(container),
         typeFilter(container),
         queryLeftoverButton(container),
+        restoreBackupButton(container),
       ]);
       expect(zoneChildren(container, 'center')).toEqual([
         beginReviewButton(container),
@@ -1410,6 +1488,7 @@ describe('ActionBar', () => {
         navigateButton(container, 'forward'),
         bulkImportButton(container),
         typeFilter(container),
+        restoreBackupButton(container),
       ]);
       expect(zoneChildren(container, 'center')).toEqual([
         beginReviewButton(container),
