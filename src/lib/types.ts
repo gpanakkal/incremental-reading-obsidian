@@ -1,4 +1,5 @@
 // Card, Snippet, ReviewLog, FSRSParameters
+import type { BackupFile } from '#/lib/repository/retention';
 import type { Primitive, SafeOmit } from '#/lib/utility-types';
 import type { TAbstractFile, TFile } from 'obsidian';
 import type { Card, ReviewLog, StateType } from 'ts-fsrs';
@@ -322,6 +323,14 @@ export interface SQLiteRepository {
    * Subscribe to row-level changes on item tables. Returns an unsubscribe fn.
    */
   onDataChange(listener: DataChangeListener): () => void;
+  /** The backups in the vault that can be restored, newest first. */
+  listBackups(): Promise<BackupFile[]>;
+  /**
+   * Replace the database with the backup at `path`, never merging it, after
+   * backing up what it replaces, then save it.
+   * @throws if it can't, leaving the database and its file as they were
+   */
+  restoreBackup(path: string): Promise<void>;
 }
 
 export type SchedulingStrategy = 'priority' | 'fixed-interval';

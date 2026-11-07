@@ -41,6 +41,7 @@ import {
   ArrowRight,
   Ban,
   Check,
+  DatabaseBackup,
   EllipsisVertical,
   Eye,
   FileQuestionMark,
@@ -133,7 +134,10 @@ export function ActionBar() {
               and what review draws from, which are one setting */}
           <ReviewTypeFilter />
           {page === 'home' ? (
-            <LeftoverAction />
+            <>
+              <LeftoverAction />
+              <RestoreBackupAction />
+            </>
           ) : (
             <>
               <UndoAction />
@@ -343,6 +347,26 @@ function BulkImportAction() {
       }}
     >
       <FilesPlus />
+    </ButtonWithIcon>
+  );
+}
+
+/**
+ * Opens the picker of backups to restore in place of the database. Upkeep,
+ * like the leftover button it follows, so it leads the bar rather than
+ * standing among the review buttons.
+ */
+function RestoreBackupAction() {
+  const { plugin, reviewView } = useReviewContext();
+  return (
+    <ButtonWithIcon
+      tooltip="Restore a backup…"
+      id="restore-backup-button"
+      handleClick={() => {
+        plugin.openBackupRestore(reviewView.containerEl);
+      }}
+    >
+      <DatabaseBackup />
     </ButtonWithIcon>
   );
 }

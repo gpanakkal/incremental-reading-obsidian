@@ -1704,11 +1704,71 @@ describe('migration v14 — index each review log by its item', () => {
   ])('looks up the %s rows of one item by index', (log, parent) => {
     expect(lookupPlan(log, parent)).toMatch(/^SCAN/);
 
-    applyMigrations(db, migrations);
+    applyMigrations(
+      db,
+      migrations.filter((m) => m.version <= 14)
+    );
 
     expect(getSchemaVersion(db)).toBe(14);
     expect(lookupPlan(log, parent)).toMatch(
       new RegExp(String.raw`^SEARCH ${log} USING INDEX \w+ \(${parent}=\?\)`)
+    );
+  });
+
+  it('reports no work to do when run a second time', () => {
+    applyMigrations(db, migrations);
+    expect(applyMigrations(db, migrations)).toBe(false);
+  });
+});
+
+describe('migration v15 — mark a restored database with a restore epoch', () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = makeDb(SCHEMA_V0);
+    applyMigrations(
+      db,
+      migrations.filter((m) => m.version <= 14)
+    );
+    insertArticle(db, 'a1', 'notes/a1.md');
+  });
+
+  it('adds an empty restore epoch, leaving every row as it was', () => {
+    const before = selectAll(db, 'article');
+
+    applyMigrations(
+      db,
+      migrations.filter((m) => m.version <= 15)
+    );
+
+    expect(getSchemaVersion(db)).toBe(15);
+    expect(columnNames(db, 'restore_epoch')).toEqual([
+      'id',
+      'epoch',
+      'device',
+      'restored_at',
+    ]);
+    expect(selectAll(db, 'restore_epoch')).toEqual([]);
+    expect(selectAll(db, 'article')).toEqual(before);
+  });
+
+  it('holds at most one epoch', () => {
+    applyMigrations(db, migrations);
+    db.exec(`INSERT INTO restore_epoch (id, epoch) VALUES (1, 5)`);
+
+    expect(() =>
+      db.exec(`INSERT INTO restore_epoch (id, epoch) VALUES (1, 6)`)
+    ).toThrow(/UNIQUE|PRIMARY KEY/);
+    expect(() =>
+      db.exec(`INSERT INTO restore_epoch (id, epoch) VALUES (2, 6)`)
+    ).toThrow(/CHECK/);
+  });
+
+  it('refuses a row without an epoch', () => {
+    applyMigrations(db, migrations);
+
+    expect(() => db.exec(`INSERT INTO restore_epoch (id) VALUES (1)`)).toThrow(
+      /NOT NULL/
     );
   });
 

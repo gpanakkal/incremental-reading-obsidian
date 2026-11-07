@@ -153,4 +153,11 @@ CREATE TABLE IF NOT EXISTS write_stamp (
   generation INTEGER NOT NULL
 );
 
-PRAGMA user_version = 14;
+CREATE TABLE IF NOT EXISTS restore_epoch (
+  id INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
+  epoch INTEGER NOT NULL,
+  device TEXT,
+  restored_at INTEGER
+);
+
+PRAGMA user_version = 15;

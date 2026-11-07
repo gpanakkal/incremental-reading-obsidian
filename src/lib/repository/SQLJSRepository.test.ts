@@ -29,7 +29,8 @@ import {
   type MockInstance,
 } from 'vitest';
 import { BulkMutateError } from './BulkMutateError';
-import { backupFileName, type BackupKind } from './retention';
+import { KNOWN_RESTORE_EPOCH_KEY, readRestoreEpoch } from './restore-epoch';
+import { backupFileName, parseBackupName, type BackupKind } from './retention';
 import * as rowMerge from './row-merge';
 import { disarmRowStamps } from './row-stamps';
 import type { ReplaySettings } from './scheduling-replay';
@@ -469,9 +470,13 @@ class SyncedTestRepository extends SQLJSRepository {
    * harmless there but would pile thousands up over a fuzz run. Nothing reads
    * the old instance either way.
    */
-  protected override async reloadDb(bytes?: ArrayBuffer, localCopy?: boolean) {
+  protected override async reloadDb(
+    bytes?: ArrayBuffer,
+    localCopy?: boolean,
+    chosen?: boolean
+  ) {
     const previous = this.db;
-    const result = await super.reloadDb(bytes, localCopy);
+    const result = await super.reloadDb(bytes, localCopy, chosen);
     if (this.db !== previous) previous?.close();
     return result;
   }
@@ -937,7 +942,10 @@ const INDEXED: IndexView = { folder: true, file: true };
 async function staleFileWith(ids: readonly string[]): Promise<Uint8Array> {
   const SQL = await getSharedSql();
   const db = new SQL.Database(await dbFileWith(ids));
-  db.exec('DROP TABLE rebind; DROP TABLE write_stamp; PRAGMA user_version = 9');
+  db.exec(
+    'DROP TABLE rebind; DROP TABLE write_stamp; DROP TABLE restore_epoch; ' +
+      'PRAGMA user_version = 9'
+  );
   const bytes = db.export();
   db.close();
   return bytes;
@@ -1556,6 +1564,127 @@ function backupsIn(files: Map<string, Uint8Array>): string[] {
     path.startsWith(`${BACKUP_DIRECTORY}/`)
   );
 }
+
+/**
+ * Put a backup of a database holding `ids` into `files`, named as the plugin
+ * names one, and return its path. An `old` one is at schema version 9, as a
+ * backup taken before the migrations since would be.
+ */
+async function addBackup(
+  files: Map<string, Uint8Array>,
+  ids: readonly string[],
+  {
+    kind = 'merge',
+    old = false,
+    time = new Date(FIXED_DUE),
+  }: { kind?: BackupKind; old?: boolean; time?: Date } = {}
+): Promise<string> {
+  const version = old ? 9 : LATEST_VERSION;
+  const path = `${BACKUP_DIRECTORY}/${backupFileName(version, kind, time)}`;
+  files.set(path, old ? await staleFileWith(ids) : await dbFileWith(ids));
+  return path;
+}
+
+/** A backup to restore, as `addBackup` puts one in place. */
+const backupArb = fc.record({
+  ids: articleIdsArb,
+  kind: fc.constantFrom<BackupKind>('merge', 'stale', 'migration'),
+  old: fc.boolean(),
+  time: fc.date({
+    min: new Date(0),
+    max: new Date(FIXED_DUE),
+    noInvalidDate: true,
+  }),
+});
+
+/** The stale backups among `paths`, by what they hold. */
+async function staleBackupsIn(
+  files: Map<string, Uint8Array>,
+  paths: readonly string[]
+): Promise<string[][]> {
+  return Promise.all(
+    paths
+      .filter((path) => parseBackupName(path)?.kind === 'stale')
+      .map((path) => idsIn(files.get(path)))
+  );
+}
+
+/** `ids` sorted, for comparing sets of rows. */
+const sorted = (ids: readonly string[]) => [...ids].sort();
+
+/** A protected repository method a test wraps, typed as a property. */
+type Wrapped = (this: unknown, ...args: unknown[]) => Promise<unknown>;
+
+/**
+ * Wrap `method` on every repository: `after` is given its arguments once the
+ * real one settles, before its result is handed back.
+ */
+function runAfter(
+  method: 'backupDatabase' | 'reloadDb',
+  after: (args: unknown[]) => void
+) {
+  const proto = SQLJSRepository.prototype as unknown as Record<
+    typeof method,
+    Wrapped
+  >;
+  const original = proto[method];
+  return vi.spyOn(proto, method).mockImplementation(async function (
+    this: unknown,
+    ...args: unknown[]
+  ) {
+    const result: unknown = await original.apply(this, args);
+    after(args);
+    return result;
+  });
+}
+
+/** Run `fn` `hops` microtasks from now. */
+function afterMicrotasks(hops: number, fn: () => void) {
+  let due = Promise.resolve();
+  for (let i = 0; i < hops; i++) due = due.then(() => undefined);
+  void due.then(fn);
+}
+
+/**
+ * `bytes` with its restore epoch set to `epoch`, as a restore of a backup
+ * leaves a file.
+ */
+async function atEpoch(
+  bytes: Uint8Array | undefined,
+  epoch: number
+): Promise<Uint8Array> {
+  const SQL = await getSharedSql();
+  const db = new SQL.Database(bytes);
+  db.run('INSERT OR REPLACE INTO restore_epoch (id, epoch) VALUES (1, $1)', [
+    epoch,
+  ]);
+  const out = db.export();
+  db.close();
+  return out;
+}
+
+/** The restore epoch of the database file `bytes`. */
+async function epochIn(bytes: Uint8Array | undefined): Promise<number> {
+  const SQL = await getSharedSql();
+  const db = new SQL.Database(bytes);
+  const epoch = readRestoreEpoch(db);
+  db.close();
+  return epoch;
+}
+
+/** The restore epoch of the database `repo` holds. */
+function epochOf(repo: SQLJSRepository): number {
+  const [row] = repo.query('SELECT epoch FROM restore_epoch') as unknown as {
+    epoch: number;
+  }[];
+  return row?.epoch ?? 0;
+}
+
+/** A restore epoch: never restored, or a time a restore was made. */
+const epochArb = fc.oneof(
+  fc.constant(0),
+  fc.integer({ min: 1, max: 2 * FIXED_DUE })
+);
 
 // #endregion
 
@@ -5413,6 +5542,41 @@ describe("telling another device's copy from this device's own save", () => {
     repo.dispose();
   });
 
+  it('fuzzes nothing in a copy it takes on while a transaction opened since the swap is open', async () => {
+    const { repo, files } = await startStored(['a'], {
+      replaySettings: () => ({ fsrsParams: {}, fuzzTextReviews: true }),
+    });
+    const draw = vi.spyOn(IRScheduler, 'getDueFuzz');
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    let release = () => {};
+    let open: Promise<void> | undefined;
+    // Opened in the microtasks between the swap and the fuzz
+    runAfter('reloadDb', () => {
+      open ??= repo.transaction(
+        () => new Promise<void>((resolve) => (release = resolve))
+      );
+    });
+
+    files.set(
+      DATABASE_FILE_PATH,
+      await savedOnTopBy(files.get(DATABASE_FILE_PATH), ['c'])
+    );
+    await repo.handleFileChange(dbFileChange);
+    await settle();
+
+    expect(open).toBeDefined();
+    expect(articleIds(repo).sort()).toEqual(['a', 'c']);
+    expect(draw).not.toHaveBeenCalled();
+    expect(error).not.toHaveBeenCalled();
+    release();
+    await open;
+    expect(repo.query('SELECT due_fuzz FROM article')).toEqual([
+      { due_fuzz: null },
+      { due_fuzz: null },
+    ]);
+    repo.dispose();
+  });
+
   it('takes on a fast-forward unfuzzed, saving nothing, when fuzzing its rows fails', async () => {
     const { repo, files, adapter, onReloadFromDisk } = await startStored(
       ['a'],
@@ -5531,6 +5695,337 @@ describe("telling another device's copy from this device's own save", () => {
     await settle();
     expect(known()).toEqual(await stampOf(files.get(DATABASE_FILE_PATH)));
     repo.db?.close();
+  });
+
+  describe('by restore epoch', () => {
+    /**
+     * How a file arriving stands to memory by its write stamp alone: an
+     * older save of this device's own (`behind`), a save made on top of
+     * memory's (`fast-forward`), another device's copy (`merge`), or the
+     * file memory last wrote (`echo`).
+     */
+    type Shape = 'behind' | 'fast-forward' | 'merge' | 'echo';
+    const shapeArb = fc.constantFrom<Shape>(
+      'behind',
+      'fast-forward',
+      'merge',
+      'echo'
+    );
+
+    /**
+     * A repository over a file at restore epoch `epoch` that has saved
+     * `['a', 'b']` on it, and the file it saved before that one.
+     */
+    async function startAtEpoch(
+      epoch: number,
+      params: Partial<Parameters<typeof SQLJSRepository.start>[0]> = {}
+    ) {
+      const files = new Map([
+        [DATABASE_FILE_PATH, await atEpoch(await dbFileWith(['a']), epoch)],
+      ]);
+      const vault = makeVault(INDEXED, files);
+      const app = withStorage(vault.app);
+      const onReloadFromDisk = vi.fn();
+      const repo = await startRepo(app, { onReloadFromDisk, ...params });
+      const older = files.get(DATABASE_FILE_PATH);
+      insertArticleRow(repo, 'b');
+      await settle();
+      return { ...vault, app, repo, onReloadFromDisk, older };
+    }
+
+    /** A file shaped as `shape` to what `started` holds, at `epoch`. */
+    async function arriving(
+      started: Awaited<ReturnType<typeof startAtEpoch>>,
+      shape: Shape,
+      epoch: number
+    ): Promise<Uint8Array> {
+      const current = started.files.get(DATABASE_FILE_PATH);
+      const bytes =
+        shape === 'behind'
+          ? started.older
+          : shape === 'fast-forward'
+            ? await savedOnTopBy(current, ['c'])
+            : shape === 'merge'
+              ? await dbFileWith(['x'])
+              : current;
+      return atEpoch(bytes, epoch);
+    }
+
+    it('property: backs memory up as stale, then takes on whole a file at a higher restore epoch, whatever its write stamp says', async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          shapeArb,
+          epochArb,
+          fc.integer({ min: 1, max: FIXED_DUE }),
+          async (shape, mine, ahead) => {
+            const started = await startAtEpoch(mine);
+            const { repo, files, adapter, app, onReloadFromDisk } = started;
+            try {
+              const incoming = await arriving(started, shape, mine + ahead);
+              adapter.writeBinary.mockClear();
+
+              files.set(DATABASE_FILE_PATH, incoming);
+              await repo.handleFileChange(dbFileChange);
+              await settle();
+
+              expect(sorted(articleIds(repo))).toEqual(
+                sorted(await idsIn(incoming))
+              );
+              expect(epochOf(repo)).toBe(mine + ahead);
+              // Taken on, never saved over: it is the file still
+              expect(files.get(DATABASE_FILE_PATH)).toBe(incoming);
+              expect(dbWritesOf(adapter)).toBe(0);
+              const backups = backupWrites(adapter);
+              expect(backups).toHaveLength(1);
+              expect(parseBackupName(backups[0])?.kind).toBe('stale');
+              expect(sorted(await idsIn(files.get(backups[0])))).toEqual([
+                'a',
+                'b',
+              ]);
+              expect(onReloadFromDisk).toHaveBeenCalledOnce();
+              expect(app.storage.get(KNOWN_RESTORE_EPOCH_KEY)).toBe(
+                mine + ahead
+              );
+            } finally {
+              repo.dispose();
+            }
+          }
+        ),
+        { numRuns: 25 }
+      );
+    });
+
+    it.each([true, false])(
+      'gives the due text rows lacking fuzz of a file at a higher restore epoch it takes on some, in one save, only while text reviews are fuzzed (%s)',
+      async (fuzzTextReviews) => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        vi.setSystemTime(TODAY_NOON);
+        const started = await startAtEpoch(0, {
+          replaySettings: () => ({ ...FUZZING_AT_4, fuzzTextReviews }),
+        });
+        const { repo, files, adapter } = started;
+        try {
+          const draw = vi.spyOn(IRScheduler, 'getDueFuzz').mockReturnValue(-9);
+          const incoming = await arriving(started, 'merge', TODAY_NOON);
+          adapter.writeBinary.mockClear();
+
+          files.set(DATABASE_FILE_PATH, incoming);
+          await repo.handleFileChange(dbFileChange);
+          await settle();
+
+          const fuzz = fuzzTextReviews ? -9 : null;
+          expect(repo.query('SELECT id, due_fuzz FROM article')).toEqual([
+            { id: 'x', due_fuzz: fuzz },
+          ]);
+          expect(
+            (await textRowsIn(files.get(DATABASE_FILE_PATH))).map(
+              (row) => row.due_fuzz
+            )
+          ).toEqual([fuzz]);
+          expect(draw).toHaveBeenCalledTimes(fuzzTextReviews ? 1 : 0);
+          expect(dbWritesOf(adapter)).toBe(fuzzTextReviews ? 1 : 0);
+        } finally {
+          repo.dispose();
+        }
+      }
+    );
+
+    it('takes on whole a file at a higher restore epoch over a database started without a file, backing it up as stale', async () => {
+      const vault = makeVault(INDEXED);
+      const repo = await startRepo(vault.app);
+      try {
+        const incoming = await atEpoch(await dbFileWith(['x']), 5);
+        vault.files.set(DATABASE_FILE_PATH, incoming);
+        await repo.handleFileChange(dbFileChange);
+        await settle();
+
+        expect(articleIds(repo)).toEqual(['x']);
+        expect(epochOf(repo)).toBe(5);
+        expect(
+          backupWrites(vault.adapter).map((p) => parseBackupName(p)?.kind)
+        ).toEqual(['stale']);
+      } finally {
+        repo.dispose();
+      }
+    });
+
+    it('takes on whole, unmerged, a file at a higher restore epoch met where a local copy stood in for a missing one', async () => {
+      const files = new Map([[PREV_PATH, await dbFileWith(['copy'])]]);
+      const vault = makeVault(INDEXED, files);
+      const write = vault.adapter.writeBinary.getMockImplementation()!;
+      // The save that would put the copy in place fails, so it stands in still
+      vault.adapter.writeBinary.mockImplementation(async (p, data) => {
+        if (!p.startsWith(`${BACKUP_DIRECTORY}/`)) throw new Error('ENOSPC');
+        return write(p, data);
+      });
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const repo = await startRepo(vault.app);
+      try {
+        expect(articleIds(repo)).toEqual(['copy']);
+        vault.adapter.writeBinary.mockImplementation(write);
+
+        files.set(
+          DATABASE_FILE_PATH,
+          await atEpoch(await savedOnTopBy(await dbFileWith([]), ['synced']), 5)
+        );
+        await repo.handleFileChange(dbFileChange);
+        await settle();
+
+        expect(articleIds(repo)).toEqual(['synced']);
+        const stale = backupWrites(vault.adapter).filter(
+          (p) => parseBackupName(p)?.kind === 'stale'
+        );
+        expect(stale).toHaveLength(1);
+        expect(await idsIn(files.get(stale[0]))).toEqual(['copy']);
+        insertArticleRow(repo, 'after');
+        await settle();
+        expect(sorted(await idsInFile(files))).toEqual(['after', 'synced']);
+      } finally {
+        repo.dispose();
+      }
+    });
+
+    it('property: saves over a file at a lower restore epoch, taking nothing of it, whatever its write stamp says', async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          shapeArb,
+          fc.integer({ min: 1, max: 2 * FIXED_DUE }),
+          fc.integer({ min: 1, max: 2 * FIXED_DUE }),
+          async (shape, mine, behind) => {
+            const theirs = Math.max(0, mine - behind);
+            const started = await startAtEpoch(mine);
+            const { repo, files, adapter, onReloadFromDisk } = started;
+            try {
+              const incoming = await arriving(started, shape, theirs);
+
+              files.set(DATABASE_FILE_PATH, incoming);
+              await repo.handleFileChange(dbFileChange);
+              await settle();
+
+              expect(sorted(articleIds(repo))).toEqual(['a', 'b']);
+              expect(epochOf(repo)).toBe(mine);
+              expect(sorted(await idsInFile(files))).toEqual(['a', 'b']);
+              expect(await epochIn(files.get(DATABASE_FILE_PATH))).toBe(mine);
+              expect(onReloadFromDisk).not.toHaveBeenCalled();
+              expect(backupWrites(adapter)).toEqual([]);
+            } finally {
+              repo.dispose();
+            }
+          }
+        ),
+        { numRuns: 25 }
+      );
+    });
+
+    it('leaves a file at a lower restore epoch alone while a save of its own is on the way', async () => {
+      const started = await startAtEpoch(9);
+      const { repo, files, adapter } = started;
+      try {
+        let finishWrite!: () => void;
+        const write = adapter.writeBinary.getMockImplementation()!;
+        adapter.writeBinary.mockImplementationOnce(async (path, data) => {
+          await new Promise<void>((resolve) => (finishWrite = resolve));
+          return write(path, data);
+        });
+        insertArticleRow(repo, 'c');
+        await settle();
+        const writes = adapter.writeBinary.mock.calls.length;
+
+        files.set(
+          DATABASE_FILE_PATH,
+          await arriving(started, 'fast-forward', 3)
+        );
+        await repo.handleFileChange(dbFileChange);
+        await settle();
+
+        expect(adapter.writeBinary).toHaveBeenCalledTimes(writes);
+        finishWrite();
+        await settle();
+        // The save on the way puts memory over it, and no second one
+        expect(adapter.writeBinary).toHaveBeenCalledTimes(writes);
+        expect(sorted(await idsInFile(files))).toEqual(['a', 'b', 'c']);
+        expect(await epochIn(files.get(DATABASE_FILE_PATH))).toBe(9);
+      } finally {
+        repo.dispose();
+      }
+    });
+
+    it('property: answers a file at its own restore epoch by its write stamp alone', async () => {
+      await fc.assert(
+        fc.asyncProperty(shapeArb, epochArb, async (shape, epoch) => {
+          const started = await startAtEpoch(epoch);
+          const { repo, files, adapter, onReloadFromDisk } = started;
+          try {
+            const incoming = await arriving(started, shape, epoch);
+            adapter.writeBinary.mockClear();
+
+            files.set(DATABASE_FILE_PATH, incoming);
+            await repo.handleFileChange(dbFileChange);
+            await settle();
+
+            const expected = {
+              behind: ['a', 'b'],
+              'fast-forward': ['a', 'b', 'c'],
+              merge: ['a', 'b', 'x'],
+              echo: ['a', 'b'],
+            }[shape];
+            expect(sorted(articleIds(repo))).toEqual(expected);
+            expect(sorted(await idsInFile(files))).toEqual(expected);
+            expect(epochOf(repo)).toBe(epoch);
+            expect(backupWrites(adapter)).toEqual([]);
+            // Saved over (behind), saved merged (merge), or left (the rest)
+            expect(dbWritesOf(adapter)).toBe(
+              shape === 'behind' || shape === 'merge' ? 1 : 0
+            );
+            expect(onReloadFromDisk).toHaveBeenCalledTimes(
+              shape === 'fast-forward' || shape === 'merge' ? 1 : 0
+            );
+          } finally {
+            repo.dispose();
+          }
+        }),
+        { numRuns: 25 }
+      );
+    });
+
+    it('merges a file no device stamped whatever its restore epoch, keeping its own', async () => {
+      const { repo, files } = await startAtEpoch(9);
+      try {
+        files.set(DATABASE_FILE_PATH, await staleFileWith(['old']));
+        await repo.handleFileChange(dbFileChange);
+        await settle();
+
+        expect(sorted(articleIds(repo))).toEqual(['a', 'b', 'old']);
+        expect(epochOf(repo)).toBe(9);
+        expect(await epochIn(files.get(DATABASE_FILE_PATH))).toBe(9);
+      } finally {
+        repo.dispose();
+      }
+    });
+
+    it("merges another device's file whose restore epoch can't be read as one never restored, rather than taking it on unbacked", async () => {
+      const started = await startAtEpoch(0);
+      const { repo, files, adapter } = started;
+      try {
+        const SQL = await getSharedSql();
+        const db = new SQL.Database(await arriving(started, 'merge', 0));
+        db.exec(
+          'DROP TABLE restore_epoch; CREATE TABLE restore_epoch (id INTEGER)'
+        );
+        const incoming = db.export();
+        db.close();
+
+        files.set(DATABASE_FILE_PATH, incoming);
+        await repo.handleFileChange(dbFileChange);
+        await settle();
+
+        expect(sorted(articleIds(repo))).toEqual(['a', 'b', 'x']);
+        expect(sorted(await idsInFile(files))).toEqual(['a', 'b', 'x']);
+        expect(backupWrites(adapter)).toEqual([]);
+      } finally {
+        repo.dispose();
+      }
+    });
   });
 
   describe('at startup', () => {
@@ -5688,6 +6183,94 @@ describe("telling another device's copy from this device's own save", () => {
       const repo = await startRepo(app);
 
       expect(repo.startupKind).toBeNull();
+      repo.dispose();
+    });
+
+    it.each([
+      { known: 0, loaded: 5 },
+      { known: 5, loaded: 9 },
+      { known: 9, loaded: 5 },
+      { known: 5, loaded: 0 },
+    ])(
+      'reports a file at restore epoch $loaded where it last knew $known, rather than its lacking saves, and starts on it whole, remembering its epoch',
+      async ({ known, loaded }) => {
+        const { app, files } = await firstSession(['a'], 'b');
+        app.storage.set(KNOWN_RESTORE_EPOCH_KEY, known);
+        files.set(
+          DATABASE_FILE_PATH,
+          await atEpoch(await dbFileWith(['restored']), loaded)
+        );
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+        const repo = await startRepo(app);
+
+        expect(articleIds(repo)).toEqual(['restored']);
+        expect(epochOf(repo)).toBe(loaded);
+        // Once, of the restore alone
+        expect(warn).toHaveBeenCalledOnce();
+        expect(warn.mock.calls[0][1]).toEqual({
+          knownEpoch: known,
+          epoch: loaded,
+        });
+        expect(app.storage.get(KNOWN_RESTORE_EPOCH_KEY)).toBe(loaded);
+        repo.dispose();
+      }
+    );
+
+    it('reports no restore when the file is at the epoch it last knew, or it knew none, remembering the epoch of the file', async () => {
+      const { app, files } = await firstSession(['a'], 'b');
+      files.set(
+        DATABASE_FILE_PATH,
+        await atEpoch(files.get(DATABASE_FILE_PATH), 5)
+      );
+      app.storage.delete(KNOWN_RESTORE_EPOCH_KEY);
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const first = await startRepo(app);
+      expect(app.storage.get(KNOWN_RESTORE_EPOCH_KEY)).toBe(5);
+      first.dispose();
+      const second = await startRepo(app);
+
+      expect(epochOf(second)).toBe(5);
+      expect(warn).not.toHaveBeenCalled();
+      second.dispose();
+    });
+
+    it('still reports a file lacking saves it knew of at the epoch it last knew', async () => {
+      const { app, files } = await firstSession(['a'], 'b');
+      app.storage.set(KNOWN_RESTORE_EPOCH_KEY, 5);
+      files.set(
+        DATABASE_FILE_PATH,
+        await atEpoch(await dbFileWith(['other']), 5)
+      );
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const repo = await startRepo(app);
+
+      expect(repo.startupKind).toBe('merge');
+      expect(warn).toHaveBeenCalledOnce();
+      expect(warn.mock.calls[0][1]).toMatchObject({ kind: 'merge' });
+      repo.dispose();
+    });
+
+    it('reports a restore met at startup in place of a missing file, by the local copy it starts on', async () => {
+      const { app, files } = await firstSession(['a'], 'b');
+      app.storage.set(KNOWN_RESTORE_EPOCH_KEY, 5);
+      files.delete(DATABASE_FILE_PATH);
+      files.set(PREV_PATH, await atEpoch(await dbFileWith(['copy']), 9));
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const repo = await startRepo(app);
+
+      expect(articleIds(repo)).toEqual(['copy']);
+      expect(warn.mock.calls.map(([, data]: unknown[]) => data)).toContainEqual(
+        {
+          knownEpoch: 5,
+          epoch: 9,
+        }
+      );
+      // Its save puts it in place, and remembers its epoch
+      expect(app.storage.get(KNOWN_RESTORE_EPOCH_KEY)).toBe(9);
       repo.dispose();
     });
   });
@@ -7835,6 +8418,794 @@ describe('saving over a file that holds no database once it settles (0217)', () 
       expect(files.get(DATABASE_FILE_PATH)).toBe(ahead);
     } finally {
       repo.dispose();
+    }
+  });
+});
+
+describe('listBackups', () => {
+  beforeEach(() => {
+    stubWasm();
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('lists the backups in the backup folder, newest first, and nothing else there', async () => {
+    const nameArb = fc.oneof(
+      fc
+        .record({
+          version: fc.nat({ max: 99 }),
+          kind: fc.constantFrom<BackupKind>('merge', 'stale', 'migration'),
+          time: fc.date({
+            min: new Date(0),
+            max: new Date('9999-12-31T23:59:59.999Z'),
+            noInvalidDate: true,
+          }),
+        })
+        .map(({ version, kind, time }) => backupFileName(version, kind, time)),
+      fc.string({ minLength: 1 }).filter((name) => !name.includes('/'))
+    );
+    const { repo, files } = await startOver([]);
+    try {
+      await fc.assert(
+        fc.asyncProperty(fc.uniqueArray(nameArb), async (names) => {
+          for (const path of backupsIn(files)) files.delete(path);
+          for (const name of names) {
+            files.set(`${BACKUP_DIRECTORY}/${name}`, new Uint8Array());
+          }
+          const listed = await repo.listBackups();
+          const expected = names
+            .map((name) => parseBackupName(`${BACKUP_DIRECTORY}/${name}`))
+            .filter((backup) => backup !== null);
+          expect(listed).toHaveLength(expected.length);
+          expect(listed).toEqual(expect.arrayContaining(expected));
+          for (let i = 1; i < listed.length; i++) {
+            expect(listed[i - 1].time).toBeGreaterThanOrEqual(listed[i].time);
+          }
+        }),
+        { numRuns: 30 }
+      );
+    } finally {
+      repo.dispose();
+    }
+  });
+
+  it('lists none when the backup folder cannot be listed', async () => {
+    const { repo, adapter } = await startOver([]);
+    try {
+      adapter.list.mockRejectedValueOnce(new Error('ENOENT'));
+      await expect(repo.listBackups()).resolves.toEqual([]);
+    } finally {
+      repo.dispose();
+    }
+  });
+});
+
+describe('restoreBackup', () => {
+  beforeEach(() => {
+    stubWasm();
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('leaves the database, in memory and on disk, holding exactly the backup, migrated, whatever it held before', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        articleIdsArb,
+        articleIdsArb,
+        articleIdsArb,
+        backupArb,
+        fc.boolean(),
+        fc.boolean(),
+        async (shared, localOnly, backupOnly, backup, fresh, newer) => {
+          const local = [...new Set([...shared, ...localOnly])];
+          const restored = [...new Set([...shared, ...backupOnly])];
+          let repo: SQLJSRepository;
+          let files: Map<string, Uint8Array>;
+          if (fresh) {
+            // Started without a file: a fresh database, whose saves check
+            // that none appeared
+            const vault = makeVault(INDEXED);
+            files = vault.files;
+            repo = await startRepo(vault.app);
+            for (const id of local) insertArticleRow(repo, id);
+            await settle();
+          } else {
+            ({ repo, files } = await startOver(local));
+          }
+          try {
+            // Changed here after the backup was taken: a merge would keep
+            // these, as the newer rows
+            if (newer) repo.mutate('UPDATE article SET priority = 40');
+            await settle();
+            const path = await addBackup(files, restored, backup);
+            const set = vi.spyOn(files, 'set');
+            await repo.restoreBackup(path);
+            await settle();
+
+            // Saved once, migrated or not
+            expect(
+              set.mock.calls.filter(([p]) => p === DATABASE_FILE_PATH)
+            ).toHaveLength(1);
+            set.mockRestore();
+
+            expect(sorted(articleIds(repo))).toEqual(sorted(restored));
+            expect(sorted(await idsInFile(files))).toEqual(sorted(restored));
+            expect(Object.values(priorities(repo)).every((p) => p === 30)).toBe(
+              true
+            );
+            expect(await readVersion(files)).toBe(LATEST_VERSION);
+            expect(repo.query('PRAGMA user_version')).toEqual([
+              { user_version: LATEST_VERSION },
+            ]);
+          } finally {
+            repo.dispose();
+          }
+        }
+      ),
+      { numRuns: 20 }
+    );
+  });
+
+  it.each([
+    { fuzzTextReviews: true, old: false },
+    { fuzzTextReviews: true, old: true },
+    { fuzzTextReviews: false, old: false },
+    { fuzzTextReviews: false, old: true },
+  ])(
+    'gives the due text rows of the backup lacking fuzz some, in its one save, only while text reviews are fuzzed (%o)',
+    async ({ fuzzTextReviews, old }) => {
+      const files = new Map([[DATABASE_FILE_PATH, await dbFileWith(['a'])]]);
+      const vault = makeVault(INDEXED, files);
+      const repo = await startRepo(vault.app, {
+        replaySettings: () => ({ fsrsParams: {}, fuzzTextReviews }),
+      });
+      try {
+        const draw = vi.spyOn(IRScheduler, 'getDueFuzz').mockReturnValue(-7);
+        const path = await addBackup(files, ['b', 'c'], { old });
+        vault.adapter.writeBinary.mockClear();
+
+        await repo.restoreBackup(path);
+        await settle();
+
+        const fuzz = fuzzTextReviews ? -7 : null;
+        expect(
+          repo.query('SELECT id, due_fuzz FROM article ORDER BY id')
+        ).toEqual([
+          { id: 'b', due_fuzz: fuzz },
+          { id: 'c', due_fuzz: fuzz },
+        ]);
+        const SQL = await getSharedSql();
+        const saved = new SQL.Database(files.get(DATABASE_FILE_PATH));
+        try {
+          expect(
+            saved.exec('SELECT due_fuzz FROM article ORDER BY id')[0].values
+          ).toEqual([[fuzz], [fuzz]]);
+        } finally {
+          saved.close();
+        }
+        expect(draw).toHaveBeenCalledTimes(fuzzTextReviews ? 2 : 0);
+        expect(dbWritesOf(vault.adapter)).toBe(1);
+      } finally {
+        repo.dispose();
+      }
+    }
+  );
+
+  it('backs up the database it replaces first, once, as a stale backup', async () => {
+    await fc.assert(
+      fc.asyncProperty(articleIdsArb, backupArb, async (local, backup) => {
+        const { repo, files } = await startOver(local);
+        try {
+          const path = await addBackup(files, backup.ids, backup);
+          const before = new Set(backupsIn(files));
+          await repo.restoreBackup(path);
+          await settle();
+
+          const added = backupsIn(files).filter((p) => !before.has(p));
+          expect(added).toHaveLength(1);
+          expect(parseBackupName(added[0])).toMatchObject({
+            kind: 'stale',
+            version: LATEST_VERSION,
+          });
+          expect(sorted(await idsIn(files.get(added[0])))).toEqual(
+            sorted(local)
+          );
+          // The backup chosen is left as it was
+          expect(files.has(path)).toBe(true);
+        } finally {
+          repo.dispose();
+        }
+      }),
+      { numRuns: 15 }
+    );
+  });
+
+  type RestoreFailure =
+    | { missing: true }
+    | { unloadable: UnloadableFile }
+    | { backupFails: true }
+    | { migrationFails: true }
+    | { saveFails: true };
+
+  const restoreFailureArb: fc.Arbitrary<RestoreFailure> = fc.oneof(
+    fc.constant({ missing: true as const }),
+    unloadableFileArb.map((unloadable) => ({ unloadable })),
+    fc.constant({ backupFails: true as const }),
+    fc.constant({ migrationFails: true as const }),
+    fc.constant({ saveFails: true as const })
+  );
+
+  it('leaves the database and its file as they were when it fails, still writable', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        articleIdsArb,
+        articleIdsArb,
+        restoreFailureArb,
+        async (local, restored, failure) => {
+          const { repo, files, adapter } = await startOver(local);
+          const spies: MockInstance[] = [];
+          try {
+            const before = files.get(DATABASE_FILE_PATH);
+            let path = `${BACKUP_DIRECTORY}/${backupFileName(
+              LATEST_VERSION,
+              'merge',
+              new Date(FIXED_DUE)
+            )}`;
+            if ('unloadable' in failure) {
+              files.set(path, await unloadableBytes(failure.unloadable));
+            } else if (!('missing' in failure)) {
+              path = await addBackup(files, restored, {
+                old: 'migrationFails' in failure,
+              });
+            }
+            if ('backupFails' in failure) {
+              failBackups(adapter, [new Error('EIO')]);
+            }
+            if ('migrationFails' in failure) {
+              spies.push(
+                vi
+                  .spyOn(
+                    SQLJSRepository.prototype as unknown as {
+                      verifyMigration(): { passed: boolean; errors: string[] };
+                    },
+                    'verifyMigration'
+                  )
+                  .mockReturnValue({ passed: false, errors: ['lost rows'] })
+              );
+            }
+            const write = adapter.writeBinary.getMockImplementation()!;
+            if ('saveFails' in failure) {
+              adapter.writeBinary.mockImplementation(async (p, data) => {
+                if (!p.startsWith(`${BACKUP_DIRECTORY}/`)) {
+                  throw new Error('ENOSPC');
+                }
+                return write(p, data);
+              });
+            }
+
+            const rejected = expect(repo.restoreBackup(path)).rejects;
+            // Named in the error, as the one that could not be loaded
+            if ('unloadable' in failure) await rejected.toThrow(path);
+            else await rejected.toThrow();
+            await settle();
+
+            expect(sorted(articleIds(repo))).toEqual(sorted(local));
+            expect(files.get(DATABASE_FILE_PATH)).toBe(before);
+            expect(repo.readiness).toBe('ready');
+            adapter.writeBinary.mockImplementation(write);
+            // Longer than any id there, so none of them
+            const after = `${local.join('')}x`;
+            insertArticleRow(repo, after);
+            await settle();
+            expect(sorted(await idsInFile(files))).toEqual(
+              sorted([...local, after])
+            );
+          } finally {
+            for (const spy of spies) spy.mockRestore();
+            repo.dispose();
+          }
+        }
+      ),
+      { numRuns: 25 }
+    );
+  });
+
+  it('refuses while writes are refused, reading nothing', async () => {
+    const { repo, files, adapter } = await startOver(['a']);
+    try {
+      files.set(DATABASE_FILE_PATH, await unloadableBytes({ ahead: 1 }));
+      await repo.handleFileChange(dbFileChange);
+      const refusal = repo.writeRefusal();
+      expect(refusal).not.toBeNull();
+      const path = await addBackup(files, ['b']);
+      adapter.readBinary.mockClear();
+
+      await expect(repo.restoreBackup(path)).rejects.toBe(refusal);
+      expect(adapter.readBinary).not.toHaveBeenCalled();
+      expect(articleIds(repo)).toEqual(['a']);
+    } finally {
+      repo.dispose();
+    }
+  });
+
+  it('refuses once disposed', async () => {
+    const { repo, files } = await startOver(['a']);
+    const path = await addBackup(files, ['b']);
+    repo.dispose();
+    await expect(repo.restoreBackup(path)).rejects.toThrow(
+      repo.writeRefusal()!.message
+    );
+  });
+
+  it('reports merging while it runs, then refetches as after a reload, and is ready after', async () => {
+    const { repo, files, adapter, onReloadFromDisk } = await startOver(['a']);
+    try {
+      const path = await addBackup(files, ['b']);
+      const seen: string[] = [];
+      const write = adapter.writeBinary.getMockImplementation()!;
+      adapter.writeBinary.mockImplementation(async (p, data) => {
+        seen.push(repo.readiness);
+        return write(p, data);
+      });
+      onReloadFromDisk.mockImplementation(() => {
+        // Writes held over the restore land now, not after the refetch
+        seen.push(`refetch:${repo.refetchingAfterReload}:${repo.readiness}`);
+        expect(articleIds(repo)).toEqual(['b']);
+      });
+      await repo.restoreBackup(path);
+
+      expect(seen[0]).toBe('merging');
+      expect(seen.at(-1)).toBe('refetch:true:ready');
+      expect(onReloadFromDisk).toHaveBeenCalledTimes(1);
+      expect(repo.readiness).toBe('ready');
+      expect(repo.refetchingAfterReload).toBe(false);
+    } finally {
+      repo.dispose();
+    }
+  });
+
+  it.each([
+    { ends: 'commits', kept: ['a', 'in-transaction'] },
+    { ends: 'rolls back', kept: ['a'] },
+  ])(
+    'waits for an open transaction to end, backing up what it leaves (it $ends)',
+    async ({ ends, kept }) => {
+      const { repo, files } = await startOver(['a']);
+      try {
+        const path = await addBackup(files, ['b']);
+        let release!: () => void;
+        const failure = new Error('given up');
+        const transaction = repo.transaction(async () => {
+          insertArticleRow(repo, 'in-transaction');
+          await new Promise<void>((resolve) => (release = resolve));
+          if (ends === 'rolls back') throw failure;
+        });
+        const before = new Set(backupsIn(files));
+        const restore = repo.restoreBackup(path);
+        expect(await stillPending(restore)).toBe(true);
+        expect(articleIds(repo)).toContain('in-transaction');
+
+        release();
+        if (ends === 'rolls back') {
+          await expect(transaction).rejects.toBe(failure);
+        } else {
+          await expect(transaction).resolves.toBeUndefined();
+        }
+        await restore;
+        await settle();
+
+        expect(articleIds(repo)).toEqual(['b']);
+        const added = backupsIn(files).filter((p) => !before.has(p));
+        expect((await staleBackupsIn(files, added)).map(sorted)).toEqual([
+          kept,
+        ]);
+      } finally {
+        repo.dispose();
+      }
+    }
+  );
+
+  it('waits for a reload under way to end first, backing up what it took in', async () => {
+    const { repo, files } = await startOver(['a']);
+    try {
+      const path = await addBackup(files, ['b']);
+      files.set(
+        DATABASE_FILE_PATH,
+        await savedOnTopBy(files.get(DATABASE_FILE_PATH), ['remote'])
+      );
+      const before = new Set(backupsIn(files));
+      const reload = repo.handleFileChange(dbFileChange);
+      await repo.restoreBackup(path);
+      await reload;
+      await settle();
+
+      expect(articleIds(repo)).toEqual(['b']);
+      expect(await idsInFile(files)).toEqual(['b']);
+      const added = backupsIn(files).filter((p) => !before.has(p));
+      expect((await staleBackupsIn(files, added)).map(sorted)).toEqual([
+        ['a', 'remote'],
+      ]);
+    } finally {
+      repo.dispose();
+    }
+  });
+
+  it('stops, writing nothing over the file, when disposed while waiting on a transaction', async () => {
+    const { repo, files } = await startOver(['a']);
+    const path = await addBackup(files, ['b']);
+    const before = files.get(DATABASE_FILE_PATH);
+    let release!: () => void;
+    const transaction = repo.transaction(
+      () => new Promise<void>((resolve) => (release = resolve))
+    );
+    const restore = repo.restoreBackup(path);
+    expect(await stillPending(restore)).toBe(true);
+    repo.dispose();
+    release();
+    await transaction.catch(() => undefined);
+
+    await expect(restore).rejects.toThrow(repo.writeRefusal()!.message);
+    await settle();
+    expect(files.get(DATABASE_FILE_PATH)).toBe(before);
+  });
+
+  it('stops, writing nothing over the file, when disposed while backing up', async () => {
+    const { repo, files, adapter } = await startOver(['a']);
+    const path = await addBackup(files, ['b']);
+    const before = files.get(DATABASE_FILE_PATH);
+    const write = adapter.writeBinary.getMockImplementation()!;
+    adapter.writeBinary.mockImplementation(async (p, data) => {
+      await write(p, data);
+      if (p.startsWith(`${BACKUP_DIRECTORY}/`)) repo.dispose();
+    });
+
+    const error = await repo.restoreBackup(path).catch((e: unknown) => e);
+    expect(error).toEqual(repo.writeRefusal());
+    await settle();
+    expect(files.get(DATABASE_FILE_PATH)).toBe(before);
+  });
+
+  it('waits for a transaction opened while the stale backup was written', async () => {
+    const { repo, files, adapter } = await startOver(['a']);
+    try {
+      const path = await addBackup(files, ['b']);
+      const write = adapter.writeBinary.getMockImplementation()!;
+      let release: (() => void) | undefined;
+      let transaction: Promise<void> | undefined;
+      adapter.writeBinary.mockImplementation(async (p, data) => {
+        await write(p, data);
+        if (!transaction && p.startsWith(`${BACKUP_DIRECTORY}/`)) {
+          transaction = repo.transaction(
+            () => new Promise<void>((resolve) => (release = resolve))
+          );
+        }
+      });
+      const restore = repo.restoreBackup(path);
+      expect(await stillPending(restore)).toBe(true);
+
+      release!();
+      await expect(transaction).resolves.toBeUndefined();
+      await restore;
+      await settle();
+      expect(articleIds(repo)).toEqual(['b']);
+      expect(await idsInFile(files)).toEqual(['b']);
+    } finally {
+      repo.dispose();
+    }
+  });
+
+  it('backs up again a write made while the stale backup was written', async () => {
+    const { repo, files, adapter } = await startOver(['a']);
+    try {
+      const path = await addBackup(files, ['b']);
+      const before = new Set(backupsIn(files));
+      const write = adapter.writeBinary.getMockImplementation()!;
+      let wrote = false;
+      adapter.writeBinary.mockImplementation(async (p, data) => {
+        await write(p, data);
+        if (!wrote && p.startsWith(`${BACKUP_DIRECTORY}/`)) {
+          wrote = true;
+          insertArticleRow(repo, 'during-backup');
+        }
+      });
+      await repo.restoreBackup(path);
+      await settle();
+
+      expect(articleIds(repo)).toEqual(['b']);
+      const added = backupsIn(files).filter((p) => !before.has(p));
+      const stale = (await staleBackupsIn(files, added)).map(sorted);
+      expect(stale).toContainEqual(['a', 'during-backup']);
+    } finally {
+      repo.dispose();
+    }
+  });
+
+  it('keeps a write made at any point while it runs, in the stale backup or in the restored database', async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.nat({ max: 12 }), async (hops) => {
+        const { repo, files } = await startOver(['a']);
+        let once = false;
+        const spy = runAfter('backupDatabase', () => {
+          if (once) return;
+          once = true;
+          // A write that comes due once the backup has landed
+          afterMicrotasks(hops, () => insertArticleRow(repo, 'late'));
+        });
+        try {
+          const path = await addBackup(files, ['b']);
+          const before = new Set(backupsIn(files));
+          await repo.restoreBackup(path);
+          await settle();
+
+          const added = backupsIn(files).filter((p) => !before.has(p));
+          const stale = await staleBackupsIn(files, added);
+          const kept =
+            stale.some((ids) => ids.includes('late')) ||
+            (articleIds(repo).includes('late') &&
+              (await idsInFile(files)).includes('late'));
+          expect(kept).toBe(true);
+          expect(articleIds(repo)).toContain('b');
+          expect(articleIds(repo)).not.toContain('a');
+        } finally {
+          spy.mockRestore();
+          repo.dispose();
+        }
+      }),
+      { numRuns: 13, examples: [[0], [1]] }
+    );
+  });
+
+  it('lets a transaction opened just after the swap finish whole, stamped, before saving', async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.nat({ max: 8 }), fc.boolean(), async (hops, old) => {
+        const { repo, files } = await startOver(['a']);
+        let release: (() => void) | undefined;
+        let transaction: Promise<void> | undefined;
+        const spy = runAfter('reloadDb', (args) => {
+          if (args[2] !== true) return;
+          // A transaction that opens once the backup stands as the database
+          afterMicrotasks(hops, () => {
+            transaction = repo.transaction(async () => {
+              insertArticleRow(repo, 'in-transaction');
+              await new Promise<void>((resolve) => (release = resolve));
+            });
+          });
+        });
+        try {
+          const path = await addBackup(files, ['b'], { old });
+          const restore = repo.restoreBackup(path);
+          await vi.waitFor(() => expect(release).toBeDefined());
+          release!();
+          await expect(transaction).resolves.toBeUndefined();
+          await restore;
+          await settle();
+
+          expect(sorted(articleIds(repo))).toEqual(['b', 'in-transaction']);
+          expect(sorted(await idsInFile(files))).toEqual([
+            'b',
+            'in-transaction',
+          ]);
+          // Stamped as any write this device makes, migrated backup or not
+          const [stamped] = repo.query(
+            `SELECT updated_by FROM article WHERE id = 'in-transaction'`
+          ) as { updated_by?: string }[];
+          expect(stamped.updated_by).not.toBe('');
+        } finally {
+          spy.mockRestore();
+          repo.dispose();
+        }
+      }),
+      {
+        numRuns: 12,
+        examples: [
+          [0, true],
+          [1, true],
+          [0, false],
+        ],
+      }
+    );
+  });
+
+  it('answers a database file delivered while it runs after it, merging it into the restored database', async () => {
+    const { repo, files, adapter } = await startOver(['a']);
+    try {
+      const path = await addBackup(files, ['b']);
+      const rename = adapter.fsPromises.rename.getMockImplementation()!;
+      let delivered = false;
+      adapter.fsPromises.rename.mockImplementation(async (from, to) => {
+        await rename(from, to);
+        if (!delivered && to === DATABASE_FILE_PATH) {
+          delivered = true;
+          // Another device's next save, made on top of the restored file
+          files.set(
+            DATABASE_FILE_PATH,
+            await savedOnTopBy(files.get(DATABASE_FILE_PATH), ['remote'])
+          );
+          void repo.handleFileChange(dbFileChange);
+        }
+      });
+      await repo.restoreBackup(path);
+      await settle();
+
+      expect(delivered).toBe(true);
+      expect(sorted(articleIds(repo))).toEqual(['b', 'remote']);
+    } finally {
+      repo.dispose();
+    }
+  });
+
+  it('answers a database file delivered while a failing restore runs after it, as any delivery', async () => {
+    const { repo, files, adapter } = await startOver(['a']);
+    try {
+      const path = await addBackup(files, ['b']);
+      const write = adapter.writeBinary.getMockImplementation()!;
+      let delivered = false;
+      adapter.writeBinary.mockImplementation(async (p, data) => {
+        if (!p.startsWith(`${BACKUP_DIRECTORY}/`)) throw new Error('ENOSPC');
+        await write(p, data);
+        if (delivered) return;
+        delivered = true;
+        // Sync brings another device's save down while the backup is taken
+        files.set(
+          DATABASE_FILE_PATH,
+          await savedOnTopBy(files.get(DATABASE_FILE_PATH), ['remote'])
+        );
+        void repo.handleFileChange(dbFileChange);
+      });
+
+      await expect(repo.restoreBackup(path)).rejects.toThrow('ENOSPC');
+      await settle();
+
+      expect(delivered).toBe(true);
+      expect(sorted(articleIds(repo))).toEqual(['a', 'remote']);
+    } finally {
+      repo.dispose();
+    }
+  });
+
+  it('writes over a file found where a local copy stood in for a missing one, unmerged', async () => {
+    const files = new Map([[PREV_PATH, await dbFileWith(['copy'])]]);
+    const vault = makeVault(INDEXED, files);
+    const write = vault.adapter.writeBinary.getMockImplementation()!;
+    // The save that would put the copy in place fails, so it stands in still
+    vault.adapter.writeBinary.mockImplementation(async (p, data) => {
+      if (!p.startsWith(`${BACKUP_DIRECTORY}/`)) throw new Error('ENOSPC');
+      return write(p, data);
+    });
+    const repo = await startRepo(vault.app);
+    try {
+      expect(articleIds(repo)).toEqual(['copy']);
+      vault.adapter.writeBinary.mockImplementation(write);
+      // Sync brings the file down, its event not yet in
+      files.set(DATABASE_FILE_PATH, await dbFileWith(['synced']));
+      const path = await addBackup(files, ['b']);
+
+      await repo.restoreBackup(path);
+      await settle();
+
+      expect(articleIds(repo)).toEqual(['b']);
+      expect(await idsInFile(files)).toEqual(['b']);
+    } finally {
+      repo.dispose();
+    }
+  });
+
+  it('property: raises the restore epoch past that of the database it replaces and the clock, whatever the backup held, in its one save', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      await fc.assert(
+        fc.asyncProperty(
+          epochArb,
+          epochArb,
+          fc.boolean(),
+          fc.integer({ min: 1, max: 2 * FIXED_DUE }),
+          async (mine, backupEpoch, old, now) => {
+            vi.setSystemTime(now);
+            const files = new Map([
+              [
+                DATABASE_FILE_PATH,
+                await atEpoch(await dbFileWith(['a']), mine),
+              ],
+            ]);
+            const vault = makeVault(INDEXED, files);
+            const app = withStorage(vault.app);
+            const repo = await startRepo(app);
+            try {
+              const path = await addBackup(files, ['b'], { old });
+              // A backup from before the restore epoch has none
+              if (!old)
+                files.set(path, await atEpoch(files.get(path), backupEpoch));
+              vault.adapter.writeBinary.mockClear();
+
+              await repo.restoreBackup(path);
+              await settle();
+
+              const epoch = Math.max(mine + 1, now);
+              expect(epochOf(repo)).toBe(epoch);
+              expect(await epochIn(files.get(DATABASE_FILE_PATH))).toBe(epoch);
+              expect(dbWritesOf(vault.adapter)).toBe(1);
+              expect(app.storage.get(KNOWN_RESTORE_EPOCH_KEY)).toBe(epoch);
+              expect(
+                repo.query('SELECT device, restored_at FROM restore_epoch')
+              ).toEqual([
+                {
+                  device: app.storage.get('incremental-reading-device-id'),
+                  restored_at: now,
+                },
+              ]);
+            } finally {
+              repo.dispose();
+            }
+          }
+        ),
+        { numRuns: 20 }
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the restore epoch it had, in memory, on disk and as known, when the save fails', async () => {
+    const files = new Map([
+      [DATABASE_FILE_PATH, await atEpoch(await dbFileWith(['a']), 5)],
+    ]);
+    const vault = makeVault(INDEXED, files);
+    const app = withStorage(vault.app);
+    const repo = await startRepo(app);
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const path = await addBackup(files, ['b']);
+      const write = vault.adapter.writeBinary.getMockImplementation()!;
+      vault.adapter.writeBinary.mockImplementation(async (p, data) => {
+        if (!p.startsWith(`${BACKUP_DIRECTORY}/`)) throw new Error('ENOSPC');
+        return write(p, data);
+      });
+
+      await expect(repo.restoreBackup(path)).rejects.toThrow();
+      await settle();
+
+      expect(articleIds(repo)).toEqual(['a']);
+      expect(epochOf(repo)).toBe(5);
+      expect(await epochIn(files.get(DATABASE_FILE_PATH))).toBe(5);
+      expect(app.storage.get(KNOWN_RESTORE_EPOCH_KEY)).toBe(5);
+    } finally {
+      repo.dispose();
+    }
+  });
+
+  it('is taken on whole by another device holding saves the backup lacks, which backs its own up first', async () => {
+    // This device and another, both started on the same file
+    const shared = await atEpoch(await dbFileWith(['a']), 0);
+    const here = makeVault(INDEXED, new Map([[DATABASE_FILE_PATH, shared]]));
+    const there = makeVault(INDEXED, new Map([[DATABASE_FILE_PATH, shared]]));
+    // Each its own localStorage, so its own device id
+    const repo = await startRepo(withStorage(here.app));
+    const other = await startRepo(withStorage(there.app));
+    try {
+      const path = await addBackup(here.files, ['b']);
+      // Saves the other device made since the backup, a merge would keep
+      insertArticleRow(other, 'later');
+      other.mutate('UPDATE article SET priority = 40');
+      await settle();
+
+      await repo.restoreBackup(path);
+      await settle();
+      there.files.set(DATABASE_FILE_PATH, here.files.get(DATABASE_FILE_PATH)!);
+      await other.handleFileChange(dbFileChange);
+      await settle();
+
+      expect(priorities(other)).toEqual({ b: 30 });
+      const [backup] = backupWrites(there.adapter);
+      expect(parseBackupName(backup)?.kind).toBe('stale');
+      expect(sorted(await idsIn(there.files.get(backup)))).toEqual([
+        'a',
+        'later',
+      ]);
+    } finally {
+      repo.dispose();
+      other.dispose();
     }
   });
 });

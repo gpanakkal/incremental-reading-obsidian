@@ -8,7 +8,7 @@ import {
   classifyIncoming,
   KNOWN_WRITE_STAMP_KEY,
   loadKnownWriteVector,
-  readFileWriteVector,
+  readFileStamps,
   readWriteVector,
   saveKnownWriteVector,
   STALE_AFTER_MS,
@@ -348,44 +348,85 @@ describe('readWriteVector', () => {
   });
 });
 
-describe('readFileWriteVector', () => {
-  it('reads the stamp of a database file, closing its copy', () => {
+describe('readFileStamps', () => {
+  it('reads the stamp and restore epoch of a database file, closing its copy', () => {
     const db = makeDb();
     db.run(`INSERT INTO write_stamp VALUES ('a', 3)`);
+    db.run(`INSERT INTO restore_epoch (id, epoch) VALUES (1, 7)`);
     const bytes = db.export();
     db.close();
     const close = vi.spyOn(SQL.Database.prototype, 'close');
 
-    expect(readFileWriteVector(SQL, bytes, SCHEMA_VERSION)).toEqual({ a: 3 });
+    expect(readFileStamps(SQL, bytes, SCHEMA_VERSION)).toEqual({
+      stamp: { a: 3 },
+      epoch: 7,
+    });
     expect(close).toHaveBeenCalledOnce();
     vi.restoreAllMocks();
   });
 
-  it('is unstamped for a database from before the write stamp', () => {
+  it('reads a file never restored at epoch 0', () => {
+    const db = makeDb();
+    const bytes = db.export();
+    db.close();
+
+    expect(readFileStamps(SQL, bytes, SCHEMA_VERSION)).toEqual({
+      stamp: {},
+      epoch: 0,
+    });
+  });
+
+  it('keeps the stamp of a file whose restore epoch cannot be read, reading it as never restored', () => {
+    const db = makeDb();
+    db.run(`INSERT INTO write_stamp VALUES ('a', 3)`);
+    db.exec(
+      'DROP TABLE restore_epoch; CREATE TABLE restore_epoch (id INTEGER)'
+    );
+    const bytes = db.export();
+    db.close();
+
+    expect(readFileStamps(SQL, bytes, SCHEMA_VERSION)).toEqual({
+      stamp: { a: 3 },
+      epoch: 0,
+    });
+  });
+
+  it('is unstamped, never restored, for a database from before the write stamp', () => {
     const db = new SQL.Database();
     db.exec('CREATE TABLE article (id TEXT); PRAGMA user_version = 11');
     const bytes = db.export();
     db.close();
 
-    expect(readFileWriteVector(SQL, bytes, SCHEMA_VERSION)).toBe('unstamped');
+    expect(readFileStamps(SQL, bytes, SCHEMA_VERSION)).toEqual({
+      stamp: 'unstamped',
+      epoch: 0,
+    });
   });
 
-  it('is unreadable for a database at a schema version past this one', () => {
+  it('is unreadable, never restored, for a database at a schema version past this one', () => {
     const db = makeDb();
+    db.run(`INSERT INTO restore_epoch (id, epoch) VALUES (1, 7)`);
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION + 1}`);
     const bytes = db.export();
     db.close();
 
-    expect(readFileWriteVector(SQL, bytes, SCHEMA_VERSION)).toBe('unreadable');
-    expect(readFileWriteVector(SQL, bytes, SCHEMA_VERSION + 1)).toEqual({});
+    expect(readFileStamps(SQL, bytes, SCHEMA_VERSION)).toEqual({
+      stamp: 'unreadable',
+      epoch: 0,
+    });
+    expect(readFileStamps(SQL, bytes, SCHEMA_VERSION + 1)).toEqual({
+      stamp: {},
+      epoch: 7,
+    });
   });
 
-  it('property: is unreadable for anything that does not open as a database', () => {
+  it('property: is unreadable, never restored, for anything that does not open as a database', () => {
     fc.assert(
       fc.property(fc.uint8Array({ maxLength: 4096 }), (bytes) => {
-        expect(readFileWriteVector(SQL, bytes, SCHEMA_VERSION)).toBe(
-          'unreadable'
-        );
+        expect(readFileStamps(SQL, bytes, SCHEMA_VERSION)).toEqual({
+          stamp: 'unreadable',
+          epoch: 0,
+        });
       })
     );
   });

@@ -1536,6 +1536,33 @@ describe('attaching the copy', () => {
     }
   );
 
+  it.each([
+    { name: 'attached', rename: false },
+    { name: 'copied row by row', rename: true },
+  ])(
+    'keeps its own restore epoch through a merge, the copy $name holding another',
+    ({ rename }) => {
+      const db = build({ articles: [], writeStamp: { a: 1 } }, true);
+      db.run('INSERT INTO restore_epoch (id, epoch) VALUES (1, 5)');
+      const copy = incoming({
+        articles: [
+          { id: 'k1', reference: 'n1.md', updated_at: 2, updated_by: 'b' },
+        ],
+        writeStamp: { b: 2 },
+      });
+      copy.run('INSERT INTO restore_epoch (id, epoch) VALUES (1, 9)');
+      const restore = rename ? renamed(copy, undefined) : () => undefined;
+
+      mergeInto(db, copy, THIS_DEVICE);
+      restore();
+
+      expect(articles(db).map((r) => r.id)).toEqual(['k1']);
+      expect(rowsOf(db, 'restore_epoch', 'id')).toEqual([
+        { id: 1, epoch: 5, device: null, restored_at: null },
+      ]);
+    }
+  );
+
   it('detaches what it attached when a copied table is missing a column', () => {
     const db = build({ articles: [] });
     const copy = new SQL.Database();

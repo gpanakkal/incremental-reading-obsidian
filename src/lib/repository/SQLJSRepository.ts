@@ -53,10 +53,19 @@ import {
 } from './db-file';
 import { markPhase } from './phase-timing';
 import {
+  answerByRestoreEpoch,
+  bumpRestoreEpoch,
+  loadKnownRestoreEpoch,
+  NEVER_RESTORED,
+  readRestoreEpoch,
+  saveKnownRestoreEpoch,
+} from './restore-epoch';
+import {
   backupFileName,
   backupsNewestFirst,
   pruneBackups,
   pruneDatabase,
+  type BackupFile,
 } from './retention';
 import {
   fuzzDueBy,
@@ -76,9 +85,10 @@ import {
   bumpWriteStamp,
   classifyIncoming,
   loadKnownWriteVector,
-  readFileWriteVector,
+  readFileStamps,
   readWriteVector,
   saveKnownWriteVector,
+  type FileStamps,
   type IncomingKind,
   type WriteVector,
 } from './write-stamp';
@@ -246,6 +256,8 @@ export class SQLJSRepository implements SQLiteRepository {
    * defer saving and change notification to that outermost call.
    */
   #txDepth = 0;
+  /** Told once the outermost transaction ends; see {@link #noTransaction}. */
+  #txEnded: Array<() => void> = [];
   /**
    * Set when a `modify` event for the database file arrives while a
    * transaction is open, so the reload it asks for can run once that
@@ -356,6 +368,8 @@ export class SQLJSRepository implements SQLiteRepository {
    * knew the file by.
    */
   #loadedStamp: WriteVector | null = null;
+  /** The restore epoch of that file, before any migration. */
+  #loadedEpoch = 0;
   /** What startup found the file on disk to be; see {@link startupKind}. */
   #startupKind: IncomingKind | null = null;
   /**
@@ -473,6 +487,7 @@ export class SQLJSRepository implements SQLiteRepository {
     };
     // Read before loading, which stores the stamp of the file it loads
     const known = loadKnownWriteVector(repo.app);
+    const knownEpoch = loadKnownRestoreEpoch(repo.app);
     try {
       // No file, no wait: a copy Sync delivers later is taken in by the
       // reload its arrival asks for (see `#answerIncoming`)
@@ -485,7 +500,7 @@ export class SQLJSRepository implements SQLiteRepository {
         if (loaded !== null) {
           // Unless a migration saved since, which took its own
           repo.#knownGood ??= before;
-          repo.#classifyAtStartup(known);
+          repo.#classifyAtStartup(known, knownEpoch);
           // A file another device wrote, taken on whole like a reload's
           const kind = repo.#startupKind;
           if (kind !== null && kind !== 'echo') await repo.#fuzzTakenOn();
@@ -506,7 +521,7 @@ export class SQLJSRepository implements SQLiteRepository {
           } finally {
             assertLive(); // an unload meanwhile is no failure to load
           }
-          await repo.#finishRecovery(report, known, assertLive);
+          await repo.#finishRecovery(report, known, knownEpoch, assertLive);
           return repo;
         }
       }
@@ -525,6 +540,7 @@ export class SQLJSRepository implements SQLiteRepository {
         await repo.#finishRecovery(
           { ...restored, corruptCopyPath: null },
           known,
+          knownEpoch,
           assertLive
         );
         return repo;
@@ -720,10 +736,11 @@ export class SQLJSRepository implements SQLiteRepository {
   async #finishRecovery(
     report: RecoveryReport,
     known: WriteVector | null,
+    knownEpoch: number | null,
     assertLive: () => void
   ) {
     // Before the save below bumps this device's stamp
-    this.#classifyAtStartup(known);
+    this.#classifyAtStartup(known, knownEpoch);
     // `save` logs its own failure, and the next write saves again. Not
     // while writes are refused: a file met at the path refused them, and
     // its hold saves (see `#holdDamaged`)
@@ -736,17 +753,175 @@ export class SQLJSRepository implements SQLiteRepository {
 
   /**
    * The backups in `BACKUP_DIRECTORY`, newest first; none if it can't be
-   * listed, as when it is missing.
+   * listed, as when it is missing. Files there that are no backup this plugin
+   * wrote are left out.
    */
-  async #listBackups(): Promise<string[]> {
+  async listBackups(): Promise<BackupFile[]> {
     try {
       const { files } = await this.adapter.list(
         normalizePath(BACKUP_DIRECTORY)
       );
-      return backupsNewestFirst(files).map(({ path }) => path);
+      return backupsNewestFirst(files);
     } catch {
       return [];
     }
+  }
+
+  /** The paths of {@link listBackups}. */
+  async #listBackups(): Promise<string[]> {
+    return (await this.listBackups()).map(({ path }) => path);
+  }
+
+  /**
+   * Replace the database with the backup at `path`, as the user asks when the
+   * database has gone bad: never merged, since the rows memory holds are the
+   * ones being escaped, newer as they are. What it replaces is backed up
+   * first (a `stale` backup). A backup from an older schema is migrated.
+   * Its due text rows lacking fuzz are given some, as any copy taken on whole
+   * (see `#fuzzTakenOn`), its restore epoch is raised past that of what it
+   * replaces, and the result is saved, so Sync carries it to other devices,
+   * which take it on whole too (see `#answerIncoming`).
+   *
+   * Runs as a reload does, one at a time with them (see `#reloadFromDisk`):
+   * a change to the file arriving meanwhile is answered after it, against
+   * whatever it left in memory. Readiness is `merging` meanwhile, and the
+   * reads that follow a reload follow this too.
+   * @throws if writes are refused (see {@link writeRefusal}), or the backup
+   * can't be read, loaded or migrated, or backing up or saving fails: the
+   * database and its file are then left as they were
+   */
+  async restoreBackup(path: string): Promise<void> {
+    while (this.#reloading) await this.#reloading;
+    this.#assertWritable();
+    const restore = this.#restore(path);
+    this.#reloading = restore.then(
+      () => this.#afterRestore(),
+      () => this.#afterRestore()
+    );
+    await restore;
+  }
+
+  /** Answer, once a restore ends, a change to the file that came meanwhile. */
+  #afterRestore(): Promise<void> | undefined {
+    this.#reloading = null;
+    if (!this.#reloadAgain || this.#disposed) return;
+    return this.#reloadFromDisk();
+  }
+
+  /** {@link restoreBackup}, once no reload is under way. */
+  async #restore(path: string) {
+    this.#setMerging(true);
+    try {
+      const bytes = await this.adapter.readBinary(normalizePath(path));
+      let replaced = await this.#backUpForRestore();
+      // Checked in the same synchronous run as the swap, which comes before
+      // the first await in `reloadDb`: resuming from the backup takes
+      // microtasks, in which a transaction can open or a write land. Either
+      // is backed up again
+      while (
+        this.#txDepth > 0 ||
+        this.#content.changedSince(replaced.db, replaced.mark)
+      ) {
+        replaced = await this.#backUpForRestore();
+      }
+      this.#assertWritable();
+      const fresh = this.#fresh;
+      const restoredPending = this.#restoredPending;
+      // The epoch of what is replaced, not of the backup, which may be from
+      // before a restore since
+      const replacedEpoch = readRestoreEpoch(replaced.db);
+      const db = await this.reloadDb(bytes, false, true);
+      if (!db) throw new Error(`The backup at ${path} could not be loaded`);
+      // Overwritten, not merged: neither a file that appeared since startup
+      // nor one a local copy stood in for is read first
+      this.#restoredPending = false;
+      this.#restoredPathCheck = null;
+      try {
+        // A transaction opened on the backup in the microtasks since the
+        // swap would end in the export `save` begins with, its writes lost:
+        // it finishes first. Checked again in the same synchronous run as
+        // the call to `save`
+        while (this.#txDepth > 0 && !this.#disposed) {
+          await this.#noTransaction();
+        }
+        // Refused meanwhile (disposed, or a file found where a fresh
+        // database's save expected none): never written over
+        this.#assertWritable();
+        // Past the epoch of every file the other devices hold, so each takes
+        // this one on whole rather than merging its rows back (see
+        // `#answerIncoming`). Recorded as known by the save
+        bumpRestoreEpoch(db, replacedEpoch, this.#device(), this.#stampClock());
+        // Taken on whole like any copy: its due text rows lacking fuzz get
+        // some, in the one save that follows (see `#fuzzTakenOn`)
+        this.#fuzzUnfuzzedDue();
+        await this.save();
+      } catch (error) {
+        // The backup is the database only once saved: memory goes back to
+        // what the file still holds
+        await this.reloadDb(replaced.data.buffer as ArrayBuffer);
+        this.#fresh = fresh;
+        this.#restoredPending = restoredPending;
+        throw error;
+      }
+      this.#setMerging(false);
+      this.#reloadCallbacks++;
+      try {
+        await this.onReloadFromDisk?.();
+      } finally {
+        this.#reloadCallbacks--;
+      }
+    } finally {
+      this.#setMerging(false);
+    }
+  }
+
+  /**
+   * Back up the database in memory as a `stale` backup, before a restore
+   * replaces it, once no transaction is open. Whether anything was written
+   * since is the caller's to check, against the mark returned, right before
+   * it replaces the database.
+   * @returns what was backed up, from which database, and the mark taken as
+   * it was exported
+   * @throws if the backup fails, or writes are refused meanwhile (see
+   * {@link writeRefusal}), as once disposed
+   */
+  async #backUpForRestore(): Promise<{
+    data: Uint8Array;
+    db: Database;
+    mark: ContentMark | null;
+  }> {
+    await this.#noTransaction();
+    // Disposed meanwhile, say
+    this.#assertWritable();
+    const db = this.db!;
+    const data = this.#exportDb(db);
+    const mark = this.#markContent();
+    await this.backupDatabase(getSchemaVersion(db), {
+      marker: 'stale',
+      data: data.buffer as ArrayBuffer,
+    });
+    this.#assertWritable();
+    return { data, db, mark };
+  }
+
+  /**
+   * Settle once no transaction is open: at once, if none is. Or once
+   * disposed, as a transaction may then never end.
+   */
+  async #noTransaction(): Promise<void> {
+    while (this.#txDepth > 0 && !this.#disposed) {
+      await Promise.race([
+        new Promise<void>((resolve) => this.#txEnded.push(resolve)),
+        this.#whenDisposed,
+      ]);
+    }
+  }
+
+  /** Tell {@link #noTransaction} the outermost transaction ended. */
+  #tellTransactionEnded() {
+    const waiting = this.#txEnded;
+    this.#txEnded = [];
+    for (const resolve of waiting) resolve();
   }
 
   /**
@@ -766,13 +941,30 @@ export class SQLJSRepository implements SQLiteRepository {
    * left to back up by now: the copy this device last wrote is gone from
    * disk, and was never loaded. So a file that lacks this device's last save
    * is only reported.
+   *
+   * So is a file at another restore epoch than the one this device last knew
+   * (see `restore-epoch.ts`): restored from a backup elsewhere, or from
+   * before a restore made here. Either way it is the database now, as a
+   * reload would take on the one and save over the other, which converges
+   * once the device holding the restore hears of this one's next save. That
+   * it lacks saves this device knew of is then no surprise, so is not
+   * reported as well.
    */
-  #classifyAtStartup(known: WriteVector | null) {
+  #classifyAtStartup(known: WriteVector | null, knownEpoch: number | null) {
+    const epoch = this.#loadedEpoch;
+    const restored = knownEpoch !== null && epoch !== knownEpoch;
+    if (restored) {
+      console.warn(
+        'Incremental Reading - The database file was restored from a backup, ' +
+          'or is from before a restore, and is taken on whole:',
+        { knownEpoch, epoch }
+      );
+    }
     const loaded = this.#loadedStamp;
     if (!known || !loaded) return;
     const kind = classifyIncoming(known, loaded, this.#stampClock());
     this.#startupKind = kind;
-    if (kind === 'echo' || kind === 'fast-forward') return;
+    if (restored || kind === 'echo' || kind === 'fast-forward') return;
     console.warn(
       'Incremental Reading - The database file changed while the plugin ' +
         'was not running, and lacks saves this device knew of:',
@@ -1105,12 +1297,10 @@ export class SQLJSRepository implements SQLiteRepository {
   }
 
   /**
-   * Read the database file and its write stamp, or null if it can't be read.
+   * Read the database file, its write stamp and its restore epoch, or null
+   * if it can't be read.
    */
-  async #readIncoming(): Promise<{
-    bytes: ArrayBuffer;
-    stamp: WriteVector | 'unstamped' | 'unreadable';
-  } | null> {
+  async #readIncoming(): Promise<({ bytes: ArrayBuffer } & FileStamps) | null> {
     try {
       this.#sql ||= await this.loadWasm();
       const bytes = await this.app.vault.adapter.readBinary(
@@ -1119,14 +1309,14 @@ export class SQLJSRepository implements SQLiteRepository {
       // A file cut short can still give up its stamp, and would then be
       // merged, its zero-filled rows with it: placed nowhere, so loaded,
       // which refuses it (0217)
-      const stamp = isDatabaseBuffer(new Uint8Array(bytes))
-        ? readFileWriteVector(
+      const stamps: FileStamps = isDatabaseBuffer(new Uint8Array(bytes))
+        ? readFileStamps(
             this.#sql,
             new Uint8Array(bytes),
             migrations[migrations.length - 1].version
           )
-        : 'unreadable';
-      return { bytes, stamp };
+        : { stamp: 'unreadable', epoch: NEVER_RESTORED };
+      return { bytes, ...stamps };
     } catch (error) {
       console.error('Incremental Reading - Failed to read database:', error);
       return null;
@@ -1134,8 +1324,14 @@ export class SQLJSRepository implements SQLiteRepository {
   }
 
   /**
-   * Decide what to do with the file that arrived, by its write stamp against
-   * the stamp of the database in memory (see `classifyIncoming`):
+   * Decide what to do with the file that arrived. First by its restore epoch
+   * against memory's (see `restore-epoch.ts`): a file restored from a backup
+   * since memory's epoch is taken on whole, after memory is backed up
+   * (`stale`), even by a restored copy or a database started without a file;
+   * a file from before memory's restore is left alone and memory saved over
+   * it, as for `behind` below, so the device that sent it takes memory on in
+   * turn. At the same epoch, by its write stamp against the stamp of the
+   * database in memory (see `classifyIncoming`):
    *
    * - this device's own save coming back (`echo`), or an older one
    *   (`behind`), is left alone. A file older than memory with no save of
@@ -1154,7 +1350,7 @@ export class SQLJSRepository implements SQLiteRepository {
    * A file that is not a database is loaded all the same, which refuses it.
    * So is every file while writes are refused, since only loading one lifts
    * the refusal. One older than the write stamp (an older plugin version
-   * wrote it) can't be placed, so is merged.
+   * wrote it) can't be placed, so is merged, whatever its epoch.
    * @param restored whether memory is a restored copy meeting the file at its
    * path (see {@link #restoredPending}): a fast-forward is merged too. Its
    * stamp can claim less than it holds: writes made since the restore wait on
@@ -1164,14 +1360,22 @@ export class SQLJSRepository implements SQLiteRepository {
    * @throws if the backup fails, taking nothing on
    */
   async #answerIncoming(
-    incoming: {
-      bytes: ArrayBuffer;
-      stamp: WriteVector | 'unstamped' | 'unreadable';
-    },
+    incoming: { bytes: ArrayBuffer } & FileStamps,
     restored: boolean
   ): Promise<boolean> {
     const { stamp } = incoming;
     if (stamp === 'unreadable' || this.#writeBlock || !this.db) return true;
+    if (stamp !== 'unstamped') {
+      const byEpoch = answerByRestoreEpoch(
+        readRestoreEpoch(this.db),
+        incoming.epoch
+      );
+      if (byEpoch === 'take-on') return this.#backUpMemory(this.db, 'stale');
+      if (byEpoch === 'save-over') {
+        if (this.pendingSaveCount === 0) this.#saveOver();
+        return false;
+      }
+    }
     const kind =
       stamp === 'unstamped'
         ? 'merge'
@@ -1187,11 +1391,7 @@ export class SQLJSRepository implements SQLiteRepository {
       case 'behind':
       case 'stale-other':
         if (kind === 'stale-other' || this.pendingSaveCount === 0) {
-          // Straight to `save`, past the gate that skips writes changing
-          // nothing (`#contentChanged`, 0174): memory is unchanged on
-          // purpose, and the point is to put it over the file. `save` logs
-          // its own failures
-          this.save().catch(() => undefined);
+          this.#saveOver();
         }
         return false;
       case 'fast-forward':
@@ -1210,6 +1410,16 @@ export class SQLJSRepository implements SQLiteRepository {
   }
 
   /**
+   * Save memory over the file on disk, which it is to replace. Straight to
+   * `save`, past the gate that skips writes changing nothing
+   * (`#contentChanged`, 0174): memory is unchanged on purpose, and the point
+   * is to put it over the file. `save` logs its own failures.
+   */
+  #saveOver() {
+    this.save().catch(() => undefined);
+  }
+
+  /**
    * Give the text rows of a copy taken on whole that came without fuzz, and
    * are due by the end of the review day (`fuzzDueBy`), some (`fuzzTakenOn`,
    * 0176), while text reviews are fuzzed, then save once: a merge fuzzes the
@@ -1225,6 +1435,17 @@ export class SQLJSRepository implements SQLiteRepository {
    * throws: a failure is logged, as `save` logs its own.
    */
   async #fuzzTakenOn(): Promise<void> {
+    // Straight to `save`: the rows changed, so 0174's gate would let it pass
+    if (this.#fuzzUnfuzzedDue()) await this.save().catch(() => undefined);
+  }
+
+  /**
+   * The fuzzing half of {@link #fuzzTakenOn}, without its save: for a caller
+   * that saves anyway, as a restore does. Synchronous, so a caller can run it
+   * in the same synchronous run as its own checks and save.
+   * @returns whether it fuzzed any row, so that there is something to save
+   */
+  #fuzzUnfuzzedDue(): boolean {
     const db = this.db;
     const settings = this.#replaySettings();
     if (
@@ -1233,7 +1454,7 @@ export class SQLJSRepository implements SQLiteRepository {
       this.writeRefusal() ||
       this.#txDepth > 0
     ) {
-      return;
+      return false;
     }
     try {
       const fuzzed = fuzzTakenOn(
@@ -1241,15 +1462,14 @@ export class SQLJSRepository implements SQLiteRepository {
         { deviceId: () => this.#device(), now: this.#rowClock },
         fuzzDueBy(settings)
       );
-      if (fuzzed === 0) return;
+      if (fuzzed === 0) return false;
     } catch (error) {
       console.error('Incremental Reading - Failed to fuzz rows:', error);
-      return;
+      return false;
     }
     // Listeners hear of the rows it changed, as of any write
     this.#flushChanges();
-    // Straight to `save`: the rows changed, so 0174's gate would let it pass
-    await this.save().catch(() => undefined);
+    return true;
   }
 
   /**
@@ -1466,6 +1686,7 @@ export class SQLJSRepository implements SQLiteRepository {
       result = await work();
     } catch (error) {
       this.#txDepth--;
+      this.#tellTransactionEnded();
       this.db.exec('ROLLBACK');
       // Rolled-back rows were never durable, so their buffered change events
       // must not reach listeners.
@@ -1474,6 +1695,9 @@ export class SQLJSRepository implements SQLiteRepository {
       throw error;
     }
     this.#txDepth--;
+    // Before the COMMIT, which throws once disposed: those told wait a
+    // microtask, by when it has run
+    this.#tellTransactionEnded();
     this.db.exec('COMMIT');
     this.#flushChanges();
     try {
@@ -1788,6 +2012,7 @@ export class SQLJSRepository implements SQLiteRepository {
       // `write_stamp` is no content to that check, so the bump asks for no
       // save after this one
       const stamp = bumpWriteStamp(source, this.#device(), this.#stampClock());
+      const epoch = readRestoreEpoch(source);
       const data = this.#exportDb(source).buffer;
       markPhase('export');
       if (this.#fresh) {
@@ -1841,6 +2066,7 @@ export class SQLJSRepository implements SQLiteRepository {
       this.#saves.wrote = Math.max(this.#saves.wrote, save);
       // In the order writes land, so the last one on disk is the one kept
       saveKnownWriteVector(this.app, stamp);
+      saveKnownRestoreEpoch(this.app, epoch);
     } catch (error) {
       // Nothing was written that this database can count as its file
       if (wroteFresh) this.#fresh = true;
@@ -1990,13 +2216,18 @@ export class SQLJSRepository implements SQLiteRepository {
    * file (see `#loadLocalCopy`), not the file on disk: a failed migration
    * save keeps them. Only the call given it: a reload its migration save
    * runs reads the file itself
+   * @param chosen whether `bytes` are a backup the user chose to restore (see
+   * `restoreBackup`): already a backup, so not backed up again before a
+   * migration; and saved by the caller, which records its stamp, so neither
+   * is done here
    * @returns a Database, or `null` if the file is invalid or not found
    * @throws if the latest schema version is lower than the database's
    * current version, or if post-migration verification fails
    */
   protected async reloadDb(
     bytes?: ArrayBuffer,
-    localCopy = false
+    localCopy = false,
+    chosen = false
   ): Promise<Database | null> {
     const previous = this.db;
     let candidate: Database | null = null;
@@ -2043,6 +2274,7 @@ export class SQLJSRepository implements SQLiteRepository {
         );
       }
       const loadedStamp = readWriteVector(candidate);
+      const loadedEpoch = readRestoreEpoch(candidate);
 
       const currentDbVersion = getSchemaVersion(candidate);
       const latestSchemaVersion = migrations[migrations.length - 1].version;
@@ -2070,6 +2302,7 @@ export class SQLJSRepository implements SQLiteRepository {
       // Before it stands as the database: a file that changed while the user
       // was asked about a failed backup is read again
       if (
+        !chosen &&
         getPendingMigrations(candidate, migrations).length > 0 &&
         !(await this.#backUpBeforeMigrating(
           currentDbVersion,
@@ -2087,6 +2320,7 @@ export class SQLJSRepository implements SQLiteRepository {
       // that a later write would save over the file.
       this.db = candidate;
       this.#loadedStamp = loadedStamp;
+      this.#loadedEpoch = loadedEpoch;
       this.registerUpdateHook();
       this.#fresh = false;
 
@@ -2141,14 +2375,21 @@ export class SQLJSRepository implements SQLiteRepository {
             );
           }
 
-          try {
-            await this.save();
-          } catch (error) {
-            // A local copy stays in memory unsaved rather than give way to
-            // the next copy or a new database, whose save would write over
-            // the `tmp` copy: the next save writes it, or merges a file found
-            // at its path (see `#checkRestoredPath`). `save` logs its failure
-            if (!localCopy) throw error;
+          if (chosen) {
+            // Armed again now, not by the caller's save, which may wait out
+            // a transaction whose writes must be stamped like any other
+            this.registerUpdateHook();
+          } else {
+            try {
+              await this.save();
+            } catch (error) {
+              // A local copy stays in memory unsaved rather than give way to
+              // the next copy or a new database, whose save would write over
+              // the `tmp` copy: the next save writes it, or merges a file
+              // found at its path (see `#checkRestoredPath`). `save` logs its
+              // failure
+              if (!localCopy) throw error;
+            }
           }
         }
       }
@@ -2160,9 +2401,13 @@ export class SQLJSRepository implements SQLiteRepository {
         this.#onWritesResumed?.();
       }
       // The file on disk is this one now (or its migration, saved above).
-      // Not a local copy, until a save of it lands, which records its own
+      // Not a local copy, nor a backup chosen, until a save of it lands,
+      // which records its own
       const stamp = readWriteVector(this.db);
-      if (stamp && !localCopy) saveKnownWriteVector(this.app, stamp);
+      if (stamp && !localCopy && !chosen) {
+        saveKnownWriteVector(this.app, stamp);
+        saveKnownRestoreEpoch(this.app, readRestoreEpoch(this.db));
+      }
       // Nothing holds the replaced database across an await: reloads wait
       // out transactions, and every other use is synchronous
       previous?.close();

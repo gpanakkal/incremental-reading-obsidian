@@ -1,6 +1,7 @@
 import type { App } from 'obsidian';
 import type initSqlJs from 'sql.js';
 import type { Database } from 'sql.js';
+import { NEVER_RESTORED, readRestoreEpoch } from './restore-epoch';
 
 /**
  * The write stamp of a database file: for every device that ever saved it,
@@ -106,30 +107,42 @@ export function readWriteVector(db: Database): WriteVector | null {
   return vector;
 }
 
+/** What {@link readFileStamps} reads of a database file. */
+export interface FileStamps {
+  stamp: WriteVector | 'unstamped' | 'unreadable';
+  /** Its restore epoch (see `restore-epoch.ts`); never restored if unreadable */
+  epoch: number;
+}
+
 /**
  * What the database file in `bytes` is stamped with, read from a throwaway
  * copy: `unstamped` for a database older than the `write_stamp` table (an
  * older plugin version wrote it), `unreadable` for anything that does not open
  * as a database (a write still under way, say) or is at a schema version past
  * `maxVersion` (a newer plugin version wrote it), whose stamp can't be relied
- * on.
+ * on. Its restore epoch with it, read from the same copy: opening one costs a
+ * copy of the whole file.
  */
-export function readFileWriteVector(
+export function readFileStamps(
   sql: initSqlJs.SqlJsStatic,
   bytes: Uint8Array,
   maxVersion: number
-): WriteVector | 'unstamped' | 'unreadable' {
+): FileStamps {
+  const unreadable: FileStamps = { stamp: 'unreadable', epoch: NEVER_RESTORED };
   let db: Database | null = null;
   try {
     db = new sql.Database(bytes);
     if (db.exec('SELECT 1 FROM sqlite_master LIMIT 1').length === 0) {
-      return 'unreadable';
+      return unreadable;
     }
     const [version] = db.exec('PRAGMA user_version');
-    if (Number(version.values[0][0]) > maxVersion) return 'unreadable';
-    return readWriteVector(db) ?? 'unstamped';
+    if (Number(version.values[0][0]) > maxVersion) return unreadable;
+    return {
+      stamp: readWriteVector(db) ?? 'unstamped',
+      epoch: readRestoreEpoch(db),
+    };
   } catch {
-    return 'unreadable';
+    return unreadable;
   } finally {
     db?.close();
   }
