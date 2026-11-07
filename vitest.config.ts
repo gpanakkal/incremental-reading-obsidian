@@ -33,6 +33,8 @@ export default defineConfig({
       './src/**/*.test.{ts,tsx}',
       // Node-side helpers of the e2e harness; the specs themselves are Playwright's.
       './e2e-tests/setup/**/*.test.ts',
+      // Node-side helpers of the dev tooling (e.g. the e2e Obsidian version check)
+      './scripts/**/*.test.ts',
     ],
     exclude: [
       '**/node_modules/**',

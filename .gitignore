@@ -30,6 +30,8 @@ e2e-tests/setup/test-vault/.obsidian/plugins
 e2e-tests/test-results/
 e2e-tests/test-results-emulator-died/
 e2e-tests/test-vaults/
+# Cached latest Obsidian release for scripts/check-obsidian-version.mjs
+/.user-data/
 
 # Vitest
 coverage/

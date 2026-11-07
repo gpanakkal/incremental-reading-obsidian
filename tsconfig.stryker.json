@@ -4,6 +4,7 @@
     "src/**/*.test.ts",
     "src/**/*.test.tsx",
     "e2e-tests/**/*.test.ts",
+    "scripts/**/*.test.ts",
     "src/test/**"
   ]
 }

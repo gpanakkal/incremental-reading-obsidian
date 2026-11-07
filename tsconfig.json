@@ -25,5 +25,5 @@
     },
     "lib": ["DOM", "DOM.Iterable", "ES2022"]
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "e2e-tests/**/*.ts", "vitest.config.ts", "playwright.config.ts"]
+  "include": ["src/**/*.ts", "src/**/*.tsx", "e2e-tests/**/*.ts", "scripts/**/*.ts", "scripts/lib/**/*.mjs", "vitest.config.ts", "playwright.config.ts"]
 }

@@ -31,6 +31,11 @@ function colocatedTest(pattern) {
     const ts = test.replace(/\.tsx$/, '.ts');
     if (existsSync(ts)) return ts;
   }
+  // Plain-JS modules (scripts/lib/*.mjs) are tested from TypeScript
+  if (/\.test\.m?js$/.test(test) && !existsSync(test)) {
+    const ts = test.replace(/\.m?js$/, '.ts');
+    if (existsSync(ts)) return ts;
+  }
   return test;
 }
 

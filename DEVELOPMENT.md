@@ -1,6 +1,6 @@
 ## Testing
 
-Make sure to run the Obsidian setup script at least once on the machine before running E2E tests.
+Make sure to run the Obsidian setup script (`pnpm run obsidian:setup`) at least once on the machine before running E2E tests.
 
 Debug flaky tests: `pnpm run e2e:repeat`. Some handy arguments:
 

@@ -3,6 +3,12 @@ import { defineConfig } from '@playwright/test';
 // See https://playwright.dev/docs/test-configuration.
 export default defineConfig({
   outputDir: './e2e-tests/test-results',
+  // Playwright's default reporter, plus a repeat of the stale-Obsidian warning
+  // at the end of the run.
+  reporter: [
+    [process.env['CI'] ? 'dot' : 'list'],
+    ['./e2e-tests/setup/obsidian-version-reporter.ts'],
+  ],
   // Kills Electrons orphaned by earlier runs, before and after this one.
   globalSetup: './e2e-tests/setup/global-cleanup.ts',
   globalTeardown: './e2e-tests/setup/global-cleanup.ts',
