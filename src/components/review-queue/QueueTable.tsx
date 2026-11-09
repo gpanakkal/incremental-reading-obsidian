@@ -219,43 +219,52 @@ export function QueueTable({
             onPointerUp={longPress.cancel}
             onPointerCancel={longPress.cancel}
           >
-            {visibleColumns.map((column, index) => (
-              <div
-                key={column.key}
-                className={`ir-queue-cell${
-                  column.className ? ` ${column.className}` : ''
-                }`}
-                data-column={column.key}
-                data-width={column.width ?? 'flexible'}
-                role="cell"
-                aria-label={titles?.[column.key]}
-              >
-                <span className="ir-queue-cell-value">{cells[column.key]}</span>
-                <span className="ir-queue-cell-actions">
-                  {onRowMenu && index === visibleColumns.length - 1 && (
-                    // Text, not an icon: the label belongs on this HTML
-                    // button, and Obsidian's tooltip crashes on a labelled SVG
-                    <button
-                      className="ir-queue-row-menu clickable-icon"
-                      aria-label="Item actions"
-                      // Its own tap opens the menu; holding it must not open
-                      // a second through the row's long press
-                      onPointerDown={(event: PointerEvent) =>
-                        event.stopPropagation()
-                      }
-                      onClick={(event: MouseEvent) => {
-                        event.stopPropagation();
-                        const target = event.currentTarget as HTMLElement;
-                        const rect = target.getBoundingClientRect();
-                        onRowMenu(row, { x: rect.left, y: rect.bottom });
-                      }}
-                    >
-                      ⋯
-                    </button>
-                  )}
-                </span>
-              </div>
-            ))}
+            {visibleColumns.map((column, index) => {
+              const rowMenu =
+                index === visibleColumns.length - 1 ? onRowMenu : undefined;
+              return (
+                <div
+                  key={column.key}
+                  className={`ir-queue-cell${
+                    column.className ? ` ${column.className}` : ''
+                  }`}
+                  data-column={column.key}
+                  data-width={column.width ?? 'flexible'}
+                  role="cell"
+                  aria-label={titles?.[column.key]}
+                >
+                  <span className="ir-queue-cell-value">
+                    {cells[column.key]}
+                  </span>
+                  {/* `has-menu` lets a touch screen show the button outright */}
+                  <span
+                    className={`ir-queue-cell-actions${rowMenu ? ' has-menu' : ''}`}
+                  >
+                    {rowMenu && (
+                      // Text, not an icon: the label belongs on this HTML
+                      // button, and Obsidian's tooltip crashes on a labelled SVG
+                      <button
+                        className="ir-queue-row-menu clickable-icon"
+                        aria-label="Item actions"
+                        // Its own tap opens the menu; holding it must not open
+                        // a second through the row's long press
+                        onPointerDown={(event: PointerEvent) =>
+                          event.stopPropagation()
+                        }
+                        onClick={(event: MouseEvent) => {
+                          event.stopPropagation();
+                          const target = event.currentTarget as HTMLElement;
+                          const rect = target.getBoundingClientRect();
+                          rowMenu(row, { x: rect.left, y: rect.bottom });
+                        }}
+                      >
+                        ⋯
+                      </button>
+                    )}
+                  </span>
+                </div>
+              );
+            })}
           </div>
         );
       })}

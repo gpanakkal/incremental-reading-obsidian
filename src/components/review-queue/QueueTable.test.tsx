@@ -585,6 +585,32 @@ describe('QueueTable row menu', () => {
     }
   );
 
+  it.each([false, true])(
+    'marks the one actions slot in a row that holds the ⋯ button (mobile: %s)',
+    (isMobile) => {
+      const { rowEls } = mountMenuTable([article, snippet], isMobile);
+      for (const row of rowEls) {
+        const marked = row.querySelectorAll('.ir-queue-cell-actions.has-menu');
+        expect(marked).toHaveLength(1);
+        expect(marked[0].querySelector('.ir-queue-row-menu')).not.toBeNull();
+      }
+    }
+  );
+
+  it('marks no actions slot in a table without a row menu', () => {
+    const container = mount(
+      <QueueTable
+        rows={[article]}
+        columns={buildQueueColumns()}
+        renderCells={stubRenderCells}
+        isMobile={false}
+        onRowClick={() => {}}
+      />
+    );
+    expect(container.querySelector('.ir-queue-cell-actions')).not.toBeNull();
+    expect(container.querySelector('.has-menu')).toBeNull();
+  });
+
   it('opens the menu under the ⋯ button, without opening the row', () => {
     const { rowEls, onRowMenu, onRowClick } = mountMenuTable([
       article,

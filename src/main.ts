@@ -71,6 +71,7 @@ import {
 } from './lib/device-state';
 import { recordEphemeralState } from './lib/ephemeral-position';
 import { createIRExtensions, IR_ID_LOCKED_NOTICE } from './lib/extensions';
+import { registerCardEmbedShapePostProcessor } from './lib/extensions/CardEmbedShape';
 import { registerFileExplorerActiveFileClick } from './lib/extensions/FileExplorerActiveFileClick';
 import { registerReadingModeActionBar } from './lib/extensions/ReadingModeActionBar';
 import {
@@ -578,6 +579,8 @@ export default class IncrementalReadingPlugin extends Plugin {
 
         // Mark reading mode transclusion hosts for styles.css
         registerTransclusionHostPostProcessor(this);
+        // ...and the shape of each card embed's content, in both modes
+        registerCardEmbedShapePostProcessor(this);
 
         // Action bar on notes in reading mode and on PDF article tabs
         this.resyncLeafActionBars = registerReadingModeActionBar(this);

@@ -1,4 +1,5 @@
 import test, { expect, type Page } from '@playwright/test';
+import { build } from 'esbuild';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
@@ -46,9 +47,49 @@ const HOSTS = {
 };
 
 let css: string;
+let shapeScript: string;
+
+declare global {
+  interface Window {
+    /**
+     * Fill `sizer` with `html` the way Obsidian's renderer does: the
+     * plugin's post-processor runs on each section while it is detached,
+     * told the sizer it renders into, then they all go in at once. Then wait
+     * out the microtask CardEmbedShape classifies the embed in. `sameTask`
+     * runs before that microtask, where the renderer measures what it just
+     * put in.
+     */
+    irRender(
+      sizer: HTMLElement,
+      html: string,
+      sameTask?: () => void
+    ): Promise<void>;
+  }
+}
 
 test.beforeAll(async () => {
   css = await fs.readFile(path.resolve('styles.css'), 'utf8');
+  // The stylesheet reads the shape of a card's content from the classes
+  // CardEmbedShape stamps, so the plugin's own code runs alongside it.
+  const bundle = await build({
+    entryPoints: [path.resolve('src/lib/extensions/CardEmbedShape.ts')],
+    bundle: true,
+    write: false,
+    format: 'iife',
+    globalName: 'CardEmbedShape',
+  });
+  shapeScript = `${bundle.outputFiles[0].text}
+    window.irRender = async (sizer, html, sameTask) => {
+      const template = document.createElement('template');
+      template.innerHTML = html;
+      const sections = Array.from(template.content.children);
+      for (const section of sections) {
+        CardEmbedShape.processSection(section, sizer);
+      }
+      sizer.replaceChildren(...sections);
+      sameTask?.();
+      await Promise.resolve();
+    };`;
 });
 
 async function mount(page: Page, host: string) {
@@ -61,6 +102,7 @@ async function mount(page: Page, host: string) {
       .cm-line { position: relative; }
     </style></head>
     <body class="markdown-source-view mod-cm6">${host}</body></html>`);
+  await page.addScriptTag({ content: shapeScript });
 }
 
 /**
@@ -92,14 +134,16 @@ test('the floor gives way to the inline flow once the first pass has run', async
 
   // What the first pass leaves behind: the min-height it writes on the sizer,
   // the pusher, and the note's text as a section.
-  const layout = await page.evaluate(() => {
+  const layout = await page.evaluate(async () => {
     const sizer = document.querySelector<HTMLElement>(
       '.markdown-preview-sizer'
     )!;
     sizer.style.minHeight = '44px';
-    sizer.innerHTML =
+    await window.irRender(
+      sizer,
       '<div class="markdown-preview-pusher" style="width: 1px; height: 0.1px"></div>' +
-      '<div class="el-p"><p>The card text.</p></div>';
+        '<div class="el-p"><p>The card text.</p></div>'
+    );
     const display = (selector: string) =>
       getComputedStyle(document.querySelector(selector)!).display;
     return {
@@ -123,15 +167,17 @@ for (const where of ['standalone', 'after text on its line'] as const) {
   }) => {
     await mount(page, HOSTS[where]);
 
-    const layout = await page.evaluate(() => {
+    const layout = await page.evaluate(async () => {
       const sizer = document.querySelector<HTMLElement>(
         '.markdown-preview-sizer'
       )!;
       sizer.style.minHeight = '88px';
-      sizer.innerHTML =
+      await window.irRender(
+        sizer,
         '<div class="markdown-preview-pusher" style="width: 1px; height: 0.1px"></div>' +
-        '<div class="el-p"><p>The first paragraph.</p></div>' +
-        '<div class="el-p"><p>The second paragraph.</p></div>';
+          '<div class="el-p"><p>The first paragraph.</p></div>' +
+          '<div class="el-p"><p>The second paragraph.</p></div>'
+      );
       const display = (selector: string) =>
         getComputedStyle(document.querySelector(selector)!).display;
       const [first, second] = Array.from(document.querySelectorAll('p')).map(
@@ -188,7 +234,7 @@ test('a card embed of two paragraphs in the phone review tab hugs its text', asy
       .markdown-rendered > .markdown-preview-section > div:last-child > :last-child { margin-bottom: 0; }`,
   });
 
-  const slack = await page.evaluate((embed) => {
+  const slack = await page.evaluate(async (embed) => {
     // Through the fragment parser, so the embed's blocks stay inside the `<p>`
     // as Obsidian's DOM calls put them, where markup would close it.
     document.querySelector('.ir-transclusion-host')!.innerHTML = embed;
@@ -201,20 +247,28 @@ test('a card embed of two paragraphs in the phone review tab hugs its text', asy
     // in, each is measured as the distance to the next one's `offsetTop`, and
     // the sizer gets their sum as its `min-height`. A hidden section reads
     // `offsetTop` 0, so the header section measures as all the room above the
-    // first paragraph.
-    sizer.innerHTML =
+    // first paragraph. All of it in one task, before the plugin's microtask
+    // has classified the card: only the post-processor's early mark of its
+    // paragraphs is there yet, as in the app.
+    await window.irRender(
+      sizer,
       '<div class="markdown-preview-pusher" style="width: 1px; height: 0.1px"></div>' +
-      '<div class="mod-header mod-ui"><div class="inline-title">Card</div></div>' +
-      '<div class="el-p"><p>The first paragraph.</p></div>' +
-      '<div class="el-p"><p>The second paragraph.</p></div>';
-    const sections = Array.from(sizer.children).slice(1) as HTMLElement[];
-    const total = sections
-      .map((section) => {
-        const next = section.nextElementSibling as HTMLElement | null;
-        return next ? next.offsetTop - section.offsetTop : section.offsetHeight;
-      })
-      .reduce((sum, height) => sum + height, 0);
-    sizer.style.minHeight = `${total - 1}px`;
+        '<div class="mod-header mod-ui"><div class="inline-title">Card</div></div>' +
+        '<div class="el-p"><p>The first paragraph.</p></div>' +
+        '<div class="el-p"><p>The second paragraph.</p></div>',
+      () => {
+        const sections = Array.from(sizer.children).slice(1) as HTMLElement[];
+        const total = sections
+          .map((section) => {
+            const next = section.nextElementSibling as HTMLElement | null;
+            return next
+              ? next.offsetTop - section.offsetTop
+              : section.offsetHeight;
+          })
+          .reduce((sum, height) => sum + height, 0);
+        sizer.style.minHeight = `${total - 1}px`;
+      }
+    );
 
     // The tinted box against the rows its text is on: what is left is its
     // own `padding-block`.
@@ -267,7 +321,7 @@ test('the code of a card embed between two halves of a code block leaves no blan
       .copy-code-button svg { display: block; width: 16px; height: 16px; }`,
   });
 
-  const offsets = await page.evaluate((embed) => {
+  const offsets = await page.evaluate(async (embed) => {
     // Through the fragment parser, so the embed's blocks stay inside the `<p>`
     // as Obsidian's DOM calls put them, where markup would close it.
     const host = document.querySelector<HTMLElement>('.ir-transclusion-host')!;
@@ -276,13 +330,15 @@ test('the code of a card embed between two halves of a code block leaves no blan
     // After the first pass, as a code card renders: its frontmatter as a
     // chrome section holding a `<pre>` of its own, then the code
     sizer.style.minHeight = '48px';
-    sizer.innerHTML =
+    await window.irRender(
+      sizer,
       '<div class="markdown-preview-pusher" style="width: 1px; height: 0.1px"></div>' +
-      '<div class="mod-header mod-ui"><div class="inline-title">Card</div></div>' +
-      '<div class="el-pre mod-frontmatter mod-ui"><pre class="frontmatter"><code>a: 1</code></pre></div>' +
-      '<div class="el-pre"><pre id="card"><code>card</code>' +
-      // Shown on hover, and always on mobile
-      '<button class="copy-code-button"><svg></svg></button></pre></div>';
+        '<div class="mod-header mod-ui"><div class="inline-title">Card</div></div>' +
+        '<div class="el-pre mod-frontmatter mod-ui"><pre class="frontmatter"><code>a: 1</code></pre></div>' +
+        '<div class="el-pre"><pre id="card"><code>card</code>' +
+        // Shown on hover, and always on mobile
+        '<button class="copy-code-button"><svg></svg></button></pre></div>'
+    );
 
     const rect = (selector: string) =>
       document.querySelector(selector)!.getBoundingClientRect();
