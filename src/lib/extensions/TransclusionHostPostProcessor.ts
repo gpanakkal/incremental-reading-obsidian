@@ -17,8 +17,9 @@ import type IncrementalReadingPlugin from '#/main';
  *
  * Live Preview is not covered by this: there the host is a `.cm-line` that
  * CodeMirror owns, and the transclusion is a widget whose contents arrive
- * asynchronously. See the comment in `styles.css` on the one surviving
- * `:has()`.
+ * asynchronously. TransclusionGeometryExtension measures what the stylesheet
+ * needs there, and CardEmbedShape stamps the shape of the embed's content in
+ * both modes.
  */
 
 /** Block elements a transclusion can host, mirroring the old `:is(…)` list. */

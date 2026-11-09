@@ -864,6 +864,26 @@ describe('BulkImportModal: Include subfolders', () => {
       '.ir-bulk-import-list > li:last-child > .ir-loading'
     ) !== null;
 
+  it('marks the list a tree while it lists a folder, so its files line up past the arrows', async () => {
+    const { scan, modal, top } = await openDeeper();
+    const isTree = () =>
+      modal.contentEl
+        .querySelector('.ir-bulk-import-list')!
+        .classList.contains('is-tree');
+    expect(isTree()).toBe(false);
+
+    await setToggle(modal, true);
+    await scan.file(top);
+    expect(isTree()).toBe(false);
+    await scan.folder('notes/Topic');
+    expect(isTree()).toBe(true);
+
+    await setToggle(modal, false);
+    await scan.file(top);
+    expect(isTree()).toBe(false);
+    modal.close();
+  });
+
   it('is offered, switched off, only for a source that can go deeper, which then scans no subfolder', async () => {
     const flat = makeSource();
     const flatModal = openModal(makePlugin().plugin, flat.source);

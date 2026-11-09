@@ -457,7 +457,14 @@ export function BulkImportModalContent({
         </div>
       )}
       {!renderFilterBar && canGoDeeper && subfoldersToggle}
-      <ul className="ir-bulk-import-list">
+      {/* `is-tree` once a folder is listed: files then line up past the
+          folders' arrows, as in the Files view */}
+      <ul
+        className={
+          'ir-bulk-import-list' +
+          (tree.some((entry) => entry.kind === 'folder') ? ' is-tree' : '')
+        }
+      >
         <TreeRows
           entries={tree}
           unticked={unticked}

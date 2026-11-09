@@ -140,14 +140,16 @@ body {
    `display: block` costs no inline flow here. Every wrapper this selects holds
    exactly one element and already broke the line by containing a block; this
    only gives that break a box. `.el-p > p` is the sole wrapper whose content
-   can stay in the sentence, which is precisely what `:has(> :not(p))`
-   excludes. `.markdown-preview-pusher` has no children and so never matches.
+   can stay in the sentence, which is precisely what `.ir-section-has-block`
+   leaves out: CardEmbedShape stamps it, as each section renders, on the ones
+   holding a direct child other than a `<p>`. `.markdown-preview-pusher` has
+   no children and so never carries it.
 
    `:not(.mod-ui)` is load-bearing, and not merely a tidy-up of what the hide
-   rule above already covers: `:has()` takes the specificity of its argument,
-   so `… > div:has(> :not(p))` outweighs `… .mod-ui` by that one element
-   selector and would hand `display: block` back to the very sections that rule
-   means to remove. Both are chrome holding a block child — `.mod-header` wraps
+   rule above already covers: chrome sections are rendered sections too, so
+   they carry the marker, and `… > div.ir-section-has-block` outweighs
+   `… .mod-ui` by its own class and element selector and would hand
+   `display: block` back to the very sections that rule means to remove. Both are chrome holding a block child — `.mod-header` wraps
    `.inline-title`, `.mod-frontmatter` wraps the raw YAML `<pre>` — so both
    matched, and a block box breaks the line it is on whether or not anything
    inside it is visible: that is the empty first line above a card embed, with
@@ -155,15 +157,14 @@ body {
    or inflating the hide rule keeps the two rules talking about different
    elements instead of racing over the same ones.
 
-   The `:has()` is the affordable shape, like the one further down: its
-   subjects are the wrappers inside transclusions that are actually rendered,
-   not every block in the note. Written structurally rather than as
-   `div:not(.el-p)` because the `el-*` names are Obsidian's private
-   convention, while "holds something other than a paragraph" is the real
-   question. */
+   A marker set once at render time rather than `:has(> :not(p))`, which
+   had every wrapper inside a transclusion re-checked on each child mutation.
+   Asked structurally rather than as `div:not(.el-p)` because the `el-*`
+   names are Obsidian's private convention, while "holds something other than
+   a paragraph" is the real question. */
 .internal-embed[alt*='ir-hide-title']
   .markdown-preview-section
-  > div:not(.mod-ui):has(> :not(p)) {
+  > div.ir-section-has-block:not(.mod-ui) {
   display: block;
   padding-inline-start: var(--size-4-2);
 
@@ -187,9 +188,11 @@ body {
 
    The gate counts paragraphs, not sections, to leave mixed cards as they are:
    one paragraph with a code block or list keeps its text in the sentence and
-   its block on the wrapper rule above. `:has()` cannot nest, so "two sections
-   that each hold a `<p>`" cannot be written structurally; `.el-p` is
-   Obsidian's class for a paragraph section and the one way to say it.
+   its block on the wrapper rule above. CardEmbedShape asks it whenever the
+   embed's content changes and stamps the answer on the embed as
+   `.ir-embed-paragraphs`. It asks with selectors, and "two sections that
+   each hold a `<p>`" has no structural one; `.el-p` is Obsidian's class for
+   a paragraph section and the one way to say it.
    Undocumented, but generic: the preview renderer stamps every section it
    renders with `el-` plus its first child's tag (read from 1.14's `app.js`),
    and Obsidian's own stylesheet selects `.el-p` for heading spacing. Should
@@ -208,14 +211,8 @@ body {
    The wrapper rule's padding and tint go too: they exist to give a block child
    back what the inline chain could not, and here the embed itself is a block
    that already has both. */
-.internal-embed[alt*='ir-hide-title']:has(
-    .markdown-preview-section > .el-p ~ .el-p,
-    .markdown-preview-section > div:not(.mod-ui) p ~ p
-  ),
-.internal-embed[alt*='ir-hide-title']:has(
-    .markdown-preview-section > .el-p ~ .el-p,
-    .markdown-preview-section > div:not(.mod-ui) p ~ p
-  )
+.internal-embed[alt*='ir-hide-title'].ir-embed-paragraphs,
+.internal-embed[alt*='ir-hide-title'].ir-embed-paragraphs
   :is(
     .markdown-embed-content,
     .markdown-preview-view,
@@ -226,10 +223,7 @@ body {
   display: block;
 }
 
-.internal-embed[alt*='ir-hide-title']:has(
-    .markdown-preview-section > .el-p ~ .el-p,
-    .markdown-preview-section > div:not(.mod-ui) p ~ p
-  )
+.internal-embed[alt*='ir-hide-title'].ir-embed-paragraphs
   .markdown-preview-section
   > div:not(.mod-ui) {
   padding-inline-start: 0;
@@ -242,10 +236,7 @@ body {
    Elsewhere this collapses into the margins the paragraphs already have, so it
    adds nothing. Counted from the second content section: the pusher and the
    chrome sections are excluded on the left, the chrome on the right. */
-.internal-embed[alt*='ir-hide-title']:has(
-    .markdown-preview-section > .el-p ~ .el-p,
-    .markdown-preview-section > div:not(.mod-ui) p ~ p
-  )
+.internal-embed[alt*='ir-hide-title'].ir-embed-paragraphs
   :is(
     .markdown-preview-section
       > div:not(.mod-ui, .markdown-preview-pusher)
@@ -292,44 +283,28 @@ body {
    the rounded corners of a code background that is opaque in the default
    theme and Minimal alike, and doubled over the embed's own where they meet.
 
-   A card of several paragraphs is left out (`:not(:has(…))`): it renders as one
-   block with the embed's padding around everything, a box rather than a run,
-   and its code sits inside that box like the rest of it. */
+   A card of several paragraphs is left out: it renders as one block with the
+   embed's padding around everything, a box rather than a run, and its code
+   sits inside that box like the rest of it. CardEmbedShape stamps
+   `.ir-embed-code` (a top-level code block), `.ir-embed-code-first` (the
+   code opens the card) and `.ir-embed-code-last` (it closes it) on the embed
+   only when it is not `.ir-embed-paragraphs`. The wrapper rule just below
+   takes `.ir-section-has-code`, which every section holding a direct `<pre>`
+   gets as it renders, multi-paragraph card or not. */
 .internal-embed[alt*='ir-hide-title']
   .markdown-preview-section
-  > div:not(.mod-ui):has(> pre) {
+  > div.ir-section-has-code:not(.mod-ui) {
   padding-inline-start: 0;
   background-color: transparent;
 }
 
-.internal-embed[alt*='ir-hide-title']:has(
-    .markdown-preview-section > div:not(.mod-ui) > pre
-  ):not(
-    :has(
-      .markdown-preview-section > .el-p ~ .el-p,
-      .markdown-preview-section > div:not(.mod-ui) p ~ p
-    )
-  ),
-.internal-embed[alt*='ir-hide-title']:has(
-    .markdown-preview-section > div:not(.mod-ui) > pre
-  ):not(
-    :has(
-      .markdown-preview-section > .el-p ~ .el-p,
-      .markdown-preview-section > div:not(.mod-ui) p ~ p
-    )
-  )
+.internal-embed[alt*='ir-hide-title'].ir-embed-code,
+.internal-embed[alt*='ir-hide-title'].ir-embed-code
   :is(.markdown-preview-sizer, .markdown-preview-pusher) {
   padding-inline: 0;
 }
 
-.internal-embed[alt*='ir-hide-title']:has(
-    .markdown-preview-section > div:not(.mod-ui) > pre
-  ):not(
-    :has(
-      .markdown-preview-section > .el-p ~ .el-p,
-      .markdown-preview-section > div:not(.mod-ui) p ~ p
-    )
-  )
+.internal-embed[alt*='ir-hide-title'].ir-embed-code
   .markdown-preview-section
   > div:not(.mod-ui)
   > p {
@@ -343,14 +318,7 @@ body {
    Reading view, as the `::before` in a Live Preview line. So the code block
    carries the rule itself, as a background image over its own background
    color, 2px like the host's. */
-.internal-embed[alt*='ir-hide-title']:has(
-    .markdown-preview-section > div:not(.mod-ui) > pre
-  ):not(
-    :has(
-      .markdown-preview-section > .el-p ~ .el-p,
-      .markdown-preview-section > div:not(.mod-ui) p ~ p
-    )
-  )
+.internal-embed[alt*='ir-hide-title'].ir-embed-code
   .markdown-preview-section
   > div:not(.mod-ui)
   > pre {
@@ -380,14 +348,7 @@ body {
    above and below it. */
 .markdown-source-view.mod-cm6
   .cm-content
-  > .internal-embed[alt*='ir-hide-title']:has(
-    .markdown-preview-section > div:not(.mod-ui) > pre
-  ):not(
-    :has(
-      .markdown-preview-section > .el-p ~ .el-p,
-      .markdown-preview-section > div:not(.mod-ui) p ~ p
-    )
-  ) {
+  > .internal-embed[alt*='ir-hide-title'].ir-embed-code {
   border-inline-start: none;
   /* The linter substitutes the hue alone for this variable (it reads only the
      first token of the hsl() it is set to), the false positive the host rule
@@ -414,12 +375,7 @@ body {
    nothing. */
 .markdown-source-view.mod-cm6
   .cm-content
-  > .internal-embed[alt*='ir-hide-title']:not(
-    :has(
-      .markdown-preview-section > .el-p ~ .el-p,
-      .markdown-preview-section > div:not(.mod-ui) p ~ p
-    )
-  )
+  > .internal-embed[alt*='ir-hide-title']:not(.ir-embed-paragraphs)
   .markdown-preview-section
   > div:not(.mod-ui)
   > pre {
@@ -427,12 +383,7 @@ body {
 }
 .markdown-source-view.mod-cm6
   .cm-content
-  > .internal-embed[alt*='ir-hide-title']:not(
-    :has(
-      .markdown-preview-section > .el-p ~ .el-p,
-      .markdown-preview-section > div:not(.mod-ui) p ~ p
-    )
-  )
+  > .internal-embed[alt*='ir-hide-title']:not(.ir-embed-paragraphs)
   .markdown-preview-section
   > div:not(.mod-ui)
   > pre
@@ -443,32 +394,13 @@ body {
    last that is not chrome. */
 .markdown-source-view.mod-cm6
   .cm-content
-  > .internal-embed[alt*='ir-hide-title']:has(
-    .markdown-preview-section
-      > :is(.markdown-preview-pusher, .mod-ui)
-      + div:not(.mod-ui)
-      > pre
-  ):not(
-    :has(
-      .markdown-preview-section > .el-p ~ .el-p,
-      .markdown-preview-section > div:not(.mod-ui) p ~ p
-    )
-  ) {
+  > .internal-embed[alt*='ir-hide-title'].ir-embed-code-first {
   padding-block-start: 0;
 }
 
 .markdown-source-view.mod-cm6
   .cm-content
-  > .internal-embed[alt*='ir-hide-title']:has(
-    .markdown-preview-section
-      > div:not(.mod-ui):nth-last-child(1 of :not(.mod-ui))
-      > pre
-  ):not(
-    :has(
-      .markdown-preview-section > .el-p ~ .el-p,
-      .markdown-preview-section > div:not(.mod-ui) p ~ p
-    )
-  ) {
+  > .internal-embed[alt*='ir-hide-title'].ir-embed-code-last {
   padding-block-end: 0;
 }
 
@@ -498,31 +430,11 @@ body {
    click target over the end of whatever is above. */
 .markdown-rendered
   .ir-transclusion-rule
-  > .internal-embed[alt*='ir-hide-title']:has(
-    .markdown-preview-section
-      > :is(.markdown-preview-pusher, .mod-ui)
-      + div:not(.mod-ui)
-      > pre
-  ):not(
-    :has(
-      .markdown-preview-section > .el-p ~ .el-p,
-      .markdown-preview-section > div:not(.mod-ui) p ~ p
-    )
-  )
+  > .internal-embed[alt*='ir-hide-title'].ir-embed-code-first
   > .markdown-embed-link,
 .markdown-source-view.mod-cm6
   .cm-content
-  > .internal-embed[alt*='ir-hide-title']:has(
-    .markdown-preview-section
-      > :is(.markdown-preview-pusher, .mod-ui)
-      + div:not(.mod-ui)
-      > pre
-  ):not(
-    :has(
-      .markdown-preview-section > .el-p ~ .el-p,
-      .markdown-preview-section > div:not(.mod-ui) p ~ p
-    )
-  )
+  > .internal-embed[alt*='ir-hide-title'].ir-embed-code-first
   > .markdown-embed-link {
   top: auto;
   bottom: calc(100% + 4px);
@@ -539,19 +451,9 @@ body {
    outranks Obsidian's `!important`, and only on these widgets. */
 .markdown-source-view.mod-cm6
   .cm-content
-  > .internal-embed[alt*='ir-hide-title']:has(
-    .markdown-preview-section
-      > :is(.markdown-preview-pusher, .mod-ui)
-      + div:not(.mod-ui)
-      > pre
-  ):not(
-    :has(
-      .markdown-preview-section > .el-p ~ .el-p,
-      .markdown-preview-section > div:not(.mod-ui) p ~ p
-    )
-  ) {
+  > .internal-embed[alt*='ir-hide-title'].ir-embed-code-first {
   /* eslint-disable-next-line css/no-important -- outranks Obsidian's own !important, see above */
-  contain: layout !important;
+  contain: layout !important; /* stylelint-disable-line declaration-no-important -- as the line above says */
 }
 
 /* A code card between two halves of the note's code block reads as one block
@@ -590,38 +492,21 @@ body {
    Reading view finds the neighbours by section: the half above is the `.el-pre`
    just before the card's host paragraph's section, the half below the one
    just after it. `.ir-transclusion-rule` limits it to a host the card opens,
-   which is every host a fence line leaves the card alone on. The `:has()` on
-   `.el-pre` and `.el-p` makes Obsidian's own sections the subjects, which the
-   rules above avoid; here it is the only way to reach the block before or
-   after a card, and it is scoped by the arguments to sections that sit next to
-   a card embed. */
+   which is every host a fence line leaves the card alone on. Which card
+   starts or ends in code is stamped by CardEmbedShape: on the embed, on its
+   host (`.ir-embed-host-code-first`/`-last`) and, for the host's section, as
+   `.ir-embed-section-code-last`, so the `:has(+ …)` below that has to reach
+   the block after a card is asked only of sections that host one. */
+/* stylelint-disable selector-pseudo-class-disallowed-list -- subjects are fence lines only; arguments read the line's own children and the one widget beside it. A class there needs a line decoration rebuilt each time the embed renders. */
 .markdown-source-view.mod-cm6
   .cm-content
   > .cm-line.HyperMD-codeblock-end:not(:has(.cm-formatting-code-block)):has(
-    + .internal-embed[alt*='ir-hide-title']
-      .markdown-preview-section
-      > :is(.markdown-preview-pusher, .mod-ui)
-      + div:not(.mod-ui)
-      > pre
-  ):not(
-    :has(
-      + .internal-embed .markdown-preview-section > .el-p ~ .el-p,
-      + .internal-embed .markdown-preview-section > div:not(.mod-ui) p ~ p
-    )
+    + .internal-embed[alt*='ir-hide-title'].ir-embed-code-first
   ),
 .markdown-source-view.mod-cm6
   .cm-content
   > :not(.cm-active)
-  + .internal-embed[alt*='ir-hide-title']:has(
-    .markdown-preview-section
-      > div:not(.mod-ui):nth-last-child(1 of :not(.mod-ui))
-      > pre
-  ):not(
-    :has(
-      .markdown-preview-section > .el-p ~ .el-p,
-      .markdown-preview-section > div:not(.mod-ui) p ~ p
-    )
-  )
+  + .internal-embed[alt*='ir-hide-title'].ir-embed-code-last
   + .cm-line.HyperMD-codeblock-begin:not(:has(.cm-formatting-code-block)) {
   height: 0;
   min-height: 0;
@@ -629,17 +514,13 @@ body {
   border-block-width: 0;
   overflow: hidden;
 }
+/* stylelint-enable selector-pseudo-class-disallowed-list */
 
 /* The card's code where the note's code is right above it */
 .markdown-source-view.mod-cm6
   .cm-content
   > .cm-line.HyperMD-codeblock-end
-  + .internal-embed[alt*='ir-hide-title']:not(
-    :has(
-      .markdown-preview-section > .el-p ~ .el-p,
-      .markdown-preview-section > div:not(.mod-ui) p ~ p
-    )
-  )
+  + .internal-embed[alt*='ir-hide-title']:not(.ir-embed-paragraphs)
   .markdown-preview-section
   > :is(.markdown-preview-pusher, .mod-ui)
   + div:not(.mod-ui)
@@ -648,12 +529,7 @@ body {
   .el-pre
   + .el-p
   > .ir-transclusion-rule
-  > .internal-embed[alt*='ir-hide-title']:not(
-    :has(
-      .markdown-preview-section > .el-p ~ .el-p,
-      .markdown-preview-section > div:not(.mod-ui) p ~ p
-    )
-  )
+  > .internal-embed[alt*='ir-hide-title']:not(.ir-embed-paragraphs)
   .markdown-preview-section
   > :is(.markdown-preview-pusher, .mod-ui)
   + div:not(.mod-ui)
@@ -664,29 +540,26 @@ body {
   border-start-end-radius: 0;
 }
 
-/* … and right below it */
+/* … and right below it
+
+   The `:has(+ …)` from here on asks only for the next sibling, of a card that
+   ends in code or of the reading-view section hosting one. That sibling is a
+   CodeMirror line or a section Obsidian redraws and virtualizes on its own
+   schedule, so a class the card set on it, or on itself from it, would go
+   stale the moment it is redrawn. */
+/* stylelint-disable selector-pseudo-class-disallowed-list -- subjects are code-ending cards and their host sections; arguments are the next sibling alone, which redraws on its own (see above). */
 .markdown-source-view.mod-cm6
   .cm-content
-  > .internal-embed[alt*='ir-hide-title']:has(
+  > .internal-embed[alt*='ir-hide-title'].ir-embed-code-last:has(
     + .cm-line.HyperMD-codeblock-begin
-  ):not(
-    :has(
-      .markdown-preview-section > .el-p ~ .el-p,
-      .markdown-preview-section > div:not(.mod-ui) p ~ p
-    )
   )
   .markdown-preview-section
   > div:not(.mod-ui):nth-last-child(1 of :not(.mod-ui))
   > pre,
 .markdown-rendered
-  .el-p:has(+ .el-pre)
+  .el-p.ir-embed-section-code-last:has(+ .el-pre)
   > .ir-transclusion-rule
-  > .internal-embed[alt*='ir-hide-title']:not(
-    :has(
-      .markdown-preview-section > .el-p ~ .el-p,
-      .markdown-preview-section > div:not(.mod-ui) p ~ p
-    )
-  )
+  > .internal-embed[alt*='ir-hide-title']:not(.ir-embed-paragraphs)
   .markdown-preview-section
   > div:not(.mod-ui):nth-last-child(1 of :not(.mod-ui))
   > pre {
@@ -709,12 +582,7 @@ body {
 .markdown-source-view.mod-cm6
   .cm-content
   > .cm-line.HyperMD-codeblock-end
-  + .internal-embed[alt*='ir-hide-title']:not(
-    :has(
-      .markdown-preview-section > .el-p ~ .el-p,
-      .markdown-preview-section > div:not(.mod-ui) p ~ p
-    )
-  )
+  + .internal-embed[alt*='ir-hide-title']:not(.ir-embed-paragraphs)
   .markdown-preview-section
   > :is(.markdown-preview-pusher, .mod-ui)
   + div:not(.mod-ui)
@@ -724,12 +592,7 @@ body {
   .el-pre
   + .el-p
   > .ir-transclusion-rule
-  > .internal-embed[alt*='ir-hide-title']:not(
-    :has(
-      .markdown-preview-section > .el-p ~ .el-p,
-      .markdown-preview-section > div:not(.mod-ui) p ~ p
-    )
-  )
+  > .internal-embed[alt*='ir-hide-title']:not(.ir-embed-paragraphs)
   .markdown-preview-section
   > :is(.markdown-preview-pusher, .mod-ui)
   + div:not(.mod-ui)
@@ -741,12 +604,7 @@ body {
 .markdown-source-view.mod-cm6
   .cm-content
   > .cm-line.HyperMD-codeblock-end
-  + .internal-embed[alt*='ir-hide-title']:not(
-    :has(
-      .markdown-preview-section > .el-p ~ .el-p,
-      .markdown-preview-section > div:not(.mod-ui) p ~ p
-    )
-  )
+  + .internal-embed[alt*='ir-hide-title']:not(.ir-embed-paragraphs)
   .markdown-preview-section
   > :is(.markdown-preview-pusher, .mod-ui)
   + div:not(.mod-ui)
@@ -756,12 +614,7 @@ body {
   .el-pre
   + .el-p
   > .ir-transclusion-rule
-  > .internal-embed[alt*='ir-hide-title']:not(
-    :has(
-      .markdown-preview-section > .el-p ~ .el-p,
-      .markdown-preview-section > div:not(.mod-ui) p ~ p
-    )
-  )
+  > .internal-embed[alt*='ir-hide-title']:not(.ir-embed-paragraphs)
   .markdown-preview-section
   > :is(.markdown-preview-pusher, .mod-ui)
   + div:not(.mod-ui)
@@ -769,27 +622,17 @@ body {
   > button.copy-code-button,
 .markdown-source-view.mod-cm6
   .cm-content
-  > .internal-embed[alt*='ir-hide-title']:has(
+  > .internal-embed[alt*='ir-hide-title'].ir-embed-code-last:has(
     + .cm-line.HyperMD-codeblock-begin
-  ):not(
-    :has(
-      .markdown-preview-section > .el-p ~ .el-p,
-      .markdown-preview-section > div:not(.mod-ui) p ~ p
-    )
   )
   .markdown-preview-section
   > div:not(.mod-ui):nth-last-child(1 of :not(.mod-ui))
   > pre
   > button.copy-code-button,
 .markdown-rendered
-  .el-p:has(+ .el-pre)
+  .el-p.ir-embed-section-code-last:has(+ .el-pre)
   > .ir-transclusion-rule
-  > .internal-embed[alt*='ir-hide-title']:not(
-    :has(
-      .markdown-preview-section > .el-p ~ .el-p,
-      .markdown-preview-section > div:not(.mod-ui) p ~ p
-    )
-  )
+  > .internal-embed[alt*='ir-hide-title']:not(.ir-embed-paragraphs)
   .markdown-preview-section
   > div:not(.mod-ui):nth-last-child(1 of :not(.mod-ui))
   > pre
@@ -800,64 +643,19 @@ body {
 .markdown-rendered
   .el-pre
   + .el-p
-  > .ir-transclusion-rule:has(
-    > .internal-embed[alt*='ir-hide-title']
-      .markdown-preview-section
-      > :is(.markdown-preview-pusher, .mod-ui)
-      + div:not(.mod-ui)
-      > pre
-  ):not(
-    :has(
-      > .internal-embed .markdown-preview-section > .el-p ~ .el-p,
-      > .internal-embed .markdown-preview-section > div:not(.mod-ui) p ~ p
-    )
-  ) {
+  > .ir-transclusion-rule.ir-embed-host-code-first {
   margin-block-start: 0;
 }
 
 .markdown-rendered
-  .el-p:has(+ .el-pre)
-  > .ir-transclusion-rule:has(
-    > .internal-embed[alt*='ir-hide-title']
-      .markdown-preview-section
-      > div:not(.mod-ui):nth-last-child(1 of :not(.mod-ui))
-      > pre
-  ):not(
-    :has(
-      > .internal-embed .markdown-preview-section > .el-p ~ .el-p,
-      > .internal-embed .markdown-preview-section > div:not(.mod-ui) p ~ p
-    )
-  ) {
+  .el-p.ir-embed-section-code-last:has(+ .el-pre)
+  > .ir-transclusion-rule.ir-embed-host-code-last {
   margin-block-end: 0;
 }
 
 /* … and the half of code above it and the one below it */
 .markdown-rendered
-  .el-pre:has(
-    + .el-p
-      > .ir-transclusion-rule
-      > .internal-embed[alt*='ir-hide-title']
-      .markdown-preview-section
-      > :is(.markdown-preview-pusher, .mod-ui)
-      + div:not(.mod-ui)
-      > pre
-  ):not(
-    :has(
-      + .el-p
-        > .ir-transclusion-rule
-        > .internal-embed
-        .markdown-preview-section
-        > .el-p
-        ~ .el-p,
-      + .el-p
-        > .ir-transclusion-rule
-        > .internal-embed
-        .markdown-preview-section
-        > div:not(.mod-ui)
-        p
-        ~ p
-    )
-  )
+  .el-pre:has(+ .el-p > .ir-transclusion-rule.ir-embed-host-code-first)
   > pre {
   margin-block-end: 0;
   padding-block-end: 0;
@@ -865,35 +663,13 @@ body {
   border-end-end-radius: 0;
 }
 
-.markdown-rendered
-  .el-p:has(
-    > .ir-transclusion-rule
-      > .internal-embed[alt*='ir-hide-title']
-      .markdown-preview-section
-      > div:not(.mod-ui):nth-last-child(1 of :not(.mod-ui))
-      > pre
-  ):not(
-    :has(
-      > .ir-transclusion-rule
-        > .internal-embed
-        .markdown-preview-section
-        > .el-p
-        ~ .el-p,
-      > .ir-transclusion-rule
-        > .internal-embed
-        .markdown-preview-section
-        > div:not(.mod-ui)
-        p
-        ~ p
-    )
-  )
-  + .el-pre
-  > pre {
+.markdown-rendered .el-p.ir-embed-section-code-last + .el-pre > pre {
   margin-block-start: 0;
   padding-block-start: 0;
   border-start-start-radius: 0;
   border-start-end-radius: 0;
 }
+/* stylelint-enable selector-pseudo-class-disallowed-list */
 
 /* `.cm-line` is already relative in Live Preview. The reading-view hosts are
    not, so promote them — but only the ones holding a transclusion, since this
@@ -980,10 +756,7 @@ body {
    embed's top (a literal in its stylesheet, no token to read). */
 .markdown-source-view.mod-cm6
   .cm-line
-  > .internal-embed[alt*='ir-hide-title']:has(
-    .markdown-preview-section > .el-p ~ .el-p,
-    .markdown-preview-section > div:not(.mod-ui) p ~ p
-  )
+  > .internal-embed[alt*='ir-hide-title'].ir-embed-paragraphs
   > .markdown-embed-link {
   top: calc(var(--ir-embed-rule-top, 0px) + 4px);
 }
@@ -994,11 +767,7 @@ body {
    than on the card. The block embed is its own corner. Reading view only:
    in Live Preview the rule above is a pseudo-element of the embed, placed in
    host-line pixels, and must keep resolving against the line. */
-.markdown-rendered
-  .internal-embed[alt*='ir-hide-title']:has(
-    .markdown-preview-section > .el-p ~ .el-p,
-    .markdown-preview-section > div:not(.mod-ui) p ~ p
-  ) {
+.markdown-rendered .internal-embed[alt*='ir-hide-title'].ir-embed-paragraphs {
   position: relative;
 }
 
@@ -2293,7 +2062,7 @@ body:not(.is-mobile) .ir-grade-row {
 
 .is-mobile .ir-card-editor.mod-cm6 .cm-content {
   /* eslint-disable-next-line css/no-important -- outranks scrollPastEnd's inline padding-bottom (see above) */
-  padding-bottom: 0 !important;
+  padding-bottom: 0 !important; /* stylelint-disable-line declaration-no-important -- as the line above says */
 }
 
 /* With the bar on top (desktop, any width), the text is not centered: it
@@ -2358,6 +2127,7 @@ body:not(.is-mobile) .ir-review-interface .ir-card-editor .ir-review-scroller {
    over a checklist that scrolls on its own, so the buttons stay in reach
    however many files it lists. */
 .ir-scheduling-modal > .ir-bulk-import-options {
+  /* stylelint-disable-next-line plugin/no-unsupported-browser-features -- a plain div; the partial support is for buttons and other roles losing their semantics */
   display: contents;
 }
 
@@ -2412,7 +2182,7 @@ body:not(.is-mobile) .ir-review-interface .ir-card-editor .ir-review-scroller {
 
 /* In a tree, a file's box lines up with its sibling folders', past their
    arrows, as names do in the Files view */
-.ir-bulk-import-list:has(.ir-bulk-import-folder) .ir-bulk-import-row > label {
+.ir-bulk-import-list.is-tree .ir-bulk-import-row > label {
   padding-inline-start: var(--size-4-6);
 }
 
@@ -3055,7 +2825,7 @@ body:not(.is-mobile) .ir-review-interface .ir-card-editor .ir-review-scroller {
 }
 
 @media (hover: none) {
-  .ir-queue-cell-actions:has(.ir-queue-row-menu) {
+  .ir-queue-cell-actions.has-menu {
     opacity: 1;
   }
 }
@@ -4326,6 +4096,7 @@ input.ir-queue-page-input {
   width: 1px;
   height: 1px;
   overflow: hidden;
+  /* stylelint-disable-next-line plugin/no-unsupported-browser-features -- a basic shape; the partial support is for SVG and url() clip paths */
   clip-path: inset(50%);
   white-space: nowrap;
 }
