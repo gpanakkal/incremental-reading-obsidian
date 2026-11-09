@@ -39,6 +39,7 @@ import {
   DatabaseLoadError,
   SQLJSRepository,
   StartupCancelledError,
+  type RecoveryReport,
   type SyncHold,
 } from './SQLJSRepository';
 import {
@@ -72,10 +73,11 @@ interface FakeDisk {
 
 /**
  * The adapter calls a save makes besides `writeBinary` (see `db-file.ts`),
- * over `disk`: `stat`, `copy`, and desktop's replacing rename (undocumented
- * `fsPromises.rename`, with `getFullPath`), so a save writes the file once,
- * to its hidden sibling, and renames it into place. A file's mtime changes
- * whenever its bytes are replaced, whoever replaces them.
+ * over `disk`: `stat`, `copy`, `rename` (which refuses an existing
+ * destination, as Obsidian's does), and desktop's replacing rename
+ * (undocumented `fsPromises.rename`, with `getFullPath`), so a save writes
+ * the file once, to its hidden sibling, and renames it into place. A file's
+ * mtime changes whenever its bytes are replaced, whoever replaces them.
  */
 function saveFileOps(disk: FakeDisk) {
   const mtimes = new WeakMap<Uint8Array, number>();
@@ -102,6 +104,12 @@ function saveFileOps(disk: FakeDisk) {
     }),
     copy: vi.fn(async (from: string, to: string) => {
       disk.set(to, read(from).slice());
+    }),
+    rename: vi.fn(async (from: string, to: string) => {
+      if (disk.get(to)) throw new Error('Destination file already exists!');
+      const bytes = read(from);
+      disk.delete(from);
+      disk.set(to, bytes);
     }),
     getFullPath: (path: string) => path,
     fsPromises: {
@@ -1313,6 +1321,42 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 /** The database file's hidden siblings (see `db-file.ts`). */
 const TMP_PATH = `${DATA_DIRECTORY}/.ir-user-data.sqlite.tmp`;
 const PREV_PATH = `${DATA_DIRECTORY}/.ir-user-data.sqlite.prev`;
+
+/** Where copies from a newer plugin version are kept (see `db-file.ts`). */
+const NEWER_PREFIX = `${DATA_DIRECTORY}/.ir-user-data.sqlite.newer-`;
+
+/** The paths of every copy from a newer plugin version kept aside. */
+function keptNewerIn(files: Map<string, Uint8Array>): string[] {
+  return [...files.keys()].filter((path) => path.startsWith(NEWER_PREFIX));
+}
+
+/**
+ * Bytes of a whole database holding `ids`, written by a plugin version
+ * `ahead` schema versions past this one: whole, but not this version's to
+ * load.
+ */
+async function newerVersionWith(
+  ids: readonly string[],
+  ahead = 1
+): Promise<Uint8Array> {
+  const SQL = await getSharedSql();
+  const db = new SQL.Database(await dbFileWith(ids));
+  db.exec(`PRAGMA user_version = ${LATEST_VERSION + ahead}`);
+  const bytes = db.export();
+  db.close();
+  return bytes;
+}
+
+/** The paths in `files` holding exactly `bytes`. */
+function pathsHolding(
+  files: Map<string, Uint8Array>,
+  bytes: Uint8Array
+): string[] {
+  return [...files.entries()]
+    .filter(([, held]) => held.byteLength === bytes.byteLength)
+    .filter(([, held]) => held.every((byte, i) => byte === bytes[i]))
+    .map(([path]) => path);
+}
 
 /** Whether `bytes` hold a database file that loads, with its tables. */
 async function loadsAsDatabase(bytes: Uint8Array | undefined) {
@@ -7069,6 +7113,8 @@ describe('recovering a database file that holds no database (0217)', () => {
                 source: (['tmp', 'prev', 'backup', 'backup'] as const)[chosen],
                 path: paths[chosen],
                 corruptCopyPath: live ? copies[0] : null,
+                newerCopyPaths: [],
+                stuckNewerCopyPaths: [],
               });
               expect(
                 (await idsIn(files.get(DATABASE_FILE_PATH))).sort()
@@ -7353,6 +7399,8 @@ describe('starting with the database file missing (0217)', () => {
         source: 'prev',
         path: PREV_PATH,
         corruptCopyPath: null,
+        newerCopyPaths: [],
+        stuckNewerCopyPaths: [],
       });
     } finally {
       repo.dispose();
@@ -7926,6 +7974,446 @@ describe('starting with the database file missing (0217)', () => {
       started?.dispose();
     }
   });
+});
+
+describe('recovering beside a copy from a newer version of the plugin (0223)', () => {
+  beforeEach(() => {
+    stubWasm();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'debug').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** The live file as recovery finds it: not there, or holding no database. */
+  const LIVE_STATES = [
+    ['missing', null],
+    ['damaged', new Uint8Array(0)],
+  ] as const;
+
+  /** A vault with `live` (if any) and `siblings` at their paths. */
+  function vaultWith(
+    live: Uint8Array | null,
+    siblings: Array<[string, Uint8Array]>
+  ) {
+    const files = new Map<string, Uint8Array>(siblings);
+    if (live) files.set(DATABASE_FILE_PATH, live);
+    return makeVault({ folder: true, file: live !== null }, files);
+  }
+
+  /** Make a change and let its save land, `times` over. */
+  async function saveAgain(repo: SQLJSRepository, times: number) {
+    for (let i = 0; i < times; i++) {
+      insertArticleRow(repo, `later-${i}`);
+      await settle();
+    }
+  }
+
+  it.each(LIVE_STATES)(
+    'restores the older copy kept before the last save, keeps the newer save under way aside, and names it, when the database file is %s',
+    async (_, live) => {
+      const newer = await newerVersionWith(['newer']);
+      const { app, files } = vaultWith(live, [
+        [TMP_PATH, newer],
+        [PREV_PATH, await dbFileWith(['older'])],
+      ]);
+      const onRecovered = vi.fn();
+      const onSavesPaused = vi.fn();
+      const onSavesResumed = vi.fn();
+      const repo = await startRepo(app, {
+        onRecovered,
+        onSavesPaused,
+        onSavesResumed,
+      });
+      try {
+        expect(articleIds(repo)).toEqual(['older']);
+        const kept = keptNewerIn(files);
+        expect(kept).toHaveLength(1);
+        expect(files.get(kept[0])).toEqual(newer);
+        expect(onRecovered).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({ source: 'prev', newerCopyPaths: kept })
+        );
+        // Every save after writes the save under way and rotates `prev`
+        await saveAgain(repo, 2);
+        expect(files.get(kept[0])).toEqual(newer);
+        expect((await idsIn(files.get(DATABASE_FILE_PATH))).sort()).toEqual([
+          'later-0',
+          'later-1',
+          'older',
+        ]);
+        // Nothing held saves up
+        expect(onSavesPaused).not.toHaveBeenCalled();
+        expect(onSavesResumed).not.toHaveBeenCalled();
+      } finally {
+        repo.dispose();
+      }
+    }
+  );
+
+  it('keeps a newer copy kept before the last save aside when it restores the save under way', async () => {
+    const newer = await newerVersionWith(['newer']);
+    const { app, files } = vaultWith(null, [
+      [TMP_PATH, await dbFileWith(['under-way'])],
+      [PREV_PATH, newer],
+    ]);
+    const onRecovered = vi.fn();
+    const repo = await startRepo(app, { onRecovered });
+    try {
+      await saveAgain(repo, 2);
+      const kept = keptNewerIn(files);
+      expect(kept).toHaveLength(1);
+      expect(files.get(kept[0])).toEqual(newer);
+      expect(onRecovered).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ source: 'tmp', newerCopyPaths: kept })
+      );
+    } finally {
+      repo.dispose();
+    }
+  });
+
+  it('keeps a newer save under way aside before the restored copy is migrated and saved', async () => {
+    const newer = await newerVersionWith(['newer']);
+    const { app, files } = vaultWith(null, [
+      [TMP_PATH, newer],
+      [PREV_PATH, await staleFileWith(['older'])],
+    ]);
+    const onRecovered = vi.fn();
+    const repo = await startRepo(app, { onRecovered });
+    try {
+      expect(articleIds(repo)).toEqual(['older']);
+      const kept = keptNewerIn(files);
+      expect(kept).toHaveLength(1);
+      expect(files.get(kept[0])).toEqual(newer);
+      expect(onRecovered).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ newerCopyPaths: kept })
+      );
+    } finally {
+      repo.dispose();
+    }
+  });
+
+  it.each(LIVE_STATES)(
+    'stops, moving and writing nothing, when only copies from a newer version hold a database and the database file is %s',
+    async (_, live) => {
+      const newerTmp = await newerVersionWith(['under-way']);
+      const newerPrev = await newerVersionWith(['kept'], 2);
+      const { app, files } = vaultWith(live, [
+        [TMP_PATH, newerTmp],
+        [PREV_PATH, newerPrev],
+      ]);
+      const onRecovered = vi.fn();
+      const outcome = await startRepo(app, { onRecovered }).catch(
+        (error: unknown) => error
+      );
+      expect(outcome).toBeInstanceOf(DatabaseLoadError);
+      expect((outcome as DatabaseLoadError).newerCopyPaths).toEqual([
+        TMP_PATH,
+        PREV_PATH,
+      ]);
+      expect(onRecovered).not.toHaveBeenCalled();
+      expect(files.get(TMP_PATH)).toBe(newerTmp);
+      expect(files.get(PREV_PATH)).toBe(newerPrev);
+      expect(files.get(DATABASE_FILE_PATH)).toBe(live ?? undefined);
+      expect(keptNewerIn(files)).toEqual([]);
+    }
+  );
+
+  it('writes nothing over a newer copy it could not move aside, names where it still is, and moves it at a later save', async () => {
+    const newer = await newerVersionWith(['newer']);
+    const { app, files, adapter } = vaultWith(null, [
+      [TMP_PATH, newer],
+      [PREV_PATH, await dbFileWith(['older'])],
+    ]);
+    const rename = adapter.rename.getMockImplementation()!;
+    adapter.rename.mockRejectedValue(new Error('EBUSY'));
+    const onRecovered = vi.fn();
+    const onSavesPaused = vi.fn();
+    const onSavesResumed = vi.fn();
+    const repo = await startRepo(app, {
+      onRecovered,
+      onSavesPaused,
+      onSavesResumed,
+    });
+    try {
+      expect(files.get(TMP_PATH)).toBe(newer);
+      expect(files.has(DATABASE_FILE_PATH)).toBe(false);
+      expect(onRecovered).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          newerCopyPaths: [],
+          stuckNewerCopyPaths: [TMP_PATH],
+        })
+      );
+      // Told once, however many saves fail on it
+      await saveAgain(repo, 2);
+      expect(files.has(DATABASE_FILE_PATH)).toBe(false);
+      expect(onSavesPaused).toHaveBeenCalledExactlyOnceWith([TMP_PATH]);
+      expect(onSavesResumed).not.toHaveBeenCalled();
+
+      adapter.rename.mockImplementation(rename);
+      insertArticleRow(repo, 'after-move');
+      await settle();
+      const kept = keptNewerIn(files);
+      expect(kept).toHaveLength(1);
+      expect(files.get(kept[0])).toEqual(newer);
+      expect((await idsIn(files.get(DATABASE_FILE_PATH))).sort()).toEqual([
+        'after-move',
+        'later-0',
+        'later-1',
+        'older',
+      ]);
+      expect(onSavesPaused).toHaveBeenCalledOnce();
+      expect(onSavesResumed).toHaveBeenCalledOnce();
+    } finally {
+      repo.dispose();
+    }
+  });
+
+  it('moves a newer copy it could not move aside out of the way of a restored backup, and never takes the restored save for one', async () => {
+    const newer = await newerVersionWith(['newer']);
+    const { app, files, adapter } = vaultWith(null, [
+      [TMP_PATH, newer],
+      [PREV_PATH, await dbFileWith(['older'])],
+    ]);
+    const rename = adapter.rename.getMockImplementation()!;
+    adapter.rename.mockRejectedValue(new Error('EBUSY'));
+    const onSavesResumed = vi.fn();
+    const repo = await startRepo(app, { onSavesResumed });
+    try {
+      expect(files.get(TMP_PATH)).toBe(newer);
+      adapter.rename.mockImplementation(rename);
+      const path = await addBackup(files, ['restored']);
+
+      await repo.restoreBackup(path);
+      await settle();
+
+      const kept = keptNewerIn(files);
+      expect(kept).toHaveLength(1);
+      expect(files.get(kept[0])).toEqual(newer);
+      expect(await idsIn(files.get(DATABASE_FILE_PATH))).toEqual(['restored']);
+      expect(onSavesResumed).toHaveBeenCalledOnce();
+      // The restored database's own saves, at this version, stay put
+      await saveAgain(repo, 2);
+      expect(keptNewerIn(files)).toEqual(kept);
+      expect((await idsIn(files.get(DATABASE_FILE_PATH))).sort()).toEqual([
+        'later-0',
+        'later-1',
+        'restored',
+      ]);
+    } finally {
+      repo.dispose();
+    }
+  });
+
+  it('keeps aside a newer save under way that was still being written when startup read it', async () => {
+    const newer = await newerVersionWith(['newer']);
+    const { app, files, adapter } = vaultWith(null, [
+      [TMP_PATH, newer],
+      [PREV_PATH, await dbFileWith(['older'])],
+    ]);
+    // The first read finds the write cut short, which has ended by the next
+    const read = adapter.readBinary.getMockImplementation()!;
+    let first = true;
+    adapter.readBinary.mockImplementation(async (path: string) => {
+      if (path !== TMP_PATH || !first) return read(path);
+      first = false;
+      return newer.slice(0, newer.byteLength - 1).buffer;
+    });
+    const onRecovered = vi.fn();
+    const repo = await startRepo(app, { onRecovered });
+    try {
+      const kept = keptNewerIn(files);
+      expect(kept).toHaveLength(1);
+      expect(files.get(kept[0])).toEqual(newer);
+      expect(onRecovered).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ source: 'prev', newerCopyPaths: kept })
+      );
+    } finally {
+      repo.dispose();
+    }
+  });
+
+  it('looks for no copy to move aside for a save that waited while it was unloaded', async () => {
+    const newer = await newerVersionWith(['newer']);
+    const { app, adapter } = vaultWith(null, [
+      [TMP_PATH, newer],
+      [PREV_PATH, await dbFileWith(['older'])],
+    ]);
+    // Left in place at startup, so the next save looks again
+    adapter.rename.mockRejectedValue(new Error('EBUSY'));
+    const repo = await startRepo(app);
+    const read = adapter.readBinary.getMockImplementation()!;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let holding = false;
+    adapter.readBinary.mockImplementation(async (path: string) => {
+      if (path === TMP_PATH && !holding) {
+        holding = true;
+        await held;
+      }
+      return read(path);
+    });
+    // The first save's look is held; the second waits behind it
+    insertArticleRow(repo, 'first');
+    await vi.waitFor(() => expect(holding).toBe(true));
+    insertArticleRow(repo, 'second');
+    await settle();
+    repo.dispose();
+    const readsBefore = adapter.readBinary.mock.calls.length;
+    release();
+    await settle();
+    const lookedAgain = adapter.readBinary.mock.calls
+      .slice(readsBefore)
+      .filter(([path]) => path === TMP_PATH);
+    expect(lookedAgain).toEqual([]);
+  });
+
+  it('moves no copy aside once unloaded while it was looking at it', async () => {
+    const newer = await newerVersionWith(['newer']);
+    const { app, files, adapter } = vaultWith(null, [
+      [TMP_PATH, newer],
+      [PREV_PATH, await dbFileWith(['older'])],
+    ]);
+    // Left in place at startup, so the next save looks again
+    const rename = adapter.rename.getMockImplementation()!;
+    adapter.rename.mockRejectedValue(new Error('EBUSY'));
+    const repo = await startRepo(app);
+    adapter.rename.mockImplementation(rename);
+    const renamesBefore = adapter.rename.mock.calls.length;
+    const read = adapter.readBinary.getMockImplementation()!;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let holding = false;
+    adapter.readBinary.mockImplementation(async (path: string) => {
+      if (path === TMP_PATH && !holding) {
+        holding = true;
+        await held;
+      }
+      return read(path);
+    });
+    // The save's look at `tmp` is held until after the unload
+    insertArticleRow(repo, 'first');
+    await vi.waitFor(() => expect(holding).toBe(true));
+    repo.dispose();
+    release();
+    await settle();
+    expect(adapter.rename.mock.calls.slice(renamesBefore)).toEqual([]);
+    expect(files.get(TMP_PATH)).toBe(newer);
+  });
+
+  it('moves no local copy aside when the database file itself loads', async () => {
+    const newer = await newerVersionWith(['newer']);
+    const { app, files, adapter } = vaultWith(await dbFileWith(['live']), [
+      [TMP_PATH, newer],
+    ]);
+    const repo = await startRepo(app);
+    try {
+      expect(adapter.rename).not.toHaveBeenCalled();
+      expect(files.get(TMP_PATH)).toBe(newer);
+    } finally {
+      repo.dispose();
+    }
+  });
+
+  /**
+   * One local copy recovery may look at: nothing, a file holding no
+   * database, a whole database that fails to load, one holding `ids` at this
+   * version (or one a migration brings up to it), or one from a version
+   * `ahead` schema versions newer.
+   */
+  type Copy =
+    | null
+    | { damaged: true }
+    | { unloadable: true }
+    | { ids: string[]; stale: boolean }
+    | { ids: string[]; ahead: number };
+  const idsArb = fc.uniqueArray(fc.string({ minLength: 1, maxLength: 8 }), {
+    maxLength: 4,
+  });
+  const copyArb: fc.Arbitrary<Copy> = fc.oneof(
+    fc.constant(null),
+    fc.constant({ damaged: true as const }),
+    fc.constant({ unloadable: true as const }),
+    fc.record({ ids: idsArb, stale: fc.boolean() }),
+    fc.record({ ids: idsArb, ahead: fc.integer({ min: 1, max: 3 }) })
+  );
+
+  async function copyBytes(copy: Copy): Promise<Uint8Array | null> {
+    if (copy === null) return null;
+    if ('damaged' in copy) return new Uint8Array([1, 2, 3]);
+    if ('unloadable' in copy) return unloadableBytes(UNMIGRATABLE);
+    if ('ahead' in copy) return newerVersionWith(copy.ids, copy.ahead);
+    return copy.stale ? staleFileWith(copy.ids) : dbFileWith(copy.ids);
+  }
+
+  const BACKUP = `${BACKUP_DIRECTORY}/${backupFileName(LATEST_VERSION, 'merge', new Date(2026, 5, 2))}`;
+
+  it('property: never writes over a save under way or previous copy from a newer version of the plugin, starts on it only through an older copy, and names where each one is', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.boolean(),
+        fc.tuple(copyArb, copyArb, copyArb),
+        fc.integer({ min: 0, max: 2 }),
+        async (damagedLive, copies, saves) => {
+          const live = damagedLive ? new Uint8Array(0) : null;
+          const paths = [TMP_PATH, PREV_PATH, BACKUP];
+          const siblings: Array<[string, Uint8Array]> = [];
+          // The save under way and previous copy: what saves write over
+          const newer: Array<[string, Uint8Array]> = [];
+          for (const [i, copy] of copies.entries()) {
+            const bytes = await copyBytes(copy);
+            if (!bytes) continue;
+            siblings.push([paths[i], bytes]);
+            if (copy && 'ahead' in copy && i < 2) {
+              newer.push([paths[i], bytes]);
+            }
+          }
+          const { app, files } = vaultWith(live, siblings);
+          const onRecovered = vi.fn();
+          const older = copies.some((copy) => copy !== null && 'stale' in copy);
+          const outcome = await startRepo(app, { onRecovered }).catch(
+            (error: unknown) => error
+          );
+          if (!older && (live || newer.length > 0)) {
+            expect(outcome).toBeInstanceOf(DatabaseLoadError);
+            expect((outcome as DatabaseLoadError).newerCopyPaths).toEqual(
+              newer.map(([path]) => path)
+            );
+            for (const [path, bytes] of newer) {
+              expect(files.get(path)).toBe(bytes);
+            }
+            expect(keptNewerIn(files)).toEqual([]);
+            expect(onRecovered).not.toHaveBeenCalled();
+            return;
+          }
+          expect(outcome).toBeInstanceOf(SQLJSRepository);
+          const repo = outcome as SQLJSRepository;
+          try {
+            await saveAgain(repo, saves);
+            const kept = keptNewerIn(files);
+            expect(kept).toHaveLength(newer.length);
+            for (const [, bytes] of newer) {
+              expect(
+                kept.some((path) => pathsHolding(files, bytes).includes(path))
+              ).toBe(true);
+            }
+            if (older) {
+              expect(onRecovered).toHaveBeenCalledOnce();
+              const [report] = onRecovered.mock.calls[0] as [RecoveryReport];
+              expect([...report.newerCopyPaths].sort()).toEqual(kept.sort());
+              expect(report.stuckNewerCopyPaths).toEqual([]);
+            } else {
+              expect(onRecovered).not.toHaveBeenCalled();
+            }
+          } finally {
+            repo.dispose();
+          }
+        }
+      ),
+      { numRuns: 40 }
+    );
+  }, 60_000);
 });
 
 describe('asking the user when backing up before a startup migration fails (0217)', () => {

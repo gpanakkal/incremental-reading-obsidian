@@ -8,6 +8,7 @@ import {
   dbFilePaths,
   fingerprintOf,
   isDatabaseBuffer,
+  schemaVersionOf,
   writeDatabaseFile,
   type DbFilePaths,
   type FileFingerprint,
@@ -288,6 +289,29 @@ describe('isDatabaseBuffer', () => {
   });
 });
 
+describe('schemaVersionOf', () => {
+  it('property: reads the schema version SQLite stores, whatever the page size and wherever the bytes sit in their buffer', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        databaseArb,
+        fc.integer({ min: -(2 ** 31), max: 2 ** 31 - 1 }),
+        fc.nat({ max: 64 }),
+        async ({ pageSize, rows }, version, offset) => {
+          const SQL = await getSql();
+          const db = new SQL.Database(await databaseBytes(pageSize, rows));
+          db.exec(`PRAGMA user_version = ${version}`);
+          const bytes = db.export();
+          db.close();
+          const padded = new Uint8Array(offset + bytes.length);
+          padded.set(bytes, offset);
+          expect(schemaVersionOf(padded.subarray(offset))).toBe(version);
+        }
+      ),
+      { numRuns: 30 }
+    );
+  });
+});
+
 describe('dbFilePaths', () => {
   const segmentArb = fc
     .string({ minLength: 1, maxLength: 8 })
@@ -304,12 +328,19 @@ describe('dbFilePaths', () => {
           max: new Date(2100, 0, 1),
           noInvalidDate: true,
         }),
-        (folders, name, date) => {
+        fc.nat(),
+        (folders, name, date, version) => {
           const live = [...folders, name].join('/');
           const paths = dbFilePaths(live);
           const folder = live.slice(0, live.length - name.length);
-          const siblings = [paths.tmp, paths.prev, paths.corrupt(date)];
-          expect(new Set([paths.live, ...siblings]).size).toBe(4);
+          const siblings = [
+            paths.tmp,
+            paths.prev,
+            paths.corrupt(date),
+            paths.newer('tmp', version, date),
+            paths.newer('prev', version, date),
+          ];
+          expect(new Set([paths.live, ...siblings]).size).toBe(6);
           for (const sibling of siblings) {
             expect(sibling.startsWith(`${folder}.${name}.`)).toBe(true);
             expect(sibling.slice(folder.length)).not.toContain('/');
@@ -343,6 +374,39 @@ describe('dbFilePaths', () => {
           const iso = date.toISOString();
           expect(dbFilePaths('a/b.sqlite').corrupt(date)).toBe(
             `a/.b.sqlite.corrupt-${iso.slice(0, 10)}T${iso
+              .slice(11, 23)
+              .split(/[:.]/)
+              .join('-')}Z`
+          );
+        }
+      )
+    );
+  });
+  it('names copies from newer versions apart by source, version and moment', () => {
+    const paths = dbFilePaths('a/b.sqlite');
+    const names = [
+      paths.newer('tmp', 9, new Date(1)),
+      paths.newer('prev', 9, new Date(1)),
+      paths.newer('tmp', 10, new Date(1)),
+      paths.newer('tmp', 9, new Date(2)),
+    ];
+    expect(new Set(names).size).toBe(names.length);
+  });
+
+  it('property: stamps a copy from a newer version with its source, version and moment, every : and . of the moment as -', () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom('tmp' as const, 'prev' as const),
+        fc.nat(),
+        fc.date({
+          min: new Date(2000, 0, 1),
+          max: new Date(2100, 0, 1),
+          noInvalidDate: true,
+        }),
+        (source, version, date) => {
+          const iso = date.toISOString();
+          expect(dbFilePaths('a/b.sqlite').newer(source, version, date)).toBe(
+            `a/.b.sqlite.newer-v${version}-${source}-${iso.slice(0, 10)}T${iso
               .slice(11, 23)
               .split(/[:.]/)
               .join('-')}Z`

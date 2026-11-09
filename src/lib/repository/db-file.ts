@@ -55,6 +55,15 @@ export function isDatabaseBuffer(data: Uint8Array): boolean {
   return !counted || header.getUint32(28) * pageSize === data.byteLength;
 }
 
+/**
+ * The schema version stored in the header of `data`, a buffer
+ * {@link isDatabaseBuffer} accepts: `PRAGMA user_version`, which SQLite keeps
+ * nowhere else. Read without opening the database.
+ */
+export function schemaVersionOf(data: Uint8Array): number {
+  return new DataView(data.buffer, data.byteOffset, HEADER_BYTES).getInt32(60);
+}
+
 /** The live database file and its hidden siblings. */
 export interface DbFilePaths {
   live: string;
@@ -64,6 +73,16 @@ export interface DbFilePaths {
   prev: string;
   /** Where a live file that would not load is copied before recovery. */
   corrupt: (date: Date) => string;
+  /**
+   * Where `tmp` or `prev` is moved, holding a database from a newer plugin
+   * version at schema `version`, before a save would write over it.
+   */
+  newer: (source: 'tmp' | 'prev', version: number, date: Date) => string;
+}
+
+/** A moment as a file name may hold it: no `:`, which Windows refuses. */
+function fileStamp(date: Date): string {
+  return date.toISOString().replace(/[:.]/g, '-');
 }
 
 export function dbFilePaths(livePath: string): DbFilePaths {
@@ -74,8 +93,9 @@ export function dbFilePaths(livePath: string): DbFilePaths {
     live,
     tmp: `${sibling}.tmp`,
     prev: `${sibling}.prev`,
-    corrupt: (date) =>
-      `${sibling}.corrupt-${date.toISOString().replace(/[:.]/g, '-')}`,
+    corrupt: (date) => `${sibling}.corrupt-${fileStamp(date)}`,
+    newer: (source, version, date) =>
+      `${sibling}.newer-v${version}-${source}-${fileStamp(date)}`,
   };
 }
 
