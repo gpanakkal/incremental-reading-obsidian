@@ -27,6 +27,7 @@ import {
   historyKeyReachesEditor,
   isEditableTarget,
 } from '#/lib/review-undo-keys';
+import { addSourceMenuItems } from '#/lib/source-menu';
 import {
   resetCurrentItem,
   resetSession,
@@ -39,7 +40,6 @@ import { adoptWindow, showMenu } from '#/lib/ui-window';
 import type IncrementalReadingPlugin from '#/main';
 import {
   FileView,
-  Keymap,
   Menu,
   MenuItem,
   Platform,
@@ -1258,15 +1258,7 @@ export default class ReviewView
         })
     );
 
-    menu.addItem((item) =>
-      item
-        .setTitle('Go to context')
-        .setIcon('lucide-locate')
-        .setSection('pane')
-        .onClick((evt) => {
-          void this.plugin.actions.goToContext(file, Keymap.isModEvent(evt));
-        })
-    );
+    addSourceMenuItems(this.plugin, menu, file, 'pane');
 
     // Obsidian's file explorer contributes "Reveal file in navigation" to every
     // `file-menu` it sees, but its handler is guarded by `!Platform.isMobile`,

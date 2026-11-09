@@ -41,6 +41,7 @@ import {
 import { REBIND_LOG_TOPIC } from '#/lib/rebind-records';
 import { RetiredEditorPark } from '#/lib/retired-editor-park';
 import { goToReviewPlace } from '#/lib/review-history';
+import { addSourceMenuItems } from '#/lib/source-menu';
 import {
   type Menu,
   type PaneType,
@@ -48,7 +49,6 @@ import {
   type TFile,
   type WorkspaceLeaf,
   ItemView,
-  Keymap,
   MarkdownView,
   Plugin,
   TFolder,
@@ -1432,22 +1432,9 @@ export default class IncrementalReadingPlugin extends Plugin {
       });
     }
 
-    // Menus are built synchronously, so the database cannot be asked here. An
-    // `ir-id` is the cached mark of an item's note; `goToContext` checks the
-    // row and says so when there is none, as for a copy of an item's note.
-    if (
-      typeof Obsidian.getFrontMatter(file, this.app)?.['ir-id'] === 'string'
-    ) {
-      menu.addItem((item) => {
-        item
-          .setTitle('Go to context')
-          .setIcon('lucide-locate')
-          .setSection('incremental-reading')
-          .onClick(async (evt) => {
-            await this.actions.goToContext(file, Keymap.isModEvent(evt));
-          });
-      });
-    }
+    // Each asked of the database while the menu is built, which sql.js
+    // answers at once
+    addSourceMenuItems(this, menu, file);
     // A note's or PDF's own ⋮ "More options" menu raises this same
     // `file-menu`, with source `more-options`, so the entry shows there too
     // (undocumented, read from obsidian.asar 1.13: `EditableFileView`'s

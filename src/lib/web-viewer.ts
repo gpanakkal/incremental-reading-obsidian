@@ -1,3 +1,5 @@
+import { type App, type PaneType, Platform } from 'obsidian';
+
 /**
  * What this plugin reads of Obsidian's Web viewer, the core plugin that opens
  * web pages in a tab. It has no public API: everything here is undocumented
@@ -82,4 +84,53 @@ export async function readWebPage(
     markdown: content.md,
     url: typeof url === 'string' ? url : null,
   };
+}
+
+/**
+ * The part of the web viewer core plugin's instance used here (undocumented).
+ *
+ * - `openUrl(url, newLeaf, active)`: the plugin's own way to open a page, in
+ *   the leaf `Workspace.getLeaf(newLeaf)` picks, as its "Open in web viewer"
+ *   link menu item and `web` CLI command do.
+ */
+export interface WebViewerPlugin {
+  openUrl(url: string, newLeaf: PaneType | boolean, active: boolean): void;
+}
+
+/**
+ * The web viewer core plugin's instance, when it is enabled and opens pages
+ * the way this plugin expects; else null. Through `app.internalPlugins`
+ * (undocumented), which hands back the instance only while the plugin is on.
+ * Never throws.
+ */
+export function enabledWebViewer(app: App): WebViewerPlugin | null {
+  try {
+    const plugin: unknown =
+      app.internalPlugins.getEnabledPluginById('webviewer');
+    if (isObject(plugin) && typeof plugin.openUrl === 'function') {
+      return plugin as unknown as WebViewerPlugin;
+    }
+  } catch {
+    // Read as off
+  }
+  return null;
+}
+
+/**
+ * The web viewer, when it is the one to open a web page a link names: on,
+ * and with its own "Open external links in web viewer" option on, as when
+ * the user follows a link to the page. Else null, the page then going to the
+ * system's browser, as such a link's does. Never on the mobile app, which
+ * has no web viewer.
+ *
+ * The option is `options.openExternalURLs` on the plugin's instance
+ * (undocumented; on by default, read from obsidian.asar 1.13.7). Options it
+ * has not loaded yet read as off.
+ */
+export function linkWebViewer(app: App): WebViewerPlugin | null {
+  if (Platform.isMobileApp) return null;
+  const viewer = enabledWebViewer(app);
+  if (!viewer) return null;
+  const { options } = viewer as { options?: unknown };
+  return isObject(options) && options.openExternalURLs === true ? viewer : null;
 }

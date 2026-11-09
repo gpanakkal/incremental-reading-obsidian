@@ -91,6 +91,15 @@ function decoded(text: string): string {
 }
 
 /**
+ * The target of `text` when it is a single markdown link, as written: not
+ * decoded, nor cut at its `#`. Null when it is anything else. How a web
+ * page's address held as `[title](https://…)` is read.
+ */
+export function markdownLinkTarget(text: string): string | null {
+  return readMarkdownLink(text.trim())?.target ?? null;
+}
+
+/**
  * The parts of `text` when it is a single wikilink or markdown link, as a
  * `source` property holds one; null when it is anything else.
  */

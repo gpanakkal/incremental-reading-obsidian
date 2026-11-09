@@ -204,10 +204,22 @@ export function initReviewCommands(plugin: IncrementalReadingPlugin) {
     name: 'Go to context',
     checkCallback: (checking) => {
       const file = plugin.getActiveReviewView()?.currentItemFile();
-      if (!file) return false;
+      if (!file || !plugin.actions.hasContext(file)) return false;
       if (checking) return true;
 
       void plugin.actions.goToContext(file);
+    },
+  });
+
+  plugin.addCommand({
+    id: 'go-to-source',
+    name: 'Go to source',
+    checkCallback: (checking) => {
+      const file = plugin.getActiveReviewView()?.currentItemFile();
+      if (!file || !plugin.actions.sourceRoute(file)) return false;
+      if (checking) return true;
+
+      void plugin.actions.goToSource(file);
     },
   });
 }

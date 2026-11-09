@@ -1,10 +1,11 @@
 import type { QueueRow } from '#/components/types';
 import { CONTENT_TITLE_SLICE_LENGTH } from '#/lib/constants';
 import { deleteMissingItem } from '#/lib/delete-missing-item';
-import { findArticleSource, findContextFile } from '#/lib/item-context';
+import { findContextFile, findNoteSource } from '#/lib/item-context';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import { tableOf } from '#/lib/relink';
 import { addRevealInNavigationItem } from '#/lib/reveal-in-navigation';
+import { addSourceMenuItems } from '#/lib/source-menu';
 import { isReviewArticle, isReviewText, type ReviewItem } from '#/lib/types';
 import { openModal } from '#/lib/ui-window';
 import { unimportArticle } from '#/lib/unimport-article';
@@ -12,7 +13,7 @@ import { getContentSlice } from '#/lib/utils';
 import type IncrementalReadingPlugin from '#/main';
 import { openRelinkPicker } from '#/views/RelinkModal';
 import { SchedulingModal } from '#/views/SchedulingModal';
-import { Keymap, Menu, type TFile } from 'obsidian';
+import { Menu, type TFile } from 'obsidian';
 
 /**
  * The row menu's groups, top to bottom. Obsidian sorts entries into their
@@ -71,21 +72,11 @@ export function queueRowMenu(
           })
       );
     }
-    if (row.type !== 'article') {
-      // The review tab ⋮ menu's entry, for the items with a parent; an
-      // article's source is 0188's "Go to source", below
-      menu.addItem((item) =>
-        item
-          .setTitle('Go to context')
-          .setIcon('lucide-locate')
-          .setSection('open')
-          .onClick((evt) => {
-            void plugin.actions.goToContext(file, Keymap.isModEvent(evt));
-          })
-      );
-    }
-    // TODO(0188): "Go to source" slots in here, for any row with a source,
-    // titled and guarded as 0188 offers it elsewhere
+    // The review tab ⋮ menu's Go to context and Go to source, each offered
+    // as it is there: only when the row's item has a context or a source.
+    // Asked of the database while the menu is built, which sql.js answers at
+    // once
+    addSourceMenuItems(plugin, menu, file, 'open');
     // The file explorer's `file-menu` entry, which this menu doesn't trigger
     addRevealInNavigationItem(menu, plugin.app, file, 'open');
   }
@@ -199,7 +190,10 @@ async function findItemOrigin(
   item: ReviewItem
 ): Promise<TFile | null> {
   const { app, reviewManager } = plugin;
-  if (isReviewArticle(item)) return findArticleSource(app, item).file;
+  if (isReviewArticle(item)) {
+    const source = findNoteSource(app, item.file);
+    return source && 'file' in source ? source.file : null;
+  }
   return findContextFile(app, reviewManager, item);
 }
 

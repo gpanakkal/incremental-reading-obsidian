@@ -8,6 +8,7 @@ import type {
 import { CONTENT_TITLE_SLICE_LENGTH, MS_PER_DAY } from '#/lib/constants';
 import * as contextFlash from '#/lib/context-flash';
 import * as itemContext from '#/lib/item-context';
+import * as itemSource from '#/lib/item-source';
 import { configureSuccessNotices } from '#/lib/notices';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import * as obsidianPdf from '#/lib/pdf/obsidian-pdf';
@@ -42,6 +43,7 @@ import {
 } from '#/lib/types';
 import * as unimportArticle from '#/lib/unimport-article';
 import { getContentSlice, getEndOfDay } from '#/lib/utils';
+import * as webViewer from '#/lib/web-viewer';
 import type IncrementalReadingPlugin from '#/main';
 import fc from 'fast-check';
 // The Vitest alias points `obsidian` at this same file, so the class imported
@@ -301,8 +303,10 @@ function wireGoToContext({
   const getReviewItemFromFile = vi.fn().mockResolvedValue(item);
   // No review tab, unless a test opens one
   const getOpenReviewLeaf = vi.fn((): unknown => null);
+  // Handed on to the source resolver, which tests stand in for
+  const repo = {};
   const plugin = {
-    reviewManager: { getReviewItemFromFile },
+    reviewManager: { getReviewItemFromFile, repo },
     getOpenReviewLeaf,
     app: {
       workspace: { getLeaf },
@@ -319,6 +323,7 @@ function wireGoToContext({
     openWithDefaultApp,
     getReviewItemFromFile,
     getOpenReviewLeaf,
+    repo,
   };
 }
 
@@ -1903,6 +1908,15 @@ describe('Actions.toggleReviewType', () => {
   });
 });
 
+/** Titles long enough, some of them, for the notice to cut them short. */
+const basenameArb = fc.string({
+  maxLength: CONTENT_TITLE_SLICE_LENGTH * 2,
+  size: 'max',
+});
+
+const titleOf = (basename: string) =>
+  getContentSlice(basename, CONTENT_TITLE_SLICE_LENGTH, true);
+
 describe('Actions.goToContext', () => {
   beforeEach(() => {
     Notice.reset();
@@ -1912,15 +1926,6 @@ describe('Actions.goToContext', () => {
     vi.restoreAllMocks();
   });
 
-  /** Titles long enough, some of them, for the notice to cut them short. */
-  const basenameArb = fc.string({
-    maxLength: CONTENT_TITLE_SLICE_LENGTH * 2,
-    size: 'max',
-  });
-
-  const titleOf = (basename: string) =>
-    getContentSlice(basename, CONTENT_TITLE_SLICE_LENGTH, true);
-
   it('says a note with no item row is not an item, and opens nothing', async () => {
     await fc.assert(
       fc.asyncProperty(basenameArb, async (basename) => {
@@ -1928,14 +1933,12 @@ describe('Actions.goToContext', () => {
         Notice.reset();
         const file = makeTFile(basename);
         const resolve = vi.spyOn(itemContext, 'resolveItemContext');
-        const find = vi.spyOn(itemContext, 'findArticleSource');
         const wired = wireGoToContext({ item: null });
 
         await new Actions(wired.plugin).goToContext(file);
 
         expect(wired.getReviewItemFromFile).toHaveBeenCalledWith(file);
         expect(resolve).not.toHaveBeenCalled();
-        expect(find).not.toHaveBeenCalled();
         expectNothingOpened(wired);
         expect(Notice.messages).toEqual([
           `"${titleOf(basename)}" is not an incremental reading item`,
@@ -2172,12 +2175,16 @@ describe('Actions.goToContext', () => {
               file: contextFile,
               eState,
             });
-            vi.spyOn(itemContext, 'findArticleSource').mockReturnValue({
+            // An article's source opens by Go to source
+            vi.spyOn(itemSource, 'findItemSource').mockReturnValue({
               file: contextFile,
             });
             const wired = wireInReview(itemFile, false, type);
+            const actions = new Actions(wired.plugin);
 
-            await new Actions(wired.plugin).goToContext(itemFile);
+            await (type === 'article'
+              ? actions.goToSource(itemFile)
+              : actions.goToContext(itemFile));
 
             const opened =
               type === 'snippet' && eState
@@ -2223,16 +2230,49 @@ describe('Actions.goToContext', () => {
     );
   });
 
-  it("opens an article's source the way Obsidian opens a vault file, or says why it cannot", async () => {
+  it('says an article has no context, opening nothing', async () => {
+    await fc.assert(
+      fc.asyncProperty(basenameArb, newLeafArb, async (basename, newLeaf) => {
+        vi.restoreAllMocks();
+        Notice.reset();
+        const itemFile = makeTFile(basename);
+        const article = {
+          data: { id: 'item-1', type: 'article' },
+          file: itemFile,
+        } as unknown as ReviewArticle;
+        const resolve = vi.spyOn(itemContext, 'resolveItemContext');
+        const find = vi.spyOn(itemSource, 'findItemSource');
+        const wired = wireGoToContext({ item: article });
+
+        await new Actions(wired.plugin).goToContext(itemFile, newLeaf);
+
+        expect(resolve).not.toHaveBeenCalled();
+        expect(find).not.toHaveBeenCalled();
+        expect(Notice.messages).toEqual([
+          expect.stringContaining(titleOf(basename)),
+        ]);
+        expectNothingOpened(wired);
+      })
+    );
+  });
+});
+
+describe('Actions.goToSource', () => {
+  beforeEach(() => {
+    Notice.reset();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('property: opens a vault source the way Obsidian opens a vault file, or says there is no source', async () => {
     await fc.assert(
       fc.asyncProperty(
         basenameArb,
-        fc.oneof(
+        fc.option(
           vaultFileArb.map((file) => ({ file })),
-          fc.constantFrom(
-            { file: null, reason: 'none' as const },
-            { file: null, reason: 'outside-vault' as const }
-          )
+          { nil: null }
         ),
         registeredArb,
         newLeafArb,
@@ -2240,26 +2280,24 @@ describe('Actions.goToContext', () => {
           vi.restoreAllMocks();
           Notice.reset();
           const itemFile = makeTFile(basename);
-          const article = {
-            data: { id: 'item-1', type: 'article' },
-            file: itemFile,
-          } as unknown as ReviewArticle;
           const find = vi
-            .spyOn(itemContext, 'findArticleSource')
+            .spyOn(itemSource, 'findItemSource')
             .mockReturnValue(source);
-          const resolve = vi.spyOn(itemContext, 'resolveItemContext');
-          const wired = wireGoToContext({ item: article, registered });
+          const wired = wireGoToContext({ item: null, registered });
 
-          await new Actions(wired.plugin).goToContext(itemFile, newLeaf);
+          await new Actions(wired.plugin).goToSource(itemFile, newLeaf);
 
           expect(find).toHaveBeenCalledExactlyOnceWith(
+            wired.repo,
             wired.plugin.app,
-            article
+            itemFile
           );
-          expect(resolve).not.toHaveBeenCalled();
-          if (source.file === null) {
-            const title = titleOf(basename);
-            expect(Notice.messages).toEqual([expect.stringContaining(title)]);
+          // Asked of the database at once, never through the item cache
+          expect(wired.getReviewItemFromFile).not.toHaveBeenCalled();
+          if (source === null) {
+            expect(Notice.messages).toEqual([
+              expect.stringContaining(titleOf(basename)),
+            ]);
             expectNothingOpened(wired);
             return;
           }
@@ -2270,28 +2308,174 @@ describe('Actions.goToContext', () => {
     );
   });
 
-  it('tells an article with no source apart from one whose source is outside the vault', async () => {
-    const said = [];
-    for (const reason of ['none', 'outside-vault'] as const) {
+  it('property: offers what the resolvers find for the note, asked of the database and app the plugin holds', () => {
+    fc.assert(
+      fc.property(
+        fc.boolean(),
+        fc.option(
+          fc.oneof(
+            vaultFileArb.map((file) => ({ file })),
+            fc.webUrl().map((url) => ({ url }))
+          ),
+          { nil: null }
+        ),
+        (context, source) => {
+          vi.restoreAllMocks();
+          const itemFile = makeTFile('Item');
+          const wired = wireGoToContext({ item: null });
+          const has = vi
+            .spyOn(itemSource, 'hasContext')
+            .mockReturnValue(context);
+          vi.spyOn(itemSource, 'findItemSource').mockReturnValue(source);
+          const route = { kind: 'browser' as const, url: 'https://a.example/' };
+          const routeOf = vi
+            .spyOn(itemSource, 'routeSource')
+            .mockReturnValue(route);
+          const actions = new Actions(wired.plugin);
+
+          expect(actions.hasContext(itemFile)).toBe(context);
+          expect(has).toHaveBeenCalledExactlyOnceWith(
+            wired.repo,
+            wired.plugin.app,
+            itemFile
+          );
+          expect(actions.sourceRoute(itemFile)).toBe(source && route);
+          if (source) {
+            expect(routeOf).toHaveBeenCalledExactlyOnceWith(
+              wired.plugin.app,
+              source
+            );
+          } else {
+            expect(routeOf).not.toHaveBeenCalled();
+          }
+        }
+      )
+    );
+  });
+
+  describe('for a source on the web', () => {
+    // Where the system's browser is reached; this node environment has none
+    const open = vi.fn((_url: string): unknown => null);
+
+    beforeEach(() => {
+      vi.stubGlobal('window', { open });
+    });
+
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    const urlArb = fc.webUrl();
+
+    /**
+     * Go to source on the item at `itemFile` from a web page, from review
+     * when `inReview` (the tab the user is in is review's), its source
+     * being `url`.
+     */
+    function wireWebSource(itemFile: TFile, url: string, inReview: boolean) {
       vi.restoreAllMocks();
       Notice.reset();
-      const itemFile = makeTFile('Paper');
+      open.mockReset();
+      open.mockReturnValue(null);
       const article = {
         data: { id: 'item-1', type: 'article' },
         file: itemFile,
       } as unknown as ReviewArticle;
-      vi.spyOn(itemContext, 'findArticleSource').mockReturnValue({
-        file: null,
-        reason,
-      });
-      const wired = wireGoToContext({ item: article });
-
-      await new Actions(wired.plugin).goToContext(itemFile, false);
-
-      expect(Notice.messages).toHaveLength(1);
-      said.push(Notice.messages[0]);
+      const wired = inReview
+        ? wireInReview(itemFile, true, 'article')
+        : { ...wireGoToContext({ item: article }), review: null, newTab: null };
+      vi.spyOn(itemSource, 'findItemSource').mockReturnValue({ url });
+      return wired;
     }
-    expect(said[0]).not.toBe(said[1]);
+
+    /** Nothing opened in a tab the way a file would be. */
+    function expectNoFileOpened(wired: ReturnType<typeof wireWebSource>) {
+      for (const leaf of [wired, wired.review, wired.newTab]) {
+        if (leaf) expect(leaf.openFile).not.toHaveBeenCalled();
+      }
+      // Never a tab of its own making, which would be left empty
+      for (const [newLeaf] of wired.getLeaf.mock.calls) {
+        expect(newLeaf).toBe(false);
+      }
+    }
+
+    it('property: opens the page in the web viewer where a file would open, in a new tab instead of review', async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          basenameArb,
+          urlArb,
+          newLeafArb,
+          fc.boolean(),
+          async (basename, url, newLeaf, inReview) => {
+            const itemFile = makeTFile(basename);
+            const wired = wireWebSource(itemFile, url, inReview);
+            const openUrl = vi.fn();
+            const enabled = vi
+              .spyOn(webViewer, 'linkWebViewer')
+              .mockReturnValue({ openUrl });
+
+            await new Actions(wired.plugin).goToSource(itemFile, newLeaf);
+
+            expect(enabled).toHaveBeenCalledWith(wired.plugin.app);
+            expect(openUrl).toHaveBeenCalledExactlyOnceWith(
+              url,
+              newLeaf || (inReview ? 'tab' : false),
+              true
+            );
+            expect(open).not.toHaveBeenCalled();
+            expect(Notice.messages).toEqual([]);
+            expectNoFileOpened(wired);
+          }
+        )
+      );
+    });
+
+    it("property: opens the page in the system's browser when the web viewer doesn't open links or fails, saying so only when that fails too", async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          basenameArb,
+          urlArb,
+          newLeafArb,
+          fc.boolean(),
+          fc.constantFrom('off', 'fails'),
+          fc.boolean(),
+          async (basename, url, newLeaf, inReview, viewer, browserFails) => {
+            const itemFile = makeTFile(basename);
+            const wired = wireWebSource(itemFile, url, inReview);
+            const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+            const viewerError = new Error('web viewer');
+            const browserError = new Error('browser');
+            vi.spyOn(webViewer, 'linkWebViewer').mockReturnValue(
+              viewer === 'off'
+                ? null
+                : {
+                    openUrl: () => {
+                      throw viewerError;
+                    },
+                  }
+            );
+            if (browserFails) {
+              open.mockImplementation(() => {
+                throw browserError;
+              });
+            }
+
+            await new Actions(wired.plugin).goToSource(itemFile, newLeaf);
+
+            expect(open).toHaveBeenCalledExactlyOnceWith(url);
+            expect(Notice.messages).toEqual(
+              browserFails ? [expect.stringContaining(titleOf(basename))] : []
+            );
+            // Each failure logged, with what it threw
+            expect(warn.mock.calls.map((call): unknown => call[1])).toEqual([
+              ...(viewer === 'fails' ? [viewerError] : []),
+              ...(browserFails ? [browserError] : []),
+            ]);
+            expectNoFileOpened(wired);
+          }
+        )
+      );
+    });
   });
 });
 

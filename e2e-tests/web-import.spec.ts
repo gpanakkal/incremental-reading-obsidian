@@ -4,10 +4,17 @@ import * as http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import * as path from 'node:path';
 import {
+  closeMenu,
   executeCommandById,
+  expectReviewHome,
   finalizeArticleImport,
+  importArticle,
+  openFileInActiveLeaf,
+  REVIEW_VIEW_TYPE,
+  selectParagraph,
   setNativeMenus,
   setPluginSetting,
+  waitForReviewItem,
 } from './helpers';
 import { test } from './setup/fixtures';
 import {
@@ -154,5 +161,162 @@ test.describe('Importing the page open in the web viewer', () => {
     await entry.click();
 
     await expectQueued(window);
+  });
+});
+
+/** A paragraph of the page, which the snippet is taken from. */
+const PARAGRAPH = 'Hardy perennials do best';
+
+/** The note the vault-source test imports a copy of, and its title. */
+const VAULT_NOTE = 'sources/Security Principles.md';
+const VAULT_NOTE_TITLE = 'Security Principles';
+
+/**
+ * Open the active review tab's more-options menu, and return Go to source's
+ * entry in it. Obsidian's menus animate in: the first click can land before
+ * the button takes it.
+ */
+async function openSourceEntry(page: Page) {
+  const menu = page.locator('.menu');
+  const entry = menu.locator('.menu-item-title', { hasText: /^Go to source/ });
+  await expect(async () => {
+    if ((await menu.count()) > 0) await closeMenu(page);
+    await page
+      .locator('.workspace-leaf.mod-active .view-header')
+      .getByLabel('More options')
+      .click();
+    await expect(entry).toBeVisible({ timeout: 2_000 });
+  }).toPass();
+  return entry;
+}
+
+/**
+ * Import the page, close its tab, so only Go to source can bring it back,
+ * and show the article in review.
+ */
+async function reviewImportedPage(page: Page) {
+  await setPluginSetting(page, 'showImportDialog', false);
+  await openPage(page);
+  await executeCommandById(page, 'incremental-reading:import-article');
+  await expectQueued(page);
+  await page.evaluate(() => {
+    const { app } = window as unknown as {
+      app: { workspace: { detachLeavesOfType(type: string): void } };
+    };
+    app.workspace.detachLeavesOfType('webviewer');
+  });
+  await expectReviewHome(page);
+  await page.locator('.ir-queue-row', { hasText: PAGE_TITLE }).click();
+  expect((await waitForReviewItem(page)).title).toBe(PAGE_TITLE);
+}
+
+test.describe('Go to source', () => {
+  test.beforeEach(async () => {
+    await setNativeMenus(window, false);
+    // No notices sliding in over the ⋮ to take the click meant for it
+    await setPluginSetting(window, 'successNoticesOutsideReview', 'none');
+  });
+
+  test("from a snippet of a page imported from the web, opens the page in a web viewer tab, leaving review open; it says it would leave the app once the web viewer won't open links", async () => {
+    await reviewImportedPage(window);
+    await selectParagraph(window, PARAGRAPH);
+    await executeCommandById(window, 'incremental-reading:extract-selection');
+    // Not a check: the path is what the snippet is opened by
+    const snippets = () =>
+      window.evaluate(() => {
+        const { app } = window as unknown as {
+          app: {
+            plugins: {
+              plugins: Record<
+                string,
+                {
+                  reviewManager: {
+                    repo: { query(sql: string): { reference: string }[] };
+                  };
+                }
+              >;
+            };
+          };
+        };
+        return app.plugins.plugins['incremental-reading'].reviewManager.repo
+          .query('SELECT reference FROM snippet')
+          .map((row) => row.reference);
+      });
+    await expect.poll(snippets).toHaveLength(1);
+    const [snippet] = await snippets();
+    await openFileInActiveLeaf(window, snippet);
+    // Review moves on to the snippet. Not `waitForReviewItem`: a snippet's
+    // pane shows no title of its own to match the tab's
+    await expect(activeTabTitle(window)).toHaveText(
+      path.posix.basename(snippet, '.md')
+    );
+
+    // Undocumented: the web viewer's own "Open external links in web viewer"
+    // option, `options.openExternalURLs` on its instance
+    const setOpensLinks = (on: boolean) =>
+      window.evaluate((value) => {
+        const { app } = window as unknown as {
+          app: {
+            internalPlugins: {
+              getEnabledPluginById(id: string): {
+                options: { openExternalURLs: boolean };
+              };
+            };
+          };
+        };
+        app.internalPlugins.getEnabledPluginById(
+          'webviewer'
+        ).options.openExternalURLs = value;
+      }, on);
+    await setOpensLinks(false);
+    await expect(await openSourceEntry(window)).toHaveText(
+      /in system browser$/
+    );
+    await closeMenu(window);
+    await setOpensLinks(true);
+    const entry = await openSourceEntry(window);
+    await expect(entry).not.toHaveText(/in system browser$/);
+
+    await entry.click();
+
+    await expect(
+      window.locator(
+        '.workspace-leaf.mod-active .workspace-leaf-content[data-type="webviewer"]'
+      )
+    ).toBeVisible();
+    // Named for the page once it has loaded
+    await expect(activeTabTitle(window)).toHaveText(PAGE_TITLE);
+    await expect(
+      window.locator(`.workspace-leaf-content[data-type="${REVIEW_VIEW_TYPE}"]`)
+    ).toHaveCount(1);
+  });
+
+  test('from an article copied from a note, opens that note', async () => {
+    await setPluginSetting(window, 'copyOnImport', true);
+    await importArticle(window, VAULT_NOTE);
+    await executeCommandById(window, 'incremental-reading:learn');
+    await expectReviewHome(window);
+    await window
+      .locator('.ir-queue-row', { hasText: VAULT_NOTE_TITLE })
+      .click();
+    expect((await waitForReviewItem(window)).title).toContain(VAULT_NOTE_TITLE);
+
+    await executeCommandById(window, 'incremental-reading:go-to-source');
+
+    await expect(
+      window.locator(
+        '.workspace-leaf.mod-active .workspace-leaf-content[data-type="markdown"]'
+      )
+    ).toBeVisible();
+    await expect(activeTabTitle(window)).toHaveText(VAULT_NOTE_TITLE);
+    const activeFile = () =>
+      window.evaluate(() => {
+        const { app } = window as unknown as {
+          app: { workspace: { getActiveFile(): { path: string } | null } };
+        };
+        return app.workspace.getActiveFile()?.path ?? null;
+      });
+    // The original, not the article copied from it
+    await expect.poll(activeFile).toBe(VAULT_NOTE);
   });
 });

@@ -28,6 +28,7 @@ import {
   historyCommandForInput,
 } from '#/lib/review-undo-keys';
 import type { IRPluginSettings, ReviewTitleBar } from '#/lib/settings';
+import * as sourceMenu from '#/lib/source-menu';
 import {
   resetCurrentItem,
   resetSession,
@@ -74,33 +75,6 @@ import type { WorkspaceLeafHistoryState } from 'obsidian-typings';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // #region HELPERS
-
-/** A click on a menu entry: any button Obsidian reports one for, any keys. */
-const menuClickArb = fc.record({
-  button: fc.constantFrom(0, 1),
-  ctrlKey: fc.boolean(),
-  metaKey: fc.boolean(),
-  altKey: fc.boolean(),
-  shiftKey: fc.boolean(),
-});
-
-/**
- * Where Obsidian opens a link clicked that way: a middle click is a new tab
- * whatever keys are held; Ctrl/Cmd is a new tab, +Alt a split, +Alt+Shift a
- * window; anything else is the tab the user is in.
- */
-function paneFor(click: {
-  button: number;
-  ctrlKey: boolean;
-  metaKey: boolean;
-  altKey: boolean;
-  shiftKey: boolean;
-}): string | false {
-  if (click.button === 1) return 'tab';
-  if (!click.ctrlKey && !click.metaKey) return false;
-  if (!click.altKey) return 'tab';
-  return click.shiftKey ? 'window' : 'split';
-}
 
 /**
  * `showSearch` reads only `activeEditor`, so it can be exercised against a bare
@@ -322,6 +296,13 @@ function makeMenuReceiver({
         hasArticleUnder: (folder: string) => folder === '/' && anyArticle,
       },
       openBulkUnimport,
+      // What `addSourceMenuItems` asks: neither entry
+      actions: {
+        goToContext: vi.fn(),
+        goToSource: vi.fn(),
+        hasContext: vi.fn(() => false),
+        sourceRoute: vi.fn(() => null),
+      },
     },
     app: {
       workspace: {
@@ -2541,29 +2522,19 @@ describe('ReviewView.onPaneMenu', () => {
     expect(revealInFolder).toHaveBeenCalledWith(file);
   });
 
-  it('offers the context of the item the tab is showing', () => {
-    const { view } = makeMenuReceiver();
+  it("offers Go to context and Go to source for the tab's item, as they decide, among the tab's own entries", () => {
+    const addSource = vi
+      .spyOn(sourceMenu, 'addSourceMenuItems')
+      .mockImplementation(() => {});
+    const { view, file } = makeMenuReceiver();
 
-    const entry = itemTitled(paneMenu(view), 'Go to context');
+    const menu = paneMenu(view);
 
-    expect(entry?.section).toBe('pane');
-    expect(entry?.icon).toBe('lucide-locate');
-  });
-
-  it("goes to the context of the tab's item in place, or where a modified click asks", () => {
-    fc.assert(
-      fc.property(menuClickArb, (init) => {
-        const goToContext = vi.fn().mockResolvedValue(undefined);
-        const { view, file } = makeMenuReceiver();
-        Object.assign(view.plugin, { actions: { goToContext } });
-
-        itemTitled(paneMenu(view), 'Go to context')?.callback?.(init);
-
-        expect(goToContext).toHaveBeenCalledExactlyOnceWith(
-          file,
-          paneFor(init)
-        );
-      })
+    expect(addSource).toHaveBeenCalledExactlyOnceWith(
+      view.plugin,
+      menu,
+      file,
+      'pane'
     );
   });
 });

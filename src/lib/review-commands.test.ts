@@ -86,20 +86,30 @@ function mountedSetup(sourceMode: boolean) {
   return { editor, view, check: toggleSourceCommand(view) };
 }
 
-const GO_TO_CONTEXT_ID = 'go-to-context';
-
 /**
- * The go-to-context command over a tab showing `itemFile`, and the action it
- * hands off to.
+ * The go-to-context or go-to-source command (`id`) over a tab showing
+ * `itemFile`, whose item the actions say has a context and a source when
+ * `offers`, and the actions it hands off to.
  */
-function goToContextSetup({
+function sourceCommandSetup({
+  id,
   hasView,
   itemFile,
+  offers,
 }: {
+  id: string;
   hasView: boolean;
   itemFile: TFile | null;
+  offers: boolean;
 }) {
-  const goToContext = vi.fn().mockResolvedValue(undefined);
+  const actions = {
+    goToContext: vi.fn().mockResolvedValue(undefined),
+    goToSource: vi.fn().mockResolvedValue(undefined),
+    hasContext: vi.fn((_file: TFile) => offers),
+    sourceRoute: vi.fn((_file: TFile) =>
+      offers ? { kind: 'browser', url: 'https://example.com/' } : null
+    ),
+  };
   const view = hasView
     ? ({ currentItemFile: () => itemFile } as unknown as ReviewView)
     : null;
@@ -107,14 +117,12 @@ function goToContextSetup({
   const plugin = {
     addCommand: (command: Command) => commands.set(command.id, command),
     getActiveReviewView: () => view,
-    actions: { goToContext },
+    actions,
   } as unknown as IncrementalReadingPlugin;
   initReviewCommands(plugin);
-  const check = commands.get(GO_TO_CONTEXT_ID)?.checkCallback;
-  if (!check) {
-    throw new Error(`${GO_TO_CONTEXT_ID} registered no checkCallback`);
-  }
-  return { check, goToContext };
+  const check = commands.get(id)?.checkCallback;
+  if (!check) throw new Error(`${id} registered no checkCallback`);
+  return { check, actions };
 }
 
 const RELINK_ID = 'relink-file';
@@ -355,37 +363,49 @@ describe('review source mode command', () => {
   });
 });
 
-describe('go to context command', () => {
+describe.each([
+  { id: 'go-to-context', action: 'goToContext', asks: 'hasContext' },
+  { id: 'go-to-source', action: 'goToSource', asks: 'sourceRoute' },
+] as const)('$id command', ({ id, action, asks }) => {
   it('registers under its id', () => {
-    const command = wireCommands(null).get(GO_TO_CONTEXT_ID);
-
-    expect(command).toMatchObject({
-      id: GO_TO_CONTEXT_ID,
-    });
+    expect(wireCommands(null).get(id)).toMatchObject({ id });
   });
 
-  it("is available only while a review tab shows an item, and hands that item's note to the action", () => {
+  it("is available only while a review tab shows an item that has one, and hands that item's note to the action", () => {
     fc.assert(
-      fc.property(fc.boolean(), fc.boolean(), (hasView, hasItemFile) => {
-        const itemFile = hasItemFile ? ({ path: 'a.md' } as TFile) : null;
-        const { check, goToContext } = goToContextSetup({
-          hasView,
-          itemFile,
-        });
+      fc.property(
+        fc.boolean(),
+        fc.boolean(),
+        fc.boolean(),
+        (hasView, hasItemFile, offers) => {
+          const itemFile = hasItemFile ? ({ path: 'a.md' } as TFile) : null;
+          const { check, actions } = sourceCommandSetup({
+            id,
+            hasView,
+            itemFile,
+            offers,
+          });
 
-        const available = hasView && hasItemFile;
-        expect(check(true)).toBe(available);
-        expect(goToContext).not.toHaveBeenCalled();
+          const available = hasView && hasItemFile && offers;
+          expect(check(true)).toBe(available);
+          if (hasView && hasItemFile) {
+            expect(actions[asks]).toHaveBeenCalledWith(itemFile);
+          }
+          expect(actions[action]).not.toHaveBeenCalled();
 
-        const ran = check(false);
-        if (available) {
-          expect(ran).toBeUndefined();
-          expect(goToContext).toHaveBeenCalledExactlyOnceWith(itemFile);
-        } else {
-          expect(ran).toBe(false);
-          expect(goToContext).not.toHaveBeenCalled();
+          const ran = check(false);
+          if (available) {
+            expect(ran).toBeUndefined();
+            expect(actions[action]).toHaveBeenCalledExactlyOnceWith(itemFile);
+          } else {
+            expect(ran).toBe(false);
+            expect(actions[action]).not.toHaveBeenCalled();
+          }
+          // Neither command runs the other's action
+          const other = action === 'goToContext' ? 'goToSource' : 'goToContext';
+          expect(actions[other]).not.toHaveBeenCalled();
         }
-      })
+      )
     );
   });
 });

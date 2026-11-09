@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   formatSourceLink,
   linkNamesPath,
+  markdownLinkTarget,
   parseSourceLink,
   retargetAlias,
 } from './source-link';
@@ -361,6 +362,58 @@ describe('parseSourceLink', () => {
       subpath: '#page=1',
       alias: 'a, page 1',
     });
+  });
+});
+
+describe('markdownLinkTarget', () => {
+  it('property: is the target of a markdown link as written, bare or in angle brackets, whatever surrounds the link', () => {
+    fc.assert(
+      fc.property(
+        fc
+          .webUrl({ withQueryParameters: true, withFragments: true })
+          // A bare target's round brackets must balance
+          .filter((url) => !/[()]/.test(url)),
+        fc.string().filter((alias) => !/[[\]]/.test(alias)),
+        fc.boolean(),
+        fc.boolean(),
+        fc.string({ unit: fc.constantFrom(' ', '\t', '\n') }),
+        (target, alias, angled, embed, around) => {
+          const link = `${embed ? '!' : ''}[${alias}](${angled ? `<${target}>` : target})`;
+
+          expect(markdownLinkTarget(around + link + around)).toBe(target);
+        }
+      )
+    );
+  });
+
+  it('keeps a target as written, neither decoded nor cut at its #', () => {
+    expect(markdownLinkTarget('[a](https://x.example/a%20b?q=%26#c)')).toBe(
+      'https://x.example/a%20b?q=%26#c'
+    );
+  });
+
+  it('property: is something exactly when the text is one markdown link', () => {
+    fc.assert(
+      fc.property(
+        fc.oneof(
+          fc.string(),
+          fc.constantFrom(
+            '[[Note]]',
+            'https://example.com',
+            '[a](b) (2nd ed)',
+            '[a](b c)',
+            '[a](<b)'
+          )
+        ),
+        (text) => {
+          const form = parseSourceLink(text)?.form;
+
+          expect(markdownLinkTarget(text) !== null).toBe(
+            form === 'markdown' || form === 'angled'
+          );
+        }
+      )
+    );
   });
 });
 
