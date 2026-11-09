@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import {
   claimedId,
   claimsIdAt,
+  heldClaim,
   heldRowOf,
   holdingOf,
   type IdHolder,
@@ -43,6 +44,39 @@ describe('claimedId', () => {
 
   it('claims the id a row holds for an ir-id YAML reads as a number', () => {
     expect(claimedId(7)).toBe('7');
+  });
+});
+
+describe('heldClaim', () => {
+  it('holds a row by the id a note claims, by nothing for a note claiming none, and by its path for a file with no frontmatter', () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom('md', 'pdf'),
+        fc.option(
+          fc.option(fc.oneof(fc.anything(), fc.constantFrom('x', 7)), {
+            nil: undefined,
+          }),
+          { nil: null }
+        ),
+        (extension, irId) => {
+          const path = `notes/a.${extension}`;
+          // `null`: no cache entry; `undefined`: frontmatter with no ir-id
+          const vault = makeLinkVault({
+            [path]:
+              irId === null
+                ? null
+                : irId === undefined
+                  ? {}
+                  : { 'ir-id': irId },
+          });
+          const claimed = claimedId(irId ?? undefined);
+
+          expect(heldClaim(vault.files.get(path)!, vault.app as never)).toBe(
+            claimed === undefined && extension === 'md' ? null : claimed
+          );
+        }
+      )
+    );
   });
 });
 

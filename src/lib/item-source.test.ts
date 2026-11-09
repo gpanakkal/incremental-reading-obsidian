@@ -93,15 +93,18 @@ async function makeLine({ rootType, below, end }: Line, source: SourceKind) {
   return { repo, app: vault.app as unknown as App, vault, file };
 }
 
-/** A live (or, with `deleted`, deleted) row of `type` at `ir/<id>.md`. */
+/**
+ * A live (or, with `deleted`, deleted) row of `type` at `reference`,
+ * `ir/<id>.md` unless given.
+ */
 function insert(
   repo: TestRepository,
   id: string,
   type: NoteType,
   parent: string | null,
-  deleted = 0
+  deleted = 0,
+  reference = `ir/${id}.md`
 ) {
-  const reference = `ir/${id}.md`;
   if (type === 'article') {
     void repo.mutate(
       `INSERT INTO article (id, reference, due, interval, priority, deleted)
@@ -123,6 +126,28 @@ function insert(
     );
   }
 }
+
+/**
+ * What a note's `ir-id` can hold, as the metadata cache reads it (no `irId`:
+ * no such property), and the id it claims by it: none for a falsy one, a
+ * scalar read as no string by its string form, none a row can hold (`null`)
+ * for a list or a map.
+ */
+const CLAIMS: readonly { irId?: unknown; claims: string | null | undefined }[] =
+  [
+    { claims: undefined },
+    { irId: null, claims: undefined },
+    { irId: '', claims: undefined },
+    { irId: 0, claims: undefined },
+    { irId: false, claims: undefined },
+    { irId: 'item-0', claims: 'item-0' },
+    { irId: 'item-1', claims: 'item-1' },
+    { irId: '7', claims: '7' },
+    { irId: 7, claims: '7' },
+    { irId: true, claims: 'true' },
+    { irId: ['item-0'], claims: null },
+    { irId: { id: 'item-0' }, claims: null },
+  ];
 
 /** Every way Go to source can open a source. */
 const routeArb: fc.Arbitrary<SourceRoute> = fc.oneof(
@@ -214,42 +239,46 @@ describe('findItemSource', () => {
 });
 
 describe('itemNodeAt', () => {
-  it("property: is the item whose note it is, when the note's ir-id names the row at its path, or claims none", async () => {
+  it("property: is the row at the file's path only while the file holds it: a note by claiming the row's id, even at a live row's path, a file with no frontmatter by being there", async () => {
     await fc.assert(
       fc.asyncProperty(
         fc.constantFrom<NoteType>('article', 'snippet', 'card'),
+        fc.constantFrom('item-0', '7'),
+        fc.boolean(),
         fc.oneof(
-          fc.constant({ claim: 'own' as const }),
-          fc.constant({ claim: 'none' as const }),
-          fc.constant({ claim: 'other' as const }),
-          fc
-            .oneof(fc.integer(), fc.boolean(), fc.array(fc.string()))
-            .filter(Boolean)
-            .map((id) => ({ claim: 'odd' as const, id }))
+          fc.constant({ kind: 'pdf' as const }),
+          fc.constantFrom(...CLAIMS).map((claim) => ({
+            kind: 'note' as const,
+            ...claim,
+          }))
         ),
-        async (type, claim) => {
+        async (type, rowId, atPath, file) => {
+          const path = file.kind === 'pdf' ? 'ir/at.pdf' : 'ir/at.md';
+          const reference = atPath ? path : 'ir/elsewhere.md';
+          const parent = type === 'article' ? null : 'p';
           const repo = await TestRepository.create();
-          insert(repo, 'item-0', type, type === 'article' ? null : 'p');
-          const fm = {
-            own: { 'ir-id': 'item-0' },
-            none: {},
-            other: { 'ir-id': 'item-1' },
-            odd: { 'ir-id': 'id' in claim ? claim.id : null },
-          }[claim.claim];
-          const vault = makeLinkVault({ 'ir/item-0.md': fm });
-          const file = vault.files.get('ir/item-0.md')!;
+          insert(repo, rowId, type, parent, 0, reference);
+          // A live row holding another id a note may claim, at another path
+          insert(repo, 'item-1', type, parent, 0, 'ir/other.md');
+          const vault = makeLinkVault({
+            [path]:
+              file.kind === 'pdf'
+                ? null
+                : 'irId' in file
+                  ? { 'ir-id': file.irId }
+                  : {},
+          });
 
-          const found = itemNodeAt(repo, vault.app as unknown as App, file);
+          const found = itemNodeAt(
+            repo,
+            vault.app as unknown as App,
+            vault.files.get(path)!
+          );
 
+          const holds =
+            atPath && (file.kind === 'pdf' || file.claims === rowId);
           expect(found).toEqual(
-            claim.claim === 'own' || claim.claim === 'none'
-              ? {
-                  id: 'item-0',
-                  type,
-                  reference: 'ir/item-0.md',
-                  parent: type === 'article' ? null : 'p',
-                }
-              : null
+            holds ? { id: rowId, type, reference, parent } : null
           );
         }
       )

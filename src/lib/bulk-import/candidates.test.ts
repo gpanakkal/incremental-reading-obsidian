@@ -1,4 +1,4 @@
-import { DATA_DIRECTORY } from '#/lib/constants';
+import { ARTICLE_TAG, DATA_DIRECTORY } from '#/lib/constants';
 import type { ExplorerComparator } from '#/lib/explorer-order';
 import ReviewManager from '#/lib/items/ReviewManager';
 import { TestRepository } from '#/test/item-vault';
@@ -78,12 +78,22 @@ function makeChecks(specs: ReadonlyMap<string, FileSpec>) {
   return { checks, readBinary };
 }
 
+/**
+ * Whether a note's cached `ir-id` claims an item's id: text but none, or a
+ * number or `true`, which YAML reads where an id was typed, by its string
+ * form. Anything falsy claims none, and a list or a map claims what no row
+ * can hold, which an import overwrites.
+ */
+const claimsId = (irId: unknown): boolean =>
+  (typeof irId === 'string' && irId !== '') ||
+  (typeof irId === 'number' && irId !== 0) ||
+  irId === true;
+
 /** Whether `spec`, wherever it is, is a file a folder import should list. */
 function eligible(spec: FileSpec, inDataDirectory: boolean): boolean {
   if (inDataDirectory) return false;
   const extension = spec.extension.toLowerCase();
-  if (extension === 'md')
-    return typeof spec.irId !== 'string' && !spec.pdfBytes;
+  if (extension === 'md') return !claimsId(spec.irId) && !spec.pdfBytes;
   if (extension === 'pdf') return !spec.hasRow && spec.pdfBytes;
   return false;
 }
@@ -104,9 +114,15 @@ const fileSpecArb: fc.Arbitrary<FileSpec> = fc.record({
     fc.string({ maxLength: 4 }).filter((s) => !s.includes('/'))
   ),
   pdfBytes: fc.boolean(),
-  irId: fc.option(fc.oneof(fc.string(), fc.integer(), fc.constant(null)), {
-    nil: undefined,
-  }),
+  irId: fc.option(
+    fc.oneof(
+      fc.string(),
+      fc.constantFrom('', 0, true, false, ['x']),
+      fc.integer(),
+      fc.constant(null)
+    ),
+    { nil: undefined }
+  ),
   hasRow: fc.boolean(),
 });
 
@@ -285,7 +301,7 @@ function ruledOutCheaply(spec: FileSpec, folderPath: string): boolean {
   return (
     inDataDirectory(folderPath) ||
     !['md', 'pdf'].includes(extension) ||
-    (extension === 'md' ? typeof spec.irId === 'string' : spec.hasRow)
+    (extension === 'md' ? claimsId(spec.irId) : spec.hasRow)
   );
 }
 // #endregion
@@ -328,7 +344,7 @@ describe('isImportCandidate', () => {
         const ruledOut =
           inDataDirectory(path) ||
           !['md', 'pdf'].includes(extension) ||
-          (extension === 'md' ? typeof spec.irId === 'string' : spec.hasRow);
+          (extension === 'md' ? claimsId(spec.irId) : spec.hasRow);
 
         await isImportCandidate(file, checks);
 
@@ -848,5 +864,95 @@ describe('folderSource with unimportChecks', () => {
       events.flatMap((e) => (e.type === 'file' ? [e.file.path] : []))
     ).toEqual(['n/live.md', 'n/live.pdf']);
     repo.dispose();
+  });
+});
+
+describe('import and un-import candidates, as the plugin wires them', () => {
+  /** A row at the file's path, if any: its table, id and whether it is live. */
+  type RowAt = { table: 'article' | 'snippet'; id: string; live: boolean };
+
+  const rowAtArb: fc.Arbitrary<RowAt | null> = fc.option(
+    fc.record({
+      table: fc.constantFrom('article' as const, 'snippet' as const),
+      id: fc.constantFrom('x', '7'),
+      live: fc.boolean(),
+    }),
+    { nil: null }
+  );
+
+  /** A note's cached `ir-id`: none, falsy, an id, a number, or a list. */
+  const irIdArb = fc.constantFrom(undefined, null, '', 0, 'x', 'y', 7, ['x']);
+
+  it("lists every importable file on one side at most: a note claiming no id is offered an import alone, even at a live article's path, and the un-import only of the row it claims", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom('md', 'pdf'),
+        fc.boolean(),
+        irIdArb,
+        fc.boolean(),
+        rowAtArb,
+        async (extension, withFrontmatter, irId, tagged, rowAt) => {
+          const path = `n/f.${extension}`;
+          const frontmatter: Record<string, unknown> = {};
+          if (irId !== undefined) frontmatter['ir-id'] = irId;
+          if (tagged) frontmatter.tags = [ARTICLE_TAG];
+          const vault = makeLinkVault({
+            [path]: extension === 'md' && withFrontmatter ? frontmatter : null,
+          });
+          const repo = await TestRepository.create();
+          if (rowAt) {
+            repo.mutate(
+              `INSERT INTO ${rowAt.table} (id, reference, due, interval, priority, deleted)
+               VALUES ($1, $2, 0, 86400000, 30, $3)`,
+              [rowAt.id, path, !rowAt.live]
+            );
+          }
+          const manager = new ReviewManager(
+            {
+              app: vault.app,
+              settings: { dayRolloverOffset: 4 },
+              registerEvent: vi.fn(),
+            } as never,
+            repo
+          );
+          const checks: CandidateChecks = {
+            app: {
+              ...vault.app,
+              vault: {
+                ...vault.app.vault,
+                readBinary: async () =>
+                  (extension === 'pdf' ? PDF_BYTES : NOTE_BYTES).slice().buffer,
+                getResourcePath: (file: TFile) => `app://vault/${file.path}`,
+              },
+            } as never,
+            isItemAtPath: (file) => manager.isItemFileAt(file, file.path),
+          };
+          const file = vault.files.get(path)!;
+
+          const forImport = await isCandidate(file, checks);
+          const forUnimport = await isCandidate(
+            file,
+            unimportChecks(checks, manager)
+          );
+
+          const liveArticle = rowAt?.table === 'article' && rowAt.live;
+          const claim =
+            extension === 'md' && withFrontmatter ? irId : undefined;
+          if (extension === 'pdf') {
+            // Known by its path alone
+            expect(forUnimport).toBe(liveArticle);
+            expect(forImport).toBe(!rowAt?.live);
+          } else {
+            // A note is the row it claims, wherever the rows are
+            expect(forUnimport).toBe(
+              liveArticle && claimsId(claim) && String(claim) === rowAt.id
+            );
+            expect(forImport).toBe(!claimsId(claim));
+          }
+          expect(forImport && forUnimport).toBe(false);
+          repo.dispose();
+        }
+      )
+    );
   });
 });

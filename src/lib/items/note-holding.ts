@@ -1,4 +1,5 @@
-import type { App } from 'obsidian';
+import { supportsFrontmatter } from '#/lib/mime';
+import type { App, TFile } from 'obsidian';
 
 /**
  * Which row a note is the note of, by the `ir-id` it claims and where it is:
@@ -31,6 +32,25 @@ export function claimedId(irId: unknown): string | null | undefined {
     typeof irId === 'bigint'
     ? String(irId)
     : null;
+}
+
+/**
+ * The id `file` holds a row by, for what tells, while a menu is built, which
+ * item a file is (`ArticleManager`'s `heldArticleLookup`, `item-source`'s
+ * `itemNodeAt`): a string for the row with that id at `file`'s path;
+ * `undefined` for a file with no frontmatter, a PDF say, which has nowhere to
+ * claim an id in and so is the row at its path; `null` for a note claiming no
+ * id (see {@link claimedId}), which holds no row even at a live row's path,
+ * or claiming a list or a map, which no row can answer to.
+ */
+export function heldClaim(
+  file: TFile,
+  app: Pick<App, 'metadataCache'>
+): string | null | undefined {
+  const id = claimedId(
+    app.metadataCache.getFileCache(file)?.frontmatter?.['ir-id']
+  );
+  return id === undefined && supportsFrontmatter(file) ? null : id;
 }
 
 /** A row holding the id a note claims: where it points, and whether it is live. */

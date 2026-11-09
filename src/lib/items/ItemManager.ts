@@ -208,7 +208,10 @@ export class ItemManager {
    * A tagged note claiming no live row, or one whose row's reference holds no
    * note claiming its id, keeps its tag's type: a note just made is written
    * before its row is stored, and a note moved while no rename handler was
-   * listening is the row's until `followMovedNotes` points the row at it.
+   * listening is the row's until `followMovedNotes` points the row at it. A
+   * tagged note claiming no id does too, unless an article's tag types it at
+   * a live article's path: it has no type there, as an untagged one has
+   * none, the tag having no say in what it is.
    *
    * A file with no frontmatter, a PDF say, has neither. It is known by its
    * path alone, so it is whatever the row at its path is: none, when that row
@@ -234,10 +237,10 @@ export class ItemManager {
    * cache's parse of it, as its `changed` event hands it over (see
    * `ObsidianHelpers.noteTypeFromCache`, which answers for the tags).
    *
-   * Answers at once, not with a promise, when the note claims no id, and when
-   * the repository answers at once, as sql.js does: a tag added or an id taken
-   * off then shows with no wait. Only a repository that answers later is
-   * waited on.
+   * Answers at once, not with a promise, when the note claims no id and no
+   * article's tag types it, and when the repository answers at once, as sql.js does: a
+   * tag added or an id taken off then shows with no wait. Only a repository
+   * that answers later is waited on.
    */
   itemTypeFromCache(
     file: TFile,
@@ -256,7 +259,9 @@ export class ItemManager {
    * {@link getItemType}), and the only one. A note no tag types is what that
    * row makes it. One its tags type is named too: that row decides whether
    * it is the row's note or a copy of it. `null` for a note claiming no id,
-   * whose type no database write changes. Reads no row.
+   * whose type only a write adding or removing a live article at its path
+   * changes, when an article's tag types it (see {@link getItemType}), which
+   * no watch of one row can follow. Reads no row.
    */
   typingRowId(
     file: TFile,
@@ -323,7 +328,7 @@ export class ItemManager {
     tagged: NoteType | null
   ): NoteType | null | Promise<NoteType | null> {
     const id = claimedId(cache?.frontmatter?.['ir-id']);
-    if (typeof id !== 'string') return tagged;
+    if (typeof id !== 'string') return this.#unclaimedType(file, tagged);
     if (this.app.vault.getFileByPath(file.path) !== file) return null;
     // One lookup by primary key per table
     const rows = this.repo.query(
@@ -350,6 +355,27 @@ export class ItemManager {
       );
       return holding === 'copy' ? null : tagged;
     };
+    return Array.isArray(rows) ? typeOf(rows) : rows.then(typeOf);
+  }
+
+  /**
+   * {@link #heldType} for note `file`, claiming no id a row can hold, typed
+   * `tagged` by its tags: none for an article's tag at a live article's path,
+   * as an untagged note there has none, which is that article's note only
+   * once it claims its id again (an import of it asks the user which, see
+   * `ArticleManager.import`), the tag having no say; else `tagged`. Reads no
+   * row for a note no article's tag types.
+   */
+  #unclaimedType(
+    file: TFile,
+    tagged: NoteType | null
+  ): NoteType | null | Promise<NoteType | null> {
+    if (tagged !== 'article') return tagged;
+    const rows = this.repo.query(
+      'SELECT 1 FROM article WHERE reference = $1 AND deleted = FALSE',
+      [file.path]
+    );
+    const typeOf = (found: unknown[]) => (found.length > 0 ? null : tagged);
     return Array.isArray(rows) ? typeOf(rows) : rows.then(typeOf);
   }
 

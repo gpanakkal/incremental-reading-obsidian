@@ -71,7 +71,7 @@ import {
 } from '../utils';
 import {
   ArticleManager,
-  liveArticleLookup,
+  heldArticleLookup,
   ownNoteKeepsRow,
 } from './ArticleManager';
 import { type CardSelection, CardManager } from './CardManager';
@@ -309,15 +309,16 @@ export default class ReviewManager {
   /**
    * The id of the live article `file` is, or `null` when it is none: a note
    * by its cached `ir-id` and its path, a copy of an article's note being
-   * none, and a note claiming no id or a file with no frontmatter by its path
-   * (see `liveArticleLookup`).
+   * none, as is a note claiming no id, even at a live article's path, and a
+   * file with no frontmatter by its path (see `heldArticleLookup`). A note
+   * claiming no id costs no read.
    *
    * Answers at once, for a menu being built: sql.js answers a query at once,
    * as in {@link isItemFileAt}. A repository that answers later can't be
    * waited on there, so it gets `null`.
    */
   articleIdAt(file: TFile): string | null {
-    const lookup = liveArticleLookup(file, this.app);
+    const lookup = heldArticleLookup(file, this.app);
     if (!lookup) return null;
     const rows = this.#repo.query(lookup.sql, lookup.params);
     if (!Array.isArray(rows)) return null;
@@ -1004,23 +1005,36 @@ export default class ReviewManager {
 
   /**
    * Whether a live article row names a path in the folder at `folder`, at any
-   * depth, `/` being the vault: what an un-import from the folder may find.
-   * Answers at once, as {@link referencesUnder} does, or `false`.
+   * depth, `/` being the vault, unless the file there doesn't hold it: what an
+   * un-import from the folder may find. A note holds the row by claiming its
+   * id, as for {@link articleIdAt}, so a note claiming none, or another, at
+   * its path holds none; a file with no frontmatter, a PDF say, holds it by
+   * its path. A row with no file at its path still counts. One read, however
+   * many rows; each note's claim comes from the metadata cache. Answers at
+   * once, as {@link referencesUnder} does, or `false`.
    */
   hasArticleUnder(folder: string): boolean {
     const rows =
       folder === '/'
         ? this.#repo.query(
-            'SELECT 1 FROM article WHERE deleted = FALSE LIMIT 1'
+            'SELECT id, reference FROM article WHERE deleted = FALSE'
           )
         : this.#repo.query(
-            `SELECT 1 FROM article
-               WHERE deleted = FALSE AND reference >= $1 AND reference < $2
-               LIMIT 1`,
+            `SELECT id, reference FROM article
+               WHERE deleted = FALSE AND reference >= $1 AND reference < $2`,
             // `0` sorts right after `/`, as in `referencesUnder`
             [`${folder}/`, `${folder}0`]
           );
-    return Array.isArray(rows) && rows.length > 0;
+    if (!Array.isArray(rows)) return false;
+    const { vault, metadataCache } = this.app;
+    return (rows as unknown as { id: string; reference: string }[]).some(
+      ({ id, reference }) => {
+        const file = vault.getFileByPath(reference);
+        if (!file || !supportsFrontmatter(file)) return true;
+        const frontmatter = metadataCache.getFileCache(file)?.frontmatter;
+        return claimedId(frontmatter?.['ir-id']) === id;
+      }
+    );
   }
 
   /**

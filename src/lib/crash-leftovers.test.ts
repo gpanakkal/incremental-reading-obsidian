@@ -2612,9 +2612,16 @@ describe('findLeftovers and the note bar', () => {
             expect(tampered).toBe(taken);
           } else {
             expect(listed.has(note.path)).toBe(false);
-            expect(type !== null).toBe(tagged !== null);
-            // No claim: known by its path, as the row of its tag's table. One
-            // that lost its id, the watch's other case, keeps that row's bar
+            // An article's tag has no say at a live article's path: the
+            // note is none there, as an untagged one is
+            const tagSays = !(
+              tagged === 'article' &&
+              liveAt(note.path).some((at) => at.kind === 'article')
+            );
+            expect(type !== null).toBe(tagSays && tagged !== null);
+            // No claim: known by its path, as the row of its tag's table, a
+            // snippet's or a card's. One that lost its id, the watch's other
+            // case, keeps that row's bar
             const row = liveAt(note.path).find((at) => at.kind === type);
             expect(item?.data.id ?? null).toBe(row?.id ?? null);
           }

@@ -1,4 +1,5 @@
 import { actionCooldownFor } from '#/lib/action-cooldown';
+import { Actions } from '#/lib/Actions';
 import { AutoImportWatcher } from '#/lib/AutoImportWatcher';
 import {
   ARTICLE_TAG,
@@ -82,6 +83,8 @@ import {
   removeIcon,
   type MenuItem,
 } from '#/test/__mocks__/obsidian';
+import { TestRepository } from '#/test/item-vault';
+import { makeLinkVault } from '#/test/link-vault';
 import * as backupPrompt from '#/views/BackupFailurePrompt';
 import { BulkImportModal } from '#/views/BulkImportModal';
 import { ImportModal } from '#/views/ImportModal';
@@ -1598,6 +1601,104 @@ describe('IncrementalReadingPlugin.addIRMenuItems', () => {
           expect(imports.length > 0).toBe(
             ['md', 'pdf'].includes(extension.toLowerCase())
           );
+        }
+      )
+    );
+  });
+
+  it("offers a file's import or its un-import as the rows and the id its note claims say, and Go to source or context only of an item it holds: a note claiming no id its import alone, even at a live article's path", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom('md', 'pdf'),
+        // A note's `ir-id`: none, falsy, the row's, another, a number, or a
+        // list, which no row can hold
+        fc.constantFrom<unknown>(undefined, null, '', 0, 'x', 'y', 7, ['x']),
+        fc.boolean(),
+        // The row at the file's path, if any
+        fc.option(
+          fc.record({
+            table: fc.constantFrom('article', 'snippet'),
+            id: fc.constantFrom('x', '7'),
+            live: fc.boolean(),
+          }),
+          { nil: null }
+        ),
+        async (extension, irId, tagged, rowAt) => {
+          const path = `notes/thing.${extension}`;
+          // A source each held item's line leads to, so Go to source shows
+          // wherever the file holds its row
+          const source = 'https://example.com/a';
+          const frontmatter: Record<string, unknown> = { source };
+          if (irId !== undefined) frontmatter['ir-id'] = irId;
+          if (tagged) frontmatter.tags = [ARTICLE_TAG];
+          const notes = {
+            [path]: extension === 'md' ? frontmatter : null,
+            // A snippet's parent article, whose note is there to go to
+            'notes/parent.md': { 'ir-id': 'p', source },
+          };
+          const vault = makeLinkVault(notes);
+          const repo = await TestRepository.create();
+          repo.mutate(
+            `INSERT INTO article (id, reference, due, interval, priority, deleted)
+             VALUES ('p', 'notes/parent.md', 0, 86400000, 30, FALSE)`
+          );
+          if (rowAt) {
+            const parent = rowAt.table === 'snippet' ? 'p' : null;
+            repo.mutate(
+              rowAt.table === 'snippet'
+                ? `INSERT INTO snippet (id, reference, due, interval, priority, deleted, parent)
+                   VALUES ($1, $2, 0, 86400000, 30, $3, $4)`
+                : `INSERT INTO article (id, reference, due, interval, priority, deleted)
+                   VALUES ($1, $2, 0, 86400000, 30, $3)`,
+              rowAt.table === 'snippet'
+                ? [rowAt.id, path, !rowAt.live, parent]
+                : [rowAt.id, path, !rowAt.live]
+            );
+          }
+          const reviewManager = new ReviewManager(
+            {
+              app: vault.app,
+              settings: { dayRolloverOffset: 4 },
+              registerEvent: vi.fn(),
+            } as never,
+            repo
+          );
+          const file = vault.files.get(path)!;
+          const { receiver } = makeReceiver({
+            file,
+            frontmatter: notes[path] ?? undefined,
+          });
+          Object.assign(receiver, {
+            reviewManager,
+            // Go to source and context as the plugin finds them
+            actions: new Actions({ app: vault.app, reviewManager } as never),
+          });
+
+          const icons = iconsOf(raiseMenu(receiver, undefined, file));
+
+          const imports = icons.filter((icon) => icon === PLUGIN_ICON).length;
+          const unimports = icons.filter(
+            (icon) => icon === 'lucide-file-x'
+          ).length;
+          // A PDF is the row at its path; a note, the row it claims
+          const held =
+            rowAt !== null &&
+            rowAt.live &&
+            (extension === 'pdf' ||
+              ((typeof irId === 'string' || typeof irId === 'number') &&
+                String(irId) === rowAt.id));
+          const holds = held && rowAt.table === 'article';
+          expect(unimports).toBe(holds ? 1 : 0);
+          expect(imports > 0).toBe(!holds);
+          // A snippet's context is its parent's note; a PDF has no source of
+          // its own, a snippet its parent's
+          expect(icons.includes('lucide-locate')).toBe(
+            held && rowAt.table === 'snippet'
+          );
+          expect(icons.includes('lucide-external-link')).toBe(
+            held && (rowAt.table === 'snippet' || extension === 'md')
+          );
+          repo.dispose();
         }
       )
     );

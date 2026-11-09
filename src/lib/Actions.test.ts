@@ -2,13 +2,14 @@ import { actionCooldownFor } from '#/lib/action-cooldown';
 import { Actions, itemName, type ActionStackEntry } from '#/lib/Actions';
 import type {
   BulkOutcome,
-  ImportEffect,
   ImportedArticle,
+  ImportEffect,
 } from '#/lib/bulk-import/types';
 import { CONTENT_TITLE_SLICE_LENGTH, MS_PER_DAY } from '#/lib/constants';
 import * as contextFlash from '#/lib/context-flash';
 import * as itemContext from '#/lib/item-context';
 import * as itemSource from '#/lib/item-source';
+import ReviewManager from '#/lib/items/ReviewManager';
 import { configureSuccessNotices } from '#/lib/notices';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import * as obsidianPdf from '#/lib/pdf/obsidian-pdf';
@@ -50,7 +51,8 @@ import fc from 'fast-check';
 // here is the one `ObsidianHelpers.notify` constructs — importing it by path is
 // what gives TS the mock's `messages`/`reset`, which the real class lacks.
 import { Notice } from '#/test/__mocks__/obsidian';
-import { runOutMergeWait } from '#/test/item-vault';
+import { runOutMergeWait, TestRepository } from '#/test/item-vault';
+import { makeLinkVault } from '#/test/link-vault';
 import { showSuccessNotices } from '#/test/success-notices';
 import * as CardAnswerModal from '#/views/CardAnswerModal';
 import type ReviewView from '#/views/ReviewView';
@@ -2351,6 +2353,41 @@ describe('Actions.goToSource', () => {
         }
       )
     );
+  });
+
+  it("offers no source or context of the article at a note's path while the note claims no id, as the menus offer it an import", async () => {
+    for (const irId of [undefined, 'x']) {
+      const path = 'notes/a.md';
+      const vault = makeLinkVault({
+        [path]: {
+          source: 'https://example.com/a',
+          ...(irId === undefined ? {} : { 'ir-id': irId }),
+        },
+      });
+      const repo = await TestRepository.create();
+      repo.mutate(
+        `INSERT INTO article (id, reference, due, interval, priority, deleted)
+         VALUES ('x', $1, 0, 86400000, 30, FALSE)`,
+        [path]
+      );
+      const reviewManager = new ReviewManager(
+        {
+          app: vault.app,
+          settings: { dayRolloverOffset: 4 },
+          registerEvent: vi.fn(),
+        } as never,
+        repo
+      );
+      const actions = new Actions({ app: vault.app, reviewManager } as never);
+      const file = vault.files.get(path)!;
+
+      // The article's note only while it claims the article's id
+      const held = irId === 'x';
+      expect(reviewManager.articleIdAt(file) !== null).toBe(held);
+      expect(actions.sourceRoute(file) !== null).toBe(held);
+      expect(actions.hasContext(file)).toBe(false);
+      repo.dispose();
+    }
   });
 
   describe('for a source on the web', () => {

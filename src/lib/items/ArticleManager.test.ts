@@ -21,6 +21,7 @@ import {
   SOURCE_PROPERTY_NAME,
   TEXT_BASE_REVIEW_INTERVAL,
 } from '#/lib/constants';
+import type { HeldChoice } from '#/lib/crash-leftovers';
 import IRScheduler from '#/lib/IRScheduler';
 import {
   listChars,
@@ -47,6 +48,8 @@ import { getEndOfDay } from '#/lib/utils';
 // The mock the vitest config aliases `obsidian` to — imported by path so its
 // recorded notices are visible to the type checker as well as at runtime.
 import { evictedSpot } from '#/lib/moved-note-scan';
+import * as ReassociatePrompt from '#/lib/reassociate-prompt';
+import * as UnimportModule from '#/lib/unimport-article';
 import { Keymap, Notice } from '#/test/__mocks__/obsidian';
 import {
   excludedIdsOf,
@@ -11144,6 +11147,9 @@ describe("importing a snippet's or card's note that lost its type tag (0237)", (
           const prompt = vi
             .spyOn(ConfirmModalModule, 'promptForConfirmation')
             .mockResolvedValue(false);
+          const heldPrompt = vi
+            .spyOn(ReassociatePrompt, 'askToResolveHeld')
+            .mockResolvedValue(null);
 
           const outcome = await importOnce(manager, file, batch);
 
@@ -11174,9 +11180,15 @@ describe("importing a snippet's or card's note that lost its type tag (0237)", (
             tags.includes(CARD_TAG) ||
             (itemRow && (itemRow.spec.here || claims(itemRow.spec)))
           ) {
+            expect(heldPrompt).not.toHaveBeenCalled();
             refusedOutright();
           } else if (articleRow?.here && !claims(articleRow)) {
-            // Another article's path
+            // Another article's path. An import of one note claiming no id
+            // there asks what to do with that article, which the user
+            // declines
+            expect(heldPrompt).toHaveBeenCalledTimes(
+              !batch && !articleRow.deleted && noteId === undefined ? 1 : 0
+            );
             refusedOutright();
           } else if (
             articleRow?.here &&
@@ -12158,5 +12170,382 @@ describe("reading a note's tags as Obsidian does", () => {
         examples: [[{ Tags: 'mine' }], [{ TAGS: ['mine'], tags: ['other'] }]],
       }
     );
+  });
+});
+
+describe("importing a note claiming no id at a live article's path", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const PATH = 'notes/N.md';
+  const HELD = 'held';
+
+  /**
+   * An article manager wired to a real `ReviewManager` over a real database,
+   * the live article {@link HELD} at `path` with two reviews, one undone,
+   * and a vault holding `frontmatter` there. Highlights reload through a
+   * stub; notices, the console and the session tracker are watched.
+   */
+  async function wireHeld(
+    frontmatter: Record<string, unknown> | null,
+    { path = PATH, dismissed = false } = {}
+  ) {
+    const vault = makeItemVault({ [path]: frontmatter });
+    const repo = await TestRepository.create();
+    repo.mutate(
+      `INSERT INTO article (id, reference, due, interval, priority, dismissed)
+       VALUES ($1, $2, 5000, 86400000, 30, $3)`,
+      [HELD, path, dismissed]
+    );
+    repo.mutate(
+      `INSERT INTO article_review (id, article_id, review_time, deleted)
+       VALUES ('r1', $1, 1000, FALSE), ('r2', $1, 2000, TRUE)`,
+      [HELD]
+    );
+    const forgetIf = vi.fn();
+    const plugin: Record<string, unknown> = {
+      app: { ...vault.app, workspace: { trigger: vi.fn() } },
+      settings: {
+        copyOnImport: false,
+        createEmptyInCurrentFolder: false,
+        dayRolloverOffset: 4,
+      },
+      registerEvent: vi.fn(),
+      sessionTracker: { forgetIf },
+    };
+    const reviewManager = new ReviewManager(plugin as never, repo);
+    plugin.reviewManager = reviewManager;
+    vi.spyOn(reviewManager.snippets, 'getHighlights').mockResolvedValue([]);
+    const notify = vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
+    vi.spyOn(console, 'error').mockReturnValue(undefined);
+    const manager = reviewManager.articles;
+    const claimInPlace = vi.spyOn(manager, 'claimInPlace');
+    const before = structuredClone(vault.frontmatterOf(path));
+    const file = vault.files.get(path)!;
+    return {
+      vault,
+      repo,
+      reviewManager,
+      manager,
+      file,
+      before,
+      notify,
+      claimInPlace,
+      forgetIf,
+    };
+  }
+
+  /** Answer the question about the article at the path with `answer`. */
+  const spyHeldPrompt = (answer: HeldChoice | (() => Promise<HeldChoice>)) => {
+    const spy = vi.spyOn(ReassociatePrompt, 'askToResolveHeld');
+    return typeof answer === 'function'
+      ? spy.mockImplementation(answer)
+      : spy.mockResolvedValue(answer);
+  };
+
+  /**
+   * A note's frontmatter claiming no id: none, no `ir-id`, a falsy one, or a
+   * list or a map, which no row can hold.
+   */
+  const unclaimedArb = fc.option(
+    fc
+      .tuple(
+        fc.constantFrom<unknown>(undefined, '', null, 0, false, [HELD], {
+          id: HELD,
+        }),
+        fc.subarray([ARTICLE_TAG, 'mine']),
+        otherPropertiesArb
+      )
+      .map(([irId, tags, others]) => {
+        const frontmatter: Record<string, unknown> = { ...others, tags };
+        if (irId !== undefined) frontmatter['ir-id'] = irId;
+        return frontmatter;
+      }),
+    { nil: null }
+  );
+
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+  it("asks an import of one such note what to do with the article, showing that row; Re-associate makes the note the article's, keeping its schedule and history; Erase and import fresh erases the row for good and imports the note under a new id; neither leaves everything as it was, saying nothing; no choice records an undo", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        unclaimedArb,
+        fc.constantFrom<HeldChoice>('reassociate', 'erase', null),
+        fc.boolean(),
+        fc.integer({ min: 10, max: 50 }),
+        async (frontmatter, choice, dismissed, priority) => {
+          vi.restoreAllMocks();
+          const wired = await wireHeld(frontmatter, { dismissed });
+          const { vault, repo, manager, file, before, notify } = wired;
+          const tablesBefore = itemTables(repo);
+          const prompt = spyHeldPrompt(choice);
+
+          const result = await manager.import(file, priority, null, false);
+
+          // Nothing for an undo to take back, as for the leftover modal's
+          // own Re-associate and Erase and import fresh
+          expect(result).toBeNull();
+          expect(prompt).toHaveBeenCalledOnce();
+          const [, asked, holder, device, noteClaims] = prompt.mock.calls[0];
+          expect(asked).toBe(file);
+          // Asked as of a note holding no id, not one holding another
+          expect(noteClaims).toBe('no-id');
+          expect(holder).toMatchObject({
+            kind: 'article',
+            id: HELD,
+            deleted: false,
+            dismissed,
+            lastReview: 1000,
+          });
+          expect(typeof device).toBe('string');
+          const after = vault.frontmatterOf(PATH) ?? {};
+          const { 'ir-id': _id, tags: _tags, ...othersBefore } = before ?? {};
+          const { 'ir-id': id, tags, ...othersAfter } = after;
+
+          if (choice === null) {
+            expect(itemTables(repo)).toEqual(tablesBefore);
+            expect(vault.frontmatterOf(PATH)).toEqual(before);
+            expect(notify).not.toHaveBeenCalled();
+            return;
+          }
+          expect(othersAfter).toEqual(othersBefore);
+          expect(tags).toEqual(expect.arrayContaining([ARTICLE_TAG]));
+          expect(notify).not.toHaveBeenCalledWith(
+            expect.anything(),
+            expect.objectContaining({ kind: 'error' })
+          );
+          if (choice === 'reassociate') {
+            expect(id).toBe(HELD);
+            // The row as it was, schedule, history and all, less the stamps
+            // a write leaves
+            expect(itemTables(repo)).toEqual(tablesBefore);
+            expect(wired.claimInPlace).toHaveBeenCalledExactlyOnceWith(
+              file,
+              HELD
+            );
+            return;
+          }
+          // Erased for good: its path given up, its history gone with it
+          expect(
+            repo.storedRows('article').find((row) => row.id === HELD)
+          ).toMatchObject({ reference: purgedReference(HELD), deleted: 1 });
+          expect(
+            repo.storedRows('article_review').map((review) => review.deleted)
+          ).toEqual([1, 1]);
+          expect(wired.forgetIf).toHaveBeenCalledWith(HELD);
+          // A new article where the note is, under an id of its own
+          const live = repo.rows('article');
+          expect(live).toMatchObject([{ reference: PATH, priority }]);
+          expect(live[0].id).toMatch(UUID);
+          expect(id).toBe(live[0].id);
+        }
+      ),
+      { numRuns: 40 }
+    );
+  });
+
+  it('refuses such a note in a batch, saying why, asking nothing and writing nothing', async () => {
+    await fc.assert(
+      fc.asyncProperty(unclaimedArb, async (frontmatter) => {
+        vi.restoreAllMocks();
+        const { vault, repo, manager, file, before } =
+          await wireHeld(frontmatter);
+        const tablesBefore = itemTables(repo);
+        const prompt = spyHeldPrompt('erase');
+
+        const [outcome] = await manager.importMany([{ file }], {
+          priority: DEFAULT_PRIORITY,
+          fixedIntervalDays: null,
+          makeCopy: false,
+        });
+
+        expect(outcome.status).toBe('failed');
+        expect(outcome.reason).toMatch(/article/);
+        expect(prompt).not.toHaveBeenCalled();
+        expect(itemTables(repo)).toEqual(tablesBefore);
+        expect(vault.frontmatterOf(PATH)).toEqual(before);
+      }),
+      { numRuns: 20 }
+    );
+  });
+
+  it("asks nothing of a note claiming another id there, or one at a deleted article's path, refusing it as before", async () => {
+    const cases: [Record<string, unknown>, boolean][] = [
+      [{ 'ir-id': 'other' }, false],
+      [{ 'ir-id': 'other' }, true],
+      [{}, true],
+    ];
+    for (const [frontmatter, deleted] of cases) {
+      vi.restoreAllMocks();
+      const { vault, repo, manager, file, before } =
+        await wireHeld(frontmatter);
+      if (deleted) repo.mutate(`UPDATE article SET deleted = TRUE`);
+      const tablesBefore = itemTables(repo);
+      const prompt = spyHeldPrompt('erase');
+
+      expect(
+        await manager.import(file, DEFAULT_PRIORITY, null, false)
+      ).toBeNull();
+
+      expect(prompt).not.toHaveBeenCalled();
+      expect(itemTables(repo)).toEqual(tablesBefore);
+      expect(vault.frontmatterOf(PATH)).toEqual(before);
+    }
+  });
+
+  it('does nothing, saying so, when the article at the path or the note changed while the user chose', async () => {
+    const changes: Record<
+      string,
+      (wired: Awaited<ReturnType<typeof wireHeld>>) => Promise<void> | void
+    > = {
+      'row rescheduled': ({ repo }) => {
+        repo.mutate(`UPDATE article SET due = 9000 WHERE id = $1`, [HELD]);
+      },
+      'row deleted': ({ repo }) => {
+        repo.mutate(`UPDATE article SET deleted = TRUE WHERE id = $1`, [HELD]);
+      },
+      'row moved': ({ repo }) => {
+        repo.mutate(`UPDATE article SET reference = 'x.md' WHERE id = $1`, [
+          HELD,
+        ]);
+      },
+      'note claimed an id': ({ vault, file }) =>
+        vault.app.fileManager.processFrontMatter(file, (frontmatter) => {
+          frontmatter['ir-id'] = 'mine';
+        }),
+      'note trashed': ({ vault, file }) =>
+        vault.app.fileManager.trashFile(file),
+    };
+    for (const [name, change] of Object.entries(changes)) {
+      for (const choice of ['reassociate', 'erase'] as const) {
+        vi.restoreAllMocks();
+        const wired = await wireHeld({ tags: ['mine'] });
+        const { vault, repo, manager, file, notify } = wired;
+        spyHeldPrompt(async () => {
+          await change(wired);
+          return choice;
+        });
+        // What the change itself wrote is all that is left changed
+        const expected = await (async () => {
+          const shadow = await wireHeld({ tags: ['mine'] });
+          await change(shadow);
+          return {
+            tables: itemTables(shadow.repo),
+            frontmatter: shadow.vault.frontmatterOf(PATH),
+          };
+        })();
+
+        const result = await manager.import(
+          file,
+          DEFAULT_PRIORITY,
+          null,
+          false
+        );
+
+        expect(result, name).toBeNull();
+        expect(itemTables(repo), name).toEqual(expected.tables);
+        expect(vault.frontmatterOf(PATH), name).toEqual(expected.frontmatter);
+        expect(notify, name).toHaveBeenCalledExactlyOnceWith(
+          expect.stringContaining('"N"'),
+          expect.objectContaining({ kind: 'error' })
+        );
+      }
+    }
+  });
+
+  it('writes nothing once writes are refused while the user chose', async () => {
+    for (const choice of ['reassociate', 'erase'] as const) {
+      vi.restoreAllMocks();
+      const { vault, repo, manager, file, before, notify } = await wireHeld({});
+      spyHeldPrompt(() => {
+        repo.refuseWrites(new Error('Saving is paused.'));
+        return Promise.resolve(choice);
+      });
+      const refresh = vi
+        .spyOn(UnimportModule, 'refreshAfterRowPurge')
+        .mockResolvedValue(undefined);
+      const tablesBefore = itemTables(repo);
+
+      expect(
+        await manager.import(file, DEFAULT_PRIORITY, null, false)
+      ).toBeNull();
+
+      expect(itemTables(repo)).toEqual(tablesBefore);
+      expect(vault.frontmatterOf(PATH)).toEqual(before);
+      // Refused before anything was tried, which says only that
+      expect(notify).toHaveBeenCalledOnce();
+      expect(notify.mock.calls[0][0]).toEqual(refusal('"N.md"'));
+      expect(refresh).not.toHaveBeenCalled();
+    }
+  });
+
+  it("tells the user, and keeps the note the article's, when the snippets and cards taken from it can't be adopted", async () => {
+    const { vault, manager, file, notify, claimInPlace } = await wireHeld({});
+    spyHeldPrompt('reassociate');
+    claimInPlace.mockRejectedValue(new Error('adopt failed'));
+
+    await manager.import(file, DEFAULT_PRIORITY, null, false);
+
+    expect(vault.frontmatterOf(PATH)?.['ir-id']).toBe(HELD);
+    // That notice alone, not a second one saying it went well
+    expect(notify).toHaveBeenCalledExactlyOnceWith(
+      expect.stringContaining('"N"'),
+      expect.objectContaining({ kind: 'error', persist: true })
+    );
+  });
+
+  it('refreshes what shows items once the article is erased, and only then, even when the note then fails to be imported', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom<HeldChoice>('reassociate', 'erase', null),
+        fc.boolean(),
+        async (choice, failing) => {
+          vi.restoreAllMocks();
+          const { vault, repo, manager, file } = await wireHeld({});
+          if (failing) vault.fail('frontmatter');
+          spyHeldPrompt(choice);
+          const refresh = vi
+            .spyOn(UnimportModule, 'refreshAfterRowPurge')
+            .mockResolvedValue(undefined);
+
+          await manager.import(file, DEFAULT_PRIORITY, null, false);
+
+          expect(refresh).toHaveBeenCalledTimes(choice === 'erase' ? 1 : 0);
+          // A plain import, no article at the path, has nothing to refresh for
+          refresh.mockClear();
+          repo.mutate(
+            `UPDATE article SET reference = 'gone/' || id WHERE deleted = FALSE`
+          );
+          await manager.import(file, DEFAULT_PRIORITY, null, false);
+          expect(refresh).not.toHaveBeenCalled();
+          if (choice === 'erase' && failing) {
+            // Erased all the same, as the leftover modal's erase leaves it
+            expect(repo.rows('article')).toEqual([]);
+          }
+        }
+      )
+    );
+  });
+
+  it("erases nothing for a note that can't be imported where it is, though it may be re-associated", async () => {
+    const path = `notes/a${[...REFUSED_PATH_CHARS][0]}b.md`;
+    for (const choice of ['reassociate', 'erase'] as const) {
+      vi.restoreAllMocks();
+      const { vault, repo, manager, file } = await wireHeld({}, { path });
+      spyHeldPrompt(choice);
+      const refresh = vi
+        .spyOn(UnimportModule, 'refreshAfterRowPurge')
+        .mockResolvedValue(undefined);
+      const tablesBefore = itemTables(repo);
+
+      await manager.import(file, DEFAULT_PRIORITY, null, false);
+
+      expect(itemTables(repo)).toEqual(tablesBefore);
+      expect(refresh).not.toHaveBeenCalled();
+      expect(vault.frontmatterOf(path)?.['ir-id']).toBe(
+        choice === 'reassociate' ? HELD : undefined
+      );
+    }
   });
 });

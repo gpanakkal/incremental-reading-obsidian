@@ -239,12 +239,18 @@ type NoteCase = typeof noteCaseArb extends fc.Arbitrary<infer T> ? T : never;
 /**
  * The type a note in `note`'s case is, worked out apart from the code: its
  * tag's, unless it is a copy, claiming the id of a live row whose own note is
- * there at the row's reference, which makes it no item at all; and, with no
- * tag, its row's when that row is live, at the note's path, and the one its
- * `ir-id` names.
+ * there at the row's reference, which makes it no item at all, or an
+ * article's tag on a note claiming no id at a live article's path, which is
+ * none, as an untagged one there is; and, with no tag, its row's when that
+ * row is live, at the note's path, and the one its `ir-id` names.
  */
 const expectedType = (note: NoteCase): NoteType | null => {
   const claimsLiveRow = note.row === 'live' && note.irId === 'x';
+  const atLiveArticle =
+    note.table === 'article' && note.row === 'live' && note.atReference;
+  if (note.tag === 'article' && note.irId == null && atLiveArticle) {
+    return null;
+  }
   if (note.tag) {
     const copy =
       claimsLiveRow && !note.atReference && note.original === 'claims';
@@ -666,6 +672,39 @@ describe('getItemType', () => {
     );
   });
 
+  it("gives an article's tag on a note claiming no id no say at a live article's own path, and only there", async () => {
+    for (const table of ['article', 'snippet', 'srs_card'] as const) {
+      for (const row of ['live', 'deleted', 'absent'] as const) {
+        for (const atReference of [true, false]) {
+          for (const irId of [undefined, null] as const) {
+            const note: NoteCase = {
+              table,
+              row,
+              atReference,
+              tag: 'article',
+              irId,
+              original: 'none',
+            };
+            const { manager, file, app } = await wireNote(note);
+            const atLiveArticle =
+              table === 'article' && row === 'live' && atReference;
+            const expected = atLiveArticle ? null : 'article';
+            const name = JSON.stringify(note);
+
+            expect(await manager.getItemType(file), name).toBe(expected);
+            expect(
+              manager.itemTypeFromCache(
+                file,
+                app.metadataCache.getFileCache(file)
+              ),
+              name
+            ).toBe(expected);
+          }
+        }
+      }
+    }
+  });
+
   it("answers from the cache's parse at once, as the note's own type", async () => {
     await fc.assert(
       fc.asyncProperty(noteCaseArb, async (note) => {
@@ -697,13 +736,14 @@ describe('getItemType', () => {
     );
   });
 
-  it('asks the database only for a note claiming an id, once per lookup', async () => {
+  it("asks the database only for a note claiming an id, or one an article's tag types, once per lookup", async () => {
     await fc.assert(
       fc.asyncProperty(noteCaseArb, async (note) => {
         const { manager, file, app, repo } = await wireNote(note);
         const query = vi.spyOn(repo, 'query');
-        // A number claims its string form, as typed
-        const asks = note.irId == null ? 0 : 1;
+        // A number claims its string form, as typed; an article's tag on a
+        // note claiming none asks whether a live article holds its path
+        const asks = note.irId == null && note.tag !== 'article' ? 0 : 1;
 
         await manager.getItemType(file);
         expect(query).toHaveBeenCalledTimes(asks);

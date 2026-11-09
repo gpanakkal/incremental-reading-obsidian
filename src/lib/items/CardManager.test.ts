@@ -6296,8 +6296,18 @@ describe('the parent of a card made from a note', () => {
           const holder = rows.find(
             (row) => row.holds && row.here && !row.deleted
           );
+          const tagged = TYPE_TAGS.find(([tag]) => tags.includes(tag))?.[1];
+          // An article's tag on a note claiming no id at a live article's
+          // path has no say, as no tag there has
+          const tagSays = !(
+            tagged === 'article' &&
+            !claimsId &&
+            rows.some(
+              (row) => row.table === 'article' && row.here && !row.deleted
+            )
+          );
           const type =
-            TYPE_TAGS.find(([tag]) => tags.includes(tag))?.[1] ??
+            (tagSays ? tagged : undefined) ??
             (holder ? TYPE_OF_TABLE[holder.table] : null);
           // The live row of that type at the note's path; a tombstone there,
           // tagged note or not, and a card's note are no parent

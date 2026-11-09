@@ -15,6 +15,8 @@ import {
   askToReassociate,
   askToResolve,
   askToResolveHeld,
+  heldOpenings,
+  type NoteClaim,
   type PathHolder,
 } from './reassociate-prompt';
 
@@ -292,6 +294,68 @@ describe('askToResolveHeld', () => {
           expect(sureOptions.paragraphs).toHaveLength(
             holder.kind === 'card' ? 1 : 2
           );
+        }
+      )
+    );
+  });
+
+  it('opens by what the note holds, another id by default, or none', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        rowAtPathArb,
+        fc.string({ minLength: 1 }),
+        fc.option(fc.constantFrom<NoteClaim>('other-id', 'no-id'), {
+          nil: undefined,
+        }),
+        async (holder, path, noteClaims) => {
+          wireChoice('cancel', false);
+          const openings = {
+            'other-id': vi
+              .spyOn(heldOpenings, 'other-id')
+              .mockReturnValue('OPENING other-id'),
+            'no-id': vi
+              .spyOn(heldOpenings, 'no-id')
+              .mockReturnValue('OPENING no-id'),
+          };
+          const file = { path, basename: 'n' } as TFile;
+
+          await askToResolveHeld(
+            {} as App,
+            file,
+            holder,
+            THIS_DEVICE,
+            noteClaims
+          );
+
+          const chosen = noteClaims ?? 'other-id';
+          expect(openings[chosen]).toHaveBeenCalledExactlyOnceWith(
+            holder,
+            path
+          );
+          const other = chosen === 'no-id' ? 'other-id' : 'no-id';
+          expect(openings[other]).not.toHaveBeenCalled();
+          const [, options] = vi.mocked(ConfirmModalModule.promptForChoice).mock
+            .calls[0];
+          expect(options.paragraphs[0]).toBe(`OPENING ${chosen}`);
+        }
+      )
+    );
+  });
+
+  it("names the note's path in either opening, and says the row is deleted only when it is, opening on the row", () => {
+    fc.assert(
+      fc.property(
+        rowAtPathArb,
+        fc.constantFrom<NoteClaim>('other-id', 'no-id'),
+        (holder, noteClaims) => {
+          const opening = heldOpenings[noteClaims](holder, 'P0');
+
+          expect(opening).toContain('"P0"');
+          expect(/deleted/.test(opening)).toBe(holder.deleted);
+          // Opening on the row, with the article its kind takes
+          const article =
+            !holder.deleted && holder.kind === 'article' ? 'An' : 'A';
+          expect(opening.split(' ', 1)[0]).toBe(article);
         }
       )
     );

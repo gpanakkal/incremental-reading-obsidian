@@ -93,29 +93,55 @@ function detailsOf(holder: RowAtPath, thisDevice: string): string[] {
   return details;
 }
 
+/** What a note asked about in {@link askToResolveHeld} holds as its id. */
+export type NoteClaim = 'other-id' | 'no-id';
+
 /**
- * Ask what to do about `holder`, a row at the path of `file`, a note left
- * holding an id no row holds (see `crash-leftovers`): make the note that
+ * How {@link askToResolveHeld} opens, by what the note holds: `other-id`, an
+ * id no row holds, so the row at its path lost its own note; `no-id`, none,
+ * so the note may be the row's own, its id lost, or another in its place.
+ */
+export const heldOpenings: Record<
+  NoteClaim,
+  (holder: RowAtPath, path: string) => string
+> = {
+  'other-id': ({ kind, deleted }, path) => {
+    const state = deleted
+      ? `A deleted ${kind}`
+      : `${kind === 'article' ? 'An' : 'A'} ${kind} whose note is missing`;
+    return `${state} was at this note's path ("${path}"), but had a different ID than this note.`;
+  },
+  'no-id': ({ kind, deleted }, path) => {
+    const state = deleted
+      ? `A deleted ${kind}`
+      : `${kind === 'article' ? 'An' : 'A'} ${kind}`;
+    return `${state} points to this note ("${path}"), but this note doesn't have an ID. If this is the right note, re-associate to fix the note.`;
+  },
+};
+
+/**
+ * Ask what to do about `holder`, a row at the path of `file`, a note holding
+ * an id no row holds (see `crash-leftovers`), or none: make the note that
  * row's note, the default, or erase the row and save the note as a new item,
  * which is asked once more, as it can't be undone.
  * @param thisDevice this device's id (see `getDeviceId`), to say whether the
  *   row was last changed here
+ * @param noteClaims what the note holds as its id, which the question opens
+ *   by (see {@link heldOpenings})
  * @returns what the user chose, `null` for neither
  */
 export async function askToResolveHeld(
   app: App,
   file: TFile,
   holder: RowAtPath,
-  thisDevice: string
+  thisDevice: string,
+  noteClaims: NoteClaim = 'other-id'
 ): Promise<HeldChoice> {
   const { kind, id, deleted } = holder;
-  const state = deleted
-    ? `A deleted ${kind}`
-    : `${kind === 'article' ? 'An' : 'A'} ${kind} whose note is missing`;
   const choice = await promptForChoice(app, {
     title: `Re-associate "${file.basename}" with ${kind}?`,
     paragraphs: [
-      `${state} was at this note's path ("${file.path}"), but had a different ID than this note.`,
+      heldOpenings[noteClaims](holder, file.path),
       detailsOf(holder, thisDevice),
       `"Re-associate" points the ${kind} to this note, keeping its schedule and review history${deleted ? ', and restores it to the review queue' : ''}.`,
       `"Erase and import fresh" erases the ${kind} and its review history, then saves this note as a new item.`,
