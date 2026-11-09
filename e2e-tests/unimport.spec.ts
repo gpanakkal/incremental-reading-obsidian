@@ -1,4 +1,4 @@
-import { ARTICLE_TAG, AUTO_IMPORT_TAG } from '#/lib/constants';
+import { ARTICLE_TAG, AUTO_IMPORT_TAG, PLUGIN_ICON } from '#/lib/constants';
 import {
   expect,
   type ElectronApplication,
@@ -7,15 +7,17 @@ import {
 } from '@playwright/test';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import type { App } from 'obsidian';
 import {
   chooseFromMenu as chooseMenuEntry,
   closeMenu,
   executeCommandById,
   expectExtractSettled,
   finalizeArticleImport,
-  openMenuWith,
   openNote,
+  openPluginMenu,
   pendingSaves,
+  pluginMenuEntries,
   setNativeMenus,
   setPluginSetting,
 } from './helpers';
@@ -97,10 +99,29 @@ const chooseFromMenu = (target: Locator, title: string) =>
 /** The titles of the menu `target` shows on a right click, which is closed again. */
 async function menuTitles(target: Locator): Promise<string[]> {
   // Its own entries come last, once the plugin's handler has run
-  const menu = await openMenuWith(window, target, ['Import article']);
+  const menu = await openPluginMenu(window, target);
   const titles = await menu.locator('.menu-item-title').allTextContents();
   await closeMenu(window);
   return titles;
+}
+
+/**
+ * How many of the plugin's entries in the menu `target` shows on a right click
+ * import it (each marked with the plugin's icon) and how many un-import it
+ * (marked with its own); the menu is closed again.
+ */
+async function importEntryCounts(
+  target: Locator
+): Promise<{ imports: number; unimports: number }> {
+  const entries = pluginMenuEntries(await openPluginMenu(window, target));
+  const marked = (icon: string) =>
+    entries.filter({ has: window.locator(`svg.${icon}`) }).count();
+  const counts = {
+    imports: await marked(PLUGIN_ICON),
+    unimports: await marked('lucide-file-x'),
+  };
+  await closeMenu(window);
+  return counts;
 }
 
 /**
@@ -489,6 +510,40 @@ test('takes the bar off a note no tag types while its row is deleted elsewhere, 
   await expect(readingBar()).toHaveCount(0);
   await flagArticleRow(false);
   await expect(readingBar()).toBeVisible();
+});
+
+test("offers a plain note its import alone, and an article's note its un-import alone, its tag taken off or not", async () => {
+  expect(await importEntryCounts(fileRow())).toEqual({
+    imports: 1,
+    unimports: 0,
+  });
+
+  await importFromFiles();
+  expect(await importEntryCounts(fileRow())).toEqual({
+    imports: 0,
+    unimports: 1,
+  });
+
+  // The row makes it an article, not the tag
+  await window.evaluate(
+    async ([notePath, tag]) => {
+      const { app } = window as unknown as { app: App };
+      const file = app.vault.getFileByPath(notePath);
+      if (!file) throw new Error(`No file at ${notePath}`);
+      await app.fileManager.processFrontMatter(
+        file,
+        (frontmatter: { tags?: string[] }) => {
+          frontmatter.tags = frontmatter.tags?.filter((t) => t !== tag);
+        }
+      );
+    },
+    [NOTE, ARTICLE_TAG] as const
+  );
+  await expect(tagPills()).toHaveText(['keep-me']);
+  expect(await importEntryCounts(fileRow())).toEqual({
+    imports: 0,
+    unimports: 1,
+  });
 });
 
 test('leaves the article as it was when the un-import is turned down', async () => {

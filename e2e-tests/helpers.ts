@@ -662,6 +662,34 @@ export async function openMenuWith(
 }
 
 /**
+ * The entries this plugin adds to a menu, all in its own section: Obsidian
+ * marks each entry with the section it was put in (`MenuItem.setSection`,
+ * obsidian.asar 1.13, undocumented).
+ */
+export const pluginMenuEntries = (menu: Locator) =>
+  menu.locator('.menu-item[data-section="incremental-reading"]');
+
+/**
+ * Right click `target` until its menu shows this plugin's entries, whatever
+ * they are, and return that menu. As in {@link openMenuWith}, a menu opened
+ * before they apply is closed and opened again.
+ */
+export async function openPluginMenu(
+  window: Page,
+  target: Locator
+): Promise<Locator> {
+  const menu = window.locator('.menu');
+  await expect(async () => {
+    if ((await menu.count()) > 0) await closeMenu(window);
+    await target.click({ button: 'right' });
+    await expect(pluginMenuEntries(menu).first()).toBeVisible({
+      timeout: 2_000,
+    });
+  }).toPass({ timeout: 60_000 });
+  return menu;
+}
+
+/**
  * Right click `target` until its menu shows every one of `titles`, choose the
  * first, and wait for the menu to go.
  */

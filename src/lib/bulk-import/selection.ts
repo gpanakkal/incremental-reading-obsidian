@@ -40,36 +40,43 @@ export function selectionRoots(
   });
 }
 
-/**
- * Whether a selection's import could find anything: it holds a folder, or a
- * file of a type that imports as an article. Judged by type alone, as the
- * menu it decides on is built at once.
- */
-export function selectionMayImport(roots: readonly TAbstractFile[]): boolean {
-  return roots.some(
-    (entry) =>
-      entry instanceof TFolder ||
-      (entry instanceof TFile && isImportable(entry))
-  );
+/** Which of the bulk import and un-import a selection's menu offers. */
+export interface SelectionOffers {
+  import: boolean;
+  unimport: boolean;
 }
 
 /**
- * Whether a selection's un-import could find anything: it holds a live
- * article, or a folder with one under it, as `articles` says. Asked at once,
- * as the menu it decides on is built.
+ * What a selection's menu offers, as `articles` says which of its files are
+ * live articles and which of its folders hold one: the import while it holds
+ * a folder, or a file of a type that imports and is no live article; the
+ * un-import while it holds a live article, or a folder with one under it. A
+ * file is offered one or the other, never both, as a single file's menu has
+ * it; a folder may get both, each dialog listing only the files it fits.
+ *
+ * Asked at once, as the menu it decides on is built: each file and folder
+ * once at most, a folder only while no un-import is known yet, and nothing
+ * more once both are.
  */
-export function selectionMayUnimport(
+export function selectionOffers(
   roots: readonly TAbstractFile[],
   articles: {
     isArticle: (file: TFile) => boolean;
     hasArticleUnder: (folder: TFolder) => boolean;
   }
-): boolean {
-  return roots.some((entry) =>
-    entry instanceof TFolder
-      ? articles.hasArticleUnder(entry)
-      : entry instanceof TFile && articles.isArticle(entry)
-  );
+): SelectionOffers {
+  const offers: SelectionOffers = { import: false, unimport: false };
+  for (const entry of roots) {
+    if (offers.import && offers.unimport) break;
+    if (entry instanceof TFolder) {
+      offers.import = true;
+      offers.unimport ||= articles.hasArticleUnder(entry);
+    } else if (entry instanceof TFile) {
+      if (articles.isArticle(entry)) offers.unimport = true;
+      else if (isImportable(entry)) offers.import = true;
+    }
+  }
+  return offers;
 }
 
 /** `N items`, or `1 item`. */

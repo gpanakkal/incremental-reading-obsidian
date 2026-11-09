@@ -10,8 +10,7 @@ import {
 } from './candidates';
 import {
   itemCount,
-  selectionMayImport,
-  selectionMayUnimport,
+  selectionOffers,
   selectionRoots,
   selectionSource,
 } from './selection';
@@ -308,48 +307,89 @@ describe('selectionRoots', () => {
   });
 });
 
-describe('selectionMayImport', () => {
-  it('is true for a selection holding a folder, or a file of a type that imports', () => {
+describe('selectionOffers', () => {
+  /**
+   * A selection's roots, and which of them the item layer calls live
+   * articles (a file) or holders of one (a folder).
+   */
+  const offersCaseArb = selectionCaseArb.chain((vault) => {
+    const roots = selectionRoots(vault.selection);
+    return fc
+      .subarray(roots.map(({ path }) => path))
+      .map((marked) => ({ roots, marked: new Set(marked) }));
+  });
+
+  /** The item layer's answers, as `marked` has them, counted. */
+  function makeArticles(marked: ReadonlySet<string>) {
+    return {
+      isArticle: vi.fn((file: TFile) => marked.has(file.path)),
+      hasArticleUnder: vi.fn((folder: TFolder) => marked.has(folder.path)),
+    };
+  }
+
+  /** Whether `entry` is a file of a type that imports as an article. */
+  const importableFile = (entry: TAbstractFile) =>
+    entry instanceof TFile && ['md', 'pdf'].includes(entry.extension);
+
+  it('offers the import for a folder, or an importable file that is no live article, and the un-import for a live article, or a folder with one under it', () => {
     fc.assert(
-      fc.property(selectionCaseArb, ({ selection }) => {
-        expect(selectionMayImport(selection)).toBe(
-          selection.some(
+      fc.property(offersCaseArb, ({ roots, marked }) => {
+        expect(selectionOffers(roots, makeArticles(marked))).toEqual({
+          import: roots.some(
             (entry) =>
               entry instanceof TFolder ||
-              ['md', 'pdf'].includes((entry as TFile).extension)
-          )
-        );
+              (importableFile(entry) && !marked.has(entry.path))
+          ),
+          unimport: roots.some(({ path }) => marked.has(path)),
+        });
       })
     );
   });
-});
 
-describe('selectionMayUnimport', () => {
-  it('is true for a selection holding a live article, or a folder with one under it, asking each item only what fits it', () => {
+  it('never offers both for a selection of files alone, all live articles or none', () => {
+    // No file is offered to be imported and un-imported at once
     fc.assert(
-      fc.property(
-        selectionCaseArb.chain((vault) =>
-          fc
-            .subarray(vault.selection.map(({ path }) => path))
-            .map((marked) => ({ ...vault, marked: new Set(marked) }))
-        ),
-        ({ selection, marked }) => {
-          const isArticle = vi.fn((file: TFile) => marked.has(file.path));
-          const hasArticleUnder = vi.fn((folder: TFolder) =>
-            marked.has(folder.path)
-          );
+      fc.property(offersCaseArb, fc.boolean(), ({ roots }, allArticles) => {
+        const files = roots.filter((entry) => entry instanceof TFile);
+        const marked = new Set(
+          allArticles ? files.map(({ path }) => path) : []
+        );
 
-          expect(
-            selectionMayUnimport(selection, { isArticle, hasArticleUnder })
-          ).toBe(selection.some(({ path }) => marked.has(path)));
-          for (const [file] of isArticle.mock.calls) {
-            expect(file).toBeInstanceOf(TFile);
-          }
-          for (const [folder] of hasArticleUnder.mock.calls) {
-            expect(folder).toBeInstanceOf(TFolder);
-          }
-        }
-      )
+        const offers = selectionOffers(files, makeArticles(marked));
+
+        expect(offers.import && offers.unimport).toBe(false);
+      })
+    );
+  });
+
+  it('asks the item layer about each item at most once, only what fits it, and nothing once both are offered', () => {
+    fc.assert(
+      fc.property(offersCaseArb, ({ roots, marked }) => {
+        const articles = makeArticles(marked);
+
+        selectionOffers(roots, articles);
+
+        // Each is known from the first entry that offers it on
+        const importAt = roots.findIndex(
+          (entry) =>
+            entry instanceof TFolder ||
+            (importableFile(entry) && !marked.has(entry.path))
+        );
+        const unimportAt = roots.findIndex(({ path }) => marked.has(path));
+        const upTo = (index: number) =>
+          index === -1 ? roots : roots.slice(0, index + 1);
+        const bothAt =
+          importAt === -1 || unimportAt === -1
+            ? -1
+            : Math.max(importAt, unimportAt);
+        expect(articles.isArticle.mock.calls.map(([file]) => file)).toEqual(
+          upTo(bothAt).filter((entry) => entry instanceof TFile)
+        );
+        // A folder is asked about only while no un-import is known yet
+        expect(
+          articles.hasArticleUnder.mock.calls.map(([folder]) => folder)
+        ).toEqual(upTo(unimportAt).filter((entry) => entry instanceof TFolder));
+      })
     );
   });
 });
