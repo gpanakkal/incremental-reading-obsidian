@@ -7,8 +7,7 @@ import {
 import { listSource } from '#/lib/bulk-import/list-source';
 import {
   itemCount,
-  selectionMayImport,
-  selectionMayUnimport,
+  selectionOffers,
   selectionRoots,
   selectionSource,
 } from '#/lib/bulk-import/selection';
@@ -26,7 +25,8 @@ import {
   refusedPathsWarning,
   startupWarning,
 } from '#/lib/item-path-guard';
-import { checkImportable } from '#/lib/items/ArticleManager';
+import { checkImportable, liveArticleLookup } from '#/lib/items/ArticleManager';
+import { type LastCallMemo, lastCallMemo } from '#/lib/last-call-memo';
 import { appendLog } from '#/lib/log-file';
 import { getMimeType, isCopyImportable, isImportable } from '#/lib/mime';
 import { trackNavbarFootprint } from '#/lib/navbar-footprint';
@@ -333,6 +333,12 @@ export default class IncrementalReadingPlugin extends Plugin {
    * bars are registered, after the database is up.
    */
   private resyncLeafActionBars?: () => void;
+  /**
+   * Whether a file is a live article, remembered for the last file the import
+   * commands' checks asked about (see {@link isLiveArticleForCommands}).
+   * Unset until first asked.
+   */
+  private commandArticleCheck?: LastCallMemo<TFile, boolean>;
   /**
    * Explains an edit to `ir-id` that the editor guard refused. Read by
    * `irIdGuardExtension` through `irPluginFacet`, and unset until the guard is
@@ -898,6 +904,8 @@ export default class IncrementalReadingPlugin extends Plugin {
         this.resyncLeafActionBars?.();
         // Nor does what is due
         this.reviewReminder?.refresh();
+        // Nor whether the active file is an article, for the import commands
+        this.commandArticleCheck?.forget();
         // Item text is re-fetched above, but snippet highlights are cached
         // separately in the offset tracker and are just as stale: the rows they
         // came from went out with the replaced database. The event that
@@ -1404,9 +1412,13 @@ export default class IncrementalReadingPlugin extends Plugin {
     if (!file || !this.reviewManager) return;
 
     menu.addSections(['incremental-reading']);
-    // Checked by type alone: a file the plugin can't turn into an article
-    // gets no import entry at all, rather than one that fails on click.
-    const importable = isImportable(file);
+    // Asked of the database while the menu is built, which sql.js answers at
+    // once: one read decides both entries. A live article is offered its
+    // un-import and no import, its tags having no say (see `articleIdAt`). A
+    // file of a type the plugin can't turn into an article gets no import
+    // entry at all, rather than one that fails on click.
+    const isArticle = this.reviewManager.articleIdAt(file) !== null;
+    const importable = !isArticle && isImportable(file);
     if (importable) {
       menu.addItem((item) => {
         item
@@ -1436,12 +1448,11 @@ export default class IncrementalReadingPlugin extends Plugin {
           });
       });
     }
-    // Asked of the database while the menu is built, which sql.js answers at
-    // once. A note's or PDF's own ⋮ "More options" menu raises this same
+    // A note's or PDF's own ⋮ "More options" menu raises this same
     // `file-menu`, with source `more-options`, so the entry shows there too
     // (undocumented, read from obsidian.asar 1.13: `EditableFileView`'s
     // `onPaneMenu` raises it, and the markdown and PDF views extend that).
-    if (this.reviewManager.articleIdAt(file) !== null) {
+    if (isArticle) {
       menu.addItem((item) => {
         item
           .setTitle('Un-import article')
@@ -1533,8 +1544,9 @@ export default class IncrementalReadingPlugin extends Plugin {
    * The entries for a menu on several files and folders at once: **Import N
    * items…**, N counting the selection with what a selected folder covers
    * left out, when anything in it could import, and **Un-import N items…**
-   * when it holds a live article or a folder with one under it. Not in the
-   * review tab, and not before the review manager is up, as
+   * when it holds a live article or a folder with one under it; a live
+   * article alone gets no import, as on its own menu (see `selectionOffers`).
+   * Not in the review tab, and not before the review manager is up, as
    * {@link addIRMenuItems}.
    */
   addSelectionMenuItems(
@@ -1545,13 +1557,15 @@ export default class IncrementalReadingPlugin extends Plugin {
     if (leaf?.view instanceof ReviewView || !this.reviewManager) return;
     const { reviewManager } = this;
     const roots = selectionRoots(files);
-    const mayImport = selectionMayImport(roots);
     // Asked of the database while the menu is built, which sql.js answers at
     // once, as for a file's "Un-import article"
-    const mayUnimport = selectionMayUnimport(roots, {
-      isArticle: (file) => reviewManager.articleIdAt(file) !== null,
-      hasArticleUnder: (folder) => reviewManager.hasArticleUnder(folder.path),
-    });
+    const { import: mayImport, unimport: mayUnimport } = selectionOffers(
+      roots,
+      {
+        isArticle: (file) => reviewManager.articleIdAt(file) !== null,
+        hasArticleUnder: (folder) => reviewManager.hasArticleUnder(folder.path),
+      }
+    );
     if (!mayImport && !mayUnimport) return;
     menu.addSections(['incremental-reading']);
     if (mayImport) {
@@ -1886,9 +1900,12 @@ export default class IncrementalReadingPlugin extends Plugin {
    * Register a command that imports the active tab's file with `opts`.
    *
    * Unavailable until the plugin has loaded, in the review tab (whose note is
-   * already an item), with no file open, and while the open file is of a type
-   * that can't be imported (or, for a copy, copied), so the palette never lists
-   * an import that would only be refused.
+   * already an item), with no file open, while the open file is of a type
+   * that can't be imported (or, for a copy, copied), and while it is a live
+   * article, which its menu offers to un-import instead, so the palette never
+   * lists an import that would only be refused. The palette asks once as it
+   * opens; the Slash commands core plugin asks again on every key typed after
+   * its `/`, which {@link isLiveArticleForCommands} answers from memory.
    */
   private addImportCommand(
     id: string,
@@ -1914,11 +1931,35 @@ export default class IncrementalReadingPlugin extends Plugin {
         const file = this.app.workspace.getActiveFileView()?.file;
         if (!file || !isImportable(file)) return false;
         if (opts?.copyOnImport && !isCopyImportable(file)) return false;
+        if (this.isLiveArticleForCommands(file)) return false;
 
         if (checking) return true;
         void this.importArticle(file, opts);
       },
     });
+  }
+
+  /**
+   * Whether `file` is a live article (see `ReviewManager.articleIdAt`), as the
+   * import commands' checks ask it. Remembered for the last file asked about
+   * until a write to the database, a database swapped in from disk, or a change
+   * to the file's path or `ir-id`, which is all the answer depends on: the
+   * Slash commands core plugin checks every command on each key typed after
+   * its `/` (undocumented, read from obsidian.asar 1.13: its `getSuggestions`
+   * calls `listCommands` each time), which would otherwise be a read per key
+   * and per import command.
+   */
+  private isLiveArticleForCommands(file: TFile): boolean {
+    if (!this.commandArticleCheck) {
+      const { reviewManager } = this;
+      const check = lastCallMemo(
+        (of: TFile) => reviewManager.articleIdAt(of) !== null,
+        (of) => JSON.stringify([of.path, liveArticleLookup(of, this.app)])
+      );
+      this.register(reviewManager.repo.onDataChange(() => check.forget()));
+      this.commandArticleCheck = check;
+    }
+    return this.commandArticleCheck.get(file);
   }
 
   /**

@@ -1,6 +1,7 @@
 import { actionCooldownFor } from '#/lib/action-cooldown';
 import { AutoImportWatcher } from '#/lib/AutoImportWatcher';
 import {
+  ARTICLE_TAG,
   AUTO_IMPORT_DEBOUNCE_MS,
   AUTO_IMPORT_MAX_WAIT_MS,
   AUTO_IMPORT_TAG,
@@ -626,10 +627,25 @@ function makeImportCommandReceiver({
   loaded = true,
   view = null as unknown,
   showImportDialog = false,
+  articleId = null as string | null,
 } = {}) {
   const file = fileWithExtension(extension);
+  /** The file the active tab shows, while `where` is a file. */
+  let active = file;
   const importArticle = vi.fn(() => Promise.resolve());
   const importWebPage = vi.fn(() => Promise.resolve(null));
+  // The id of the live article the active file is, if any
+  const articleIdAt = vi.fn((_file: TFile): string | null => articleId);
+  /** Each file's properties, by path, as the metadata cache has them. */
+  const frontmatter = new Map<string, Record<string, unknown>>();
+  /** Who listens to the database's row changes. */
+  const dataListeners = new Set<() => void>();
+  const repo = {
+    onDataChange: vi.fn((listener: () => void) => {
+      dataListeners.add(listener);
+      return () => dataListeners.delete(listener);
+    }),
+  };
   const recordImport = vi.fn();
   /** The palette: registered commands by id, dropped again on removal. */
   const commands = new Map<
@@ -639,7 +655,8 @@ function makeImportCommandReceiver({
   const receiver = Object.assign(
     Object.create(IncrementalReadingPlugin.prototype) as object,
     {
-      reviewManager: loaded ? { importWebPage } : undefined,
+      reviewManager: loaded ? { importWebPage, articleIdAt, repo } : undefined,
+      register: vi.fn(),
       actions: { recordImport },
       settings: { defaultPriority: 30, showImportDialog },
       importArticle,
@@ -662,8 +679,16 @@ function makeImportCommandReceiver({
       ),
       app: {
         workspace: {
-          getActiveFileView: vi.fn(() => (where === 'none' ? null : { file })),
+          getActiveFileView: vi.fn(() =>
+            where === 'none' ? null : { file: active }
+          ),
           getActiveViewOfType: vi.fn(() => view),
+        },
+        metadataCache: {
+          getFileCache: vi.fn((of: TFile) => {
+            const properties = frontmatter.get(of.path);
+            return properties ? { frontmatter: properties } : null;
+          }),
         },
       },
     }
@@ -686,8 +711,18 @@ function makeImportCommandReceiver({
     file,
     importArticle,
     importWebPage,
+    articleIdAt,
     recordImport,
     run,
+    /** Show `next` in the active tab. */
+    show: (next: TFile) => {
+      active = next;
+    },
+    frontmatter,
+    /** Report a write to the database, as any does. */
+    changeData: () => {
+      for (const listener of dataListeners) listener();
+    },
   };
 }
 
@@ -1555,6 +1590,58 @@ describe('IncrementalReadingPlugin.addIRMenuItems', () => {
     );
   });
 
+  it("offers a file's imports or its un-import, never both: the un-import alone for a live article, tagged or not", () => {
+    fc.assert(
+      fc.property(
+        fc.option(fc.string(), { nil: null }),
+        fc.oneof(
+          fc.mixedCase(fc.constantFrom('md', 'pdf')),
+          unimportableExtension
+        ),
+        // The note's own properties, which have no say: the row does
+        fc.option(
+          fc.record(
+            {
+              tags: fc.array(fc.constantFrom(ARTICLE_TAG, 'other')),
+              'ir-id': fc.string(),
+            },
+            { requiredKeys: [] }
+          ),
+          { nil: undefined }
+        ),
+        fc.boolean(),
+        fc.boolean(),
+        (articleId, extension, frontmatter, advanced, withLeaf) => {
+          const file = fileWithExtension(extension);
+          const { receiver, articleIdAt } = makeReceiver({
+            advanced,
+            file,
+            articleId,
+            frontmatter,
+          });
+
+          const icons = iconsOf(
+            raiseMenu(receiver, withLeaf ? otherLeaf() : undefined, file)
+          );
+
+          // One read of the database decides both
+          expect(articleIdAt).toHaveBeenCalledExactlyOnceWith(file);
+          const imports = icons.filter((icon) => icon === PLUGIN_ICON);
+          const unimports = icons.filter((icon) => icon === 'lucide-file-x');
+          if (articleId !== null) {
+            expect(imports).toEqual([]);
+            expect(unimports).toHaveLength(1);
+            return;
+          }
+          expect(unimports).toEqual([]);
+          expect(imports.length > 0).toBe(
+            ['md', 'pdf'].includes(extension.toLowerCase())
+          );
+        }
+      )
+    );
+  });
+
   it('un-imports the file the menu was raised on', () => {
     const unimport = vi
       .spyOn(UnimportModule, 'unimportArticle')
@@ -1657,6 +1744,92 @@ describe('IncrementalReadingPlugin import commands', () => {
         run(id);
 
         expect(importArticle).not.toHaveBeenCalled();
+      })
+    );
+  });
+
+  it('offers no import on a live article, tagged or not, asking the item layer about the active file alone', () => {
+    fc.assert(
+      fc.property(
+        importCommandIds,
+        fc.mixedCase(fc.constantFrom('md', 'pdf')),
+        fc.string(),
+        fc.boolean(),
+        (id, extension, articleId, checking) => {
+          const { file, importArticle, articleIdAt, run } =
+            makeImportCommandReceiver({ extension, articleId });
+
+          expect(run(id, checking)).toBe(false);
+
+          expect(articleIdAt).toHaveBeenCalledExactlyOnceWith(file);
+          expect(importArticle).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+
+  it('asks the database once per active file and per change to it, however often the import commands are checked', () => {
+    // The Slash commands core plugin checks every command on each key typed
+    // after its `/`, so a check must not cost a read each time
+    const step = fc.oneof(
+      fc.record({ check: importCommandIds, checking: fc.boolean() }),
+      fc.constant('change data' as const),
+      fc.record({ show: fc.constantFrom('a', 'b') }),
+      fc.record({ claim: fc.option(fc.constantFrom('x', 'y'), { nil: null }) })
+    );
+    fc.assert(
+      fc.property(fc.array(step, { maxLength: 15 }), (steps) => {
+        const { articleIdAt, run, show, frontmatter, changeData } =
+          makeImportCommandReceiver();
+        const files = {
+          a: fileWithExtension('md'),
+          b: fileWithExtension('pdf'),
+        };
+        show(files.a);
+
+        // What a read answered for is remembered until any of it changes
+        let remembered: string | null = null;
+        let reads = 0;
+        let shown = files.a;
+        for (const step of steps) {
+          if (step === 'change data') {
+            changeData();
+            remembered = null;
+          } else if ('show' in step) {
+            shown = files[step.show];
+            show(shown);
+          } else if ('claim' in step) {
+            if (step.claim === null) frontmatter.delete(shown.path);
+            else frontmatter.set(shown.path, { 'ir-id': step.claim });
+          } else {
+            run(step.check, step.checking);
+            const key = JSON.stringify([
+              shown.path,
+              frontmatter.get(shown.path)?.['ir-id'] ?? null,
+            ]);
+            if (key !== remembered) {
+              reads++;
+              remembered = key;
+            }
+            expect(articleIdAt).toHaveBeenCalledTimes(reads);
+            expect(articleIdAt).toHaveBeenLastCalledWith(shown);
+          }
+        }
+      })
+    );
+  });
+
+  it('asks nothing of the database for a file it cannot import', () => {
+    fc.assert(
+      fc.property(importCommandIds, unimportableExtension, (id, extension) => {
+        const { articleIdAt, run } = makeImportCommandReceiver({
+          extension,
+          articleId: 'a',
+        });
+
+        run(id, true);
+
+        expect(articleIdAt).not.toHaveBeenCalled();
       })
     );
   });
@@ -2317,6 +2490,38 @@ describe('IncrementalReadingPlugin.addSelectionMenuItems', () => {
           expect(wired.unimportSelection).toHaveBeenCalledExactlyOnceWith(
             files
           );
+        }
+      )
+    );
+  });
+
+  it('offers to import the selection only while it holds a folder, or a file that could import and is no live article', () => {
+    fc.assert(
+      fc.property(
+        selectionArb,
+        fc.subarray(pool.map(({ path }) => path)),
+        (files, articles) => {
+          const { receiver, articleIdAt, hasArticleUnder } = makeReceiver();
+          articleIdAt.mockImplementation((file) =>
+            articles.includes(file.path) ? 'x' : null
+          );
+          hasArticleUnder.mockImplementation((path) => articles.includes(path));
+          const paths = [...new Set(files.map((file) => file.path))];
+          const kept = paths.filter(
+            (path) =>
+              path !== DATA_DIRECTORY &&
+              !path.startsWith(`${DATA_DIRECTORY}/`) &&
+              !paths.some((other) => path.startsWith(`${other}/`))
+          );
+          const offered = kept.some(
+            (path) =>
+              /^a(\/b)?$/.test(path) ||
+              (/\.(md|pdf)$/i.test(path) && !articles.includes(path))
+          );
+
+          const menu = raiseSelectionMenu(receiver, files);
+
+          expect(iconsOf(menu).includes(PLUGIN_ICON)).toBe(offered);
         }
       )
     );
