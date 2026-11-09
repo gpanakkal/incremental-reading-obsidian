@@ -6,7 +6,7 @@
 	"type": "module",
 	"scripts": {
 		"dev": "node esbuild.config.mjs",
-		"check": "tsc --noEmit --skipLibCheck",
+		"check": "tsc --noEmit --skipLibCheck && pnpm run lint:css",
 		"build": "pnpm run check && node esbuild.config.mjs production",
 		"test": "vitest run",
 		"fuzz": "vitest run --config vitest.fuzz.config.ts",
@@ -24,7 +24,8 @@
 		"e2e:docker": "node scripts/docker-e2e.mjs",
 		"e2e:repeat": "pnpm run build && node scripts/check-obsidian-version.mjs && cross-env E2E_CLEANUP=1 E2E_HEADLESS=1 pnpm exec playwright test --project e2e --repeat-each 10",
 		"format": "prettier --write \"./src/**/*.{ts,tsx}\" \"./e2e-tests/**/*.{ts,tsx}\" \"./styles.css\" && eslint --fix \"./src/**/*.{ts,tsx}\" \"./e2e-tests/**/*.{ts,tsx}\" \"./styles.css\"",
-		"lint": "eslint \"./src/**/*.{ts,tsx}\" \"./e2e-tests/**/*.{ts,tsx}\" \"./styles.css\"",
+		"lint": "eslint \"./src/**/*.{ts,tsx}\" \"./e2e-tests/**/*.{ts,tsx}\" \"./styles.css\" && pnpm run lint:css",
+		"lint:css": "cross-env BROWSERSLIST_IGNORE_OLD_DATA=1 stylelint \"./styles.css\" --max-warnings 0",
 		"version": "node version-bump.mjs && git add manifest.json versions.json package.json",
 		"release": "node scripts/release.mjs",
 		"preinstall": "npx only-allow pnpm"
@@ -78,6 +79,8 @@
 		"obsidian-typings": "npm:@obsidian-typings/obsidian-public-1.13.4@1.3.0",
 		"prettier": "~3.6.2",
 		"prettier-plugin-organize-imports": "4.3.0",
+		"stylelint": "17.16.0",
+		"stylelint-config-obsidianmd": "0.1.0",
 		"tslib": "2.4.0",
 		"typescript": "5.9.3",
 		"typescript-eslint": "8.57.1",
