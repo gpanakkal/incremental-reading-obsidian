@@ -16,6 +16,12 @@ import {
   SOURCE_PROPERTY_NAME,
   TEXT_BASE_REVIEW_INTERVAL,
 } from '#/lib/constants';
+import {
+  findPathHolder,
+  type HeldChoice,
+  type PathHolder as RowAtPath,
+} from '#/lib/crash-leftovers';
+import { getDeviceId } from '#/lib/device-id';
 import IRScheduler from '#/lib/IRScheduler';
 import {
   listChars,
@@ -48,7 +54,11 @@ import {
   outlastMerge,
   refusalReason,
 } from '#/lib/readiness';
-import { askToReassociate, type PathHolder } from '#/lib/reassociate-prompt';
+import {
+  askToReassociate,
+  askToResolveHeld,
+  type PathHolder,
+} from '#/lib/reassociate-prompt';
 import {
   applyFrontmatterLinkEdits,
   rebaseLinks,
@@ -72,6 +82,7 @@ import type {
   SnippetRow,
   SRSCardRow,
 } from '#/lib/types';
+import { refreshAfterRowPurge } from '#/lib/unimport-article';
 import {
   compareFuzzedDue,
   generateId,
@@ -83,7 +94,7 @@ import type { WebPage } from '#/lib/web-viewer';
 import { Keymap, type App, type TFile } from 'obsidian';
 import { idNotIn } from './id-exclusion';
 import { ItemManager } from './ItemManager';
-import { claimedId } from './note-holding';
+import { claimedId, heldClaim } from './note-holding';
 import { deleteRowStatements, NOT_PURGED } from './row-delete';
 import type { SnippetManager } from './SnippetManager';
 
@@ -137,6 +148,14 @@ interface ImportReport {
    * snippet's or card's note.
    */
   reassociate?: (file: TFile, holder: PathHolder) => Promise<boolean>;
+  /**
+   * Ask what to do about `holder`, the live article at the path of `file`, a
+   * note that claims no id, so holds no row (see `heldArticleLookup`): make
+   * the note that article's note, or erase the article and import the note
+   * fresh, or neither. Only an import of one file asks; a batch has no one to
+   * ask, and refuses the note, saying why.
+   */
+  resolveHeld?: (file: TFile, holder: RowAtPath) => Promise<HeldChoice>;
 }
 
 /** What an import of one file did, and the article it made or brought back. */
@@ -530,7 +549,9 @@ export class ArticleManager extends ItemManager {
    * an Undo button, which undoes the entry the caller records for the import
    * (see `Actions.recordImport`).
    * @returns what the import did, or null when nothing was imported (a file
-   * already an article among them)
+   * already an article among them), or when nothing it did is for an undo to
+   * take back: a note made the note of the article at its path, or imported
+   * in place of that article, erased for good (see {@link settleHeldPath})
    */
   async import(
     file: TFile,
@@ -553,6 +574,14 @@ export class ArticleManager extends ItemManager {
         onClick: () => void this.plugin.actions.undoImport(result),
       },
       reassociate: (given, holder) => askToReassociate(this.app, given, holder),
+      resolveHeld: (given, holder) =>
+        askToResolveHeld(
+          this.app,
+          given,
+          holder,
+          getDeviceId(this.app),
+          'no-id'
+        ),
     };
     try {
       const made = await this.importFile(
@@ -980,8 +1009,21 @@ export class ArticleManager extends ItemManager {
           ? undefined
           : () => this.alreadyAnArticle(file, id, report, writer)
       );
+    }
+    // A note claiming no id holds no row, though a live article is at its
+    // path: the user says which it is, when there is one to ask (see
+    // `heldArticleLookup`)
+    const ask =
+      refMatch && !refMatch.deleted && existingId === undefined
+        ? report.resolveHeld
+        : undefined;
+    let erased = false;
+    if (refMatch && ask) {
+      erased = await this.settleHeldPath(file, refMatch.id, ask, report);
+      if (!erased) return null;
     } else if (refMatch) {
-      // reference matches, but no ID or ID doesn't match
+      // reference matches, but the note claims another id, or the row is
+      // deleted
       // TODO: option to choose any one of the rows matching the id/reference
       report.refuse({
         notice: `Another article is already at this file path; canceling import`,
@@ -989,6 +1031,40 @@ export class ArticleManager extends ItemManager {
       });
       return null;
     }
+    try {
+      return await this.importInPlaceFresh(
+        file,
+        priority,
+        fixedIntervalDays,
+        existingId,
+        erased,
+        report,
+        writer
+      );
+    } finally {
+      // An erased row reports no change, whether or not the note then was
+      // imported in its place
+      if (erased) await refreshAfterRowPurge(this.plugin);
+    }
+  }
+
+  /**
+   * The rest of {@link importInPlace}, past the article at the note's path:
+   * relink the note to the row its `existingId` names, if it may, else make
+   * a new article where the note is. With `erased`, the note is imported in
+   * place of the article at its path, which the user erased for good (see
+   * {@link settleHeldPath}): as that can't be undone, neither can this, so
+   * its notice carries no Undo, and nothing is returned for one.
+   */
+  private async importInPlaceFresh(
+    file: TFile,
+    priority: number,
+    fixedIntervalDays: number | null,
+    existingId: string | undefined,
+    erased: boolean,
+    report: ImportReport,
+    writer: RowWriter
+  ) {
     if (existingId) {
       const rows = (await this.repo.query(
         `SELECT id, deleted, reference FROM article WHERE id = $1 AND ${NOT_PURGED}`,
@@ -1051,9 +1127,73 @@ export class ArticleManager extends ItemManager {
 
     report.confirm(
       `Imported "${titleSlice}" with ${schedulingString}`,
-      report.undo
+      erased ? undefined : report.undo
     );
-    return imported(id, 'created');
+    return erased ? null : imported(id, 'created');
+  }
+
+  /**
+   * Ask the user, through `ask`, what to do about the live article `id` at
+   * the path of `file`, a note that claims no id, then do it: make the note
+   * that article's note, keeping its schedule and history, as the leftover
+   * modal re-associates (see {@link reassociateNote}), and hand it the
+   * snippets and cards taken from the note; or erase the article for good,
+   * as the leftover modal's Erase and import fresh does
+   * (`ReviewManager.deleteRow`), for the caller to import the note in its
+   * place; or neither, which writes nothing and says nothing.
+   *
+   * The user may take a while to choose, so before writing anything, checks
+   * again that saving is allowed, that the note is where it was and still
+   * claims no id, and that the article is as it was shown; if not, it is
+   * refused, saying so. A note that couldn't be imported where it is (see
+   * `refusedInPlace`) has nothing erased for it.
+   * @returns whether the article was erased, for the caller to import the
+   *   note in its place; false once anything else is done, or nothing
+   */
+  private async settleHeldPath(
+    file: TFile,
+    id: string,
+    ask: NonNullable<ImportReport['resolveHeld']>,
+    report: ImportReport
+  ): Promise<boolean> {
+    const shown = await findPathHolder(this.repo, file.path);
+    if (shown?.id !== id) return false;
+    const choice = await ask(file, shown);
+    if (!choice) return false;
+    if (await refusedWrite(this.repo, `import "${file.name}"`)) return false;
+    const now = await findPathHolder(this.repo, file.path);
+    // Read as `importInPlace` read it: a list or a map claims no id a row
+    // can hold, as none does
+    const stillUnclaimed =
+      this.app.vault.getFileByPath(file.path) === file &&
+      (claimedId(Obsidian.getFrontMatter(file, this.app)?.['ir-id']) ??
+        undefined) === undefined;
+    if (!stillUnclaimed || JSON.stringify(now) !== JSON.stringify(shown)) {
+      Obsidian.notify(
+        `Nothing was done to "${file.basename}": the article at its path, or the note, changed while you chose. Import it again to see it as it is now.`,
+        { kind: 'error' }
+      );
+      return false;
+    }
+    if (choice === 'erase') {
+      if (refusedInPlace(file, report)) return false;
+      await this.plugin.reviewManager.deleteRow('article', id);
+      return true;
+    }
+    await this.reassociateNote(file, 'article', id);
+    try {
+      await this.claimInPlace(file, id);
+    } catch (error) {
+      console.error(error);
+      // Which says it is the article's note again, so nothing more is said
+      Obsidian.notify(
+        `"${file.basename}" is the article's note again, but the snippets and cards taken from it couldn't be adopted`,
+        { kind: 'error', persist: true }
+      );
+      return false;
+    }
+    report.confirm(`"${file.basename}" is the article's note again`);
+    return false;
   }
 
   /**
@@ -2676,10 +2816,14 @@ export class ArticleManager extends ItemManager {
 }
 
 /**
- * How to look up the live article row of `file`: for a note, the row its
- * cached `ir-id` names, and only while that row's `reference` is the note's
- * own path, as `ReviewManager.isItemFileAt` asks; for a note claiming no id,
- * or a file with no frontmatter, a PDF say, the row at its path. `null` for a
+ * How to look up the live article row of `file`, for an un-import of it: for
+ * a note, the row its cached `ir-id` names, and only while that row's
+ * `reference` is the note's own path, as `ReviewManager.isItemFileAt` asks;
+ * for a note claiming no id, or a file with no frontmatter, a PDF say, the
+ * row at its path. What offers an un-import asks {@link heldArticleLookup}
+ * instead, which a note claiming no id holds no row by, so only an
+ * un-import asked for by the row, from its queue row, finds one by its note's
+ * path. `null` for a
  * note whose `ir-id` is no string, which no row can answer to. A snippet's or
  * card's id names no article row, so their notes have none.
  *
@@ -2715,6 +2859,28 @@ export function liveArticleLookup(
     sql: 'SELECT id FROM article WHERE id = $1 AND reference = $2 AND deleted = FALSE',
     params: [id, file.path],
   };
+}
+
+/**
+ * How to look up the live article row `file` holds, for what offers its
+ * un-import instead of an import: the menus, the import commands and a bulk
+ * un-import's candidates (see `ReviewManager.articleIdAt`). As
+ * {@link liveArticleLookup}, but a note holds a row only by claiming its id:
+ * one claiming none (see `claimedId`) holds none, even at a live article's
+ * path, and is offered an import, which asks the user what to do with that
+ * article (see `ArticleManager.import`). `null` then, with nothing to look up.
+ * A file with no frontmatter, a PDF say, has nowhere to claim an id in, and
+ * is still the row at its path. The rule is `heldClaim`'s, which Go to source
+ * and Go to context find an item's note by too (`item-source`'s
+ * `itemNodeAt`), so a note offered an import is offered neither.
+ */
+export function heldArticleLookup(
+  file: TFile,
+  app: App
+): { sql: string; params: string[] } | null {
+  // A list or map claim is turned away by `liveArticleLookup` too
+  if (heldClaim(file, app) === null) return null;
+  return liveArticleLookup(file, app);
 }
 
 /**

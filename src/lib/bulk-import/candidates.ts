@@ -1,5 +1,6 @@
 import { DATA_DIRECTORY } from '#/lib/constants';
 import type { ExplorerComparator } from '#/lib/explorer-order';
+import { claimedId } from '#/lib/items/note-holding';
 import { isImportable, sniffMimeType, supportsFrontmatter } from '#/lib/mime';
 import { TFile, TFolder, type MetadataCache, type Vault } from 'obsidian';
 import type { CandidateSource, ScanEvent } from './types';
@@ -39,8 +40,9 @@ export async function isCandidate(
  * `checks` for a bulk un-import: a file is offered when it is a live article
  * (see `ReviewManager.articleIdAt`), a note by its cached `ir-id` naming the
  * row at its path, anything else by the row at its path. A snippet's or
- * card's note never is, nor a plain one, a deleted article's, or a copy of an
- * article's note. Its content is never read.
+ * card's note never is, nor a plain one, even at a live article's path, a
+ * deleted article's, or a copy of an article's note. Its content is never
+ * read.
  */
 export function unimportChecks(
   checks: CandidateChecks,
@@ -51,10 +53,15 @@ export function unimportChecks(
 
 /**
  * Whether `file` can be offered for a bulk import: a type that imports as an
- * article, outside the data directory, not an item already (a note by the
- * `ir-id` cached for it, anything else by a live row at its path), and whose
- * content is what its extension says. The cheap checks come first, so only a
- * file that passes them has its content read.
+ * article, outside the data directory, not an item already, and whose
+ * content is what its extension says. A note is an item, or a copy of one,
+ * while its cached `ir-id` claims an id (see `claimedId`), whatever the rows
+ * say, as for an un-import (see {@link unimportChecks}), so that no file is
+ * offered both: one claiming none is offered, even at a live row's path,
+ * which a batch then refuses, saying why (an import of it alone asks the
+ * user what to do with that row). Anything else is an item while a live row
+ * is at its path. The cheap checks come first, so only a file that passes
+ * them has its content read.
  */
 export async function isImportCandidate(
   file: TFile,
@@ -63,8 +70,9 @@ export async function isImportCandidate(
   if (file.path.startsWith(`${DATA_DIRECTORY}/`)) return false;
   if (!isImportable(file)) return false;
   const isItem = supportsFrontmatter(file)
-    ? typeof app.metadataCache.getFileCache(file)?.frontmatter?.['ir-id'] ===
-      'string'
+    ? typeof claimedId(
+        app.metadataCache.getFileCache(file)?.frontmatter?.['ir-id']
+      ) === 'string'
     : isItemAtPath(file);
   if (isItem) return false;
   return (await sniffMimeType(app, file)) !== null;

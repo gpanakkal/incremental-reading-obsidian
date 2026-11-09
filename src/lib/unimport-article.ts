@@ -58,7 +58,17 @@ export async function refreshAfterUnimport(
 ): Promise<void> {
   // A failed one may have lost its row before its properties failed
   if (!outcomes.some(({ status }) => status !== 'skipped')) return;
+  await refreshAfterRowPurge(plugin);
+}
 
+/**
+ * Bring what shows items up to date after any item row was deleted for good,
+ * as such a delete reports no change: refetch every cached queue page, and
+ * move review off an item whose row is gone, onto whatever is due next.
+ */
+export async function refreshAfterRowPurge(
+  plugin: IncrementalReadingPlugin
+): Promise<void> {
   await leaveCurrentItemIfPurged(plugin.reviewManager);
   // `'all'`, as `applyQueueChange` does, for pages not on screen
   await queryClient.invalidateQueries({

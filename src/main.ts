@@ -25,7 +25,7 @@ import {
   refusedPathsWarning,
   startupWarning,
 } from '#/lib/item-path-guard';
-import { checkImportable, liveArticleLookup } from '#/lib/items/ArticleManager';
+import { checkImportable, heldArticleLookup } from '#/lib/items/ArticleManager';
 import { type LastCallMemo, lastCallMemo } from '#/lib/last-call-memo';
 import { appendLog } from '#/lib/log-file';
 import { getMimeType, isCopyImportable, isImportable } from '#/lib/mime';
@@ -1417,9 +1417,11 @@ export default class IncrementalReadingPlugin extends Plugin {
     menu.addSections(['incremental-reading']);
     // Asked of the database while the menu is built, which sql.js answers at
     // once: one read decides both entries. A live article is offered its
-    // un-import and no import, its tags having no say (see `articleIdAt`). A
-    // file of a type the plugin can't turn into an article gets no import
-    // entry at all, rather than one that fails on click.
+    // un-import and no import, its tags having no say (see `articleIdAt`); a
+    // note claiming no id is none, even at a live article's path, and its
+    // import asks the user what to do with that article. A file of a type
+    // the plugin can't turn into an article gets no import entry at all,
+    // rather than one that fails on click.
     const isArticle = this.reviewManager.articleIdAt(file) !== null;
     const importable = !isArticle && isImportable(file);
     if (importable) {
@@ -1944,7 +1946,7 @@ export default class IncrementalReadingPlugin extends Plugin {
       const { reviewManager } = this;
       const check = lastCallMemo(
         (of: TFile) => reviewManager.articleIdAt(of) !== null,
-        (of) => JSON.stringify([of.path, liveArticleLookup(of, this.app)])
+        (of) => JSON.stringify([of.path, heldArticleLookup(of, this.app)])
       );
       this.register(reviewManager.repo.onDataChange(() => check.forget()));
       this.commandArticleCheck = check;

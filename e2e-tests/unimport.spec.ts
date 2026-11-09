@@ -562,45 +562,135 @@ test('leaves the article as it was when the un-import is turned down', async () 
   expect(await menuTitles(fileRow())).toContain('Un-import article');
 });
 
-test('un-imports an article whose note carries no ir-id, as one imported before notes had them', async () => {
-  const before = await articleCount();
-  await importFromFiles();
-  // A save still under way when the plugin goes is dropped, and the import
-  // with it
-  await expect.poll(() => pendingSaves(window)).toBe(0);
-  // Written with the plugin off, which would put the id straight back
-  await window.evaluate(async () => {
-    const { app } = window as unknown as { app: ReloadableApp };
-    await app.plugins.disablePlugin('incremental-reading');
-  });
-  await fs.writeFile(
-    path.join(vaultPath, NOTE),
-    NOTE_TEXT.replace('  - keep-me\n', `  - keep-me\n  - ${ARTICLE_TAG}\n`)
-  );
-  await expect.poll(cachedIrId).toBeUndefined();
-  await window.evaluate(async () => {
-    const { app } = window as unknown as { app: ReloadableApp };
-    await app.plugins.enablePlugin('incremental-reading');
-  });
-  await expect
-    .poll(() =>
-      window.evaluate(() => {
-        const { app } = window as unknown as { app: ReloadableApp };
-        return Boolean(
-          app.plugins.plugins['incremental-reading']?.reviewManager
-        );
-      })
-    )
-    .toBe(true);
+test.describe('An article whose note lost its ir-id', () => {
+  /** The question an import of the note asks about the article at its path. */
+  const question = () => window.locator('.modal-container.mod-confirmation');
 
-  expect(await menuTitles(fileRow())).toContain('Un-import article');
-  // Still with no id: the entry was offered by the row at its path
-  expect(await noteText()).not.toMatch(/ir-id/);
-  await chooseFromMenu(fileRow(), 'Un-import article');
-  await answer('Un-import');
+  /**
+   * Click `button` in the open question until it goes away, with the question
+   * it is in: Obsidian can take a click before a modal's button is wired. A
+   * question asked next, once more, has buttons of its own.
+   */
+  async function answerQuestion(button: string) {
+    const target = question().locator(`.modal-button-container ${button}`);
+    await expect(async () => {
+      if (await target.isVisible()) await target.click();
+      await expect(target).toHaveCount(0, { timeout: 2_000 });
+    }).toPass();
+  }
 
-  await expect(tagPills()).toHaveText(['keep-me']);
-  expect(await articleCount()).toBe(before);
+  /** The `ir-id` the note on disk carries, if any. */
+  const idOnDisk = async () =>
+    (await noteText()).match(/^ir-id: (.+)$/m)?.[1] ?? null;
+
+  /**
+   * Import the note, then write it again with its tags but no `ir-id`, as an
+   * article imported before notes had ids, or one whose properties were
+   * cleared, is: with the plugin off, which would put the id straight back.
+   * Imports from here on skip the import dialog, so an import of the note
+   * goes straight to its question.
+   * @returns the article's id
+   */
+  async function importAndStripId(): Promise<string> {
+    await importFromFiles();
+    const id = await cachedIrId();
+    if (typeof id !== 'string') throw new Error('The import wrote no ir-id');
+    // A save still under way when the plugin goes is dropped, and the import
+    // with it
+    await expect.poll(() => pendingSaves(window)).toBe(0);
+    await window.evaluate(async () => {
+      const { app } = window as unknown as { app: ReloadableApp };
+      await app.plugins.disablePlugin('incremental-reading');
+    });
+    await fs.writeFile(
+      path.join(vaultPath, NOTE),
+      NOTE_TEXT.replace('  - keep-me\n', `  - keep-me\n  - ${ARTICLE_TAG}\n`)
+    );
+    await expect.poll(cachedIrId).toBeUndefined();
+    await window.evaluate(async () => {
+      const { app } = window as unknown as { app: ReloadableApp };
+      await app.plugins.enablePlugin('incremental-reading');
+    });
+    await expect
+      .poll(() =>
+        window.evaluate(() => {
+          const { app } = window as unknown as { app: ReloadableApp };
+          return Boolean(
+            app.plugins.plugins['incremental-reading']?.reviewManager
+          );
+        })
+      )
+      .toBe(true);
+    await setPluginSetting(window, 'showImportDialog', false);
+    return id;
+  }
+
+  /** Import the note from its menu in Files, and wait for its question. */
+  async function importIntoQuestion() {
+    await chooseFromMenu(fileRow(), 'Import article');
+    await expect(question()).toBeVisible();
+  }
+
+  test('offers the note its import alone, which asks about the article; Cancel leaves both as they were', async () => {
+    await importAndStripId();
+    const count = await articleCount();
+    expect(await importEntryCounts(fileRow())).toEqual({
+      imports: 1,
+      unimports: 0,
+    });
+
+    await importIntoQuestion();
+    await answerQuestion('.mod-cancel');
+
+    expect(await idOnDisk()).toBeNull();
+    expect(await articleCount()).toBe(count);
+    expect(await importEntryCounts(fileRow())).toEqual({
+      imports: 1,
+      unimports: 0,
+    });
+  });
+
+  test("Re-associate makes the note the article's note again, in the queue as before, its un-import offered once more", async () => {
+    const id = await importAndStripId();
+    const count = await articleCount();
+
+    await importIntoQuestion();
+    await answerQuestion('.mod-cta');
+
+    await expect.poll(idOnDisk).toBe(id);
+    expect(await articleCount()).toBe(count);
+    expect(await importEntryCounts(fileRow())).toEqual({
+      imports: 0,
+      unimports: 1,
+    });
+    await openNote(window, NOTE);
+    await expect(actionBar()).toBeVisible();
+    await executeCommandById(window, 'incremental-reading:learn');
+    await expect(queueRow()).toHaveCount(1);
+  });
+
+  test('Erase and import fresh, once confirmed, imports the note as a new article in place of the old one', async () => {
+    const id = await importAndStripId();
+    const count = await articleCount();
+
+    await importIntoQuestion();
+    await answerQuestion('button.mod-destructive:not(.mod-cta)');
+    // Asked once more, as it can't be undone
+    await expect(question().last()).toBeVisible();
+    await answerQuestion('.mod-cta');
+
+    await expect.poll(idOnDisk).toMatch(/\S/);
+    expect(await idOnDisk()).not.toBe(id);
+    // The old one erased for good, the new one in its place
+    expect(await articleCount()).toBe(count);
+    expect(await importEntryCounts(fileRow())).toEqual({
+      imports: 0,
+      unimports: 1,
+    });
+    await executeCommandById(window, 'incremental-reading:learn');
+    await expect(queueRow()).toHaveCount(1);
+    await expect(queueRow()).toHaveAttribute('data-type', 'article');
+  });
 });
 
 test('leaves a note imported by its tag a plain note for good, with import by tag on', async () => {

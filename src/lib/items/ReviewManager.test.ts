@@ -55,6 +55,7 @@ import {
   vi,
 } from 'vitest';
 import { CardManager } from './CardManager';
+import { claimedId } from './note-holding';
 import ReviewManager from './ReviewManager';
 import { purgedReference } from './row-delete';
 
@@ -969,7 +970,8 @@ type LookupWorld =
  * The item the bar on the note at {@link BAR_PATH} owes `world`, spelled out:
  * for a note claiming an id, the live row holding that id at the note's path,
  * of whichever table; for one claiming none, the live row at its path of the
- * table its tag names; for one claiming what no row can hold, none.
+ * table its tag names, a snippet's or a card's, as an article's tag has no
+ * say; for one claiming what no row can hold, none.
  */
 function expectedLookup(
   world: Pick<LookupWorld, 'irId' | 'tag'> & {
@@ -981,6 +983,9 @@ function expectedLookup(
   const live = world.rows.filter((row) => !row.deleted);
   const { irId, tag } = world;
   if (irId === undefined || irId === '') {
+    // An article's tag on a note claiming no id has no say: the note is no
+    // live article's there, as an untagged one is none
+    if (tag === 'article') return null;
     const row = live.find(
       (r) => r.path === BAR_PATH && TYPE_OF_TABLE[r.table] === tag
     );
@@ -6087,6 +6092,72 @@ describe('ReviewManager.hasArticleUnder', () => {
     );
   });
 
+  it("counts an article only while the file at its path, if any, holds it, as an un-import from the folder finds it: a note by claiming the row's id, a file with no frontmatter by its path", () => {
+    /** What is at a row's path: nothing, a PDF, or a note holding `irId`. */
+    type AtPath =
+      | { kind: 'missing' }
+      | { kind: 'pdf' }
+      | {
+          kind: 'note';
+          irId: 'none' | '' | 0 | 'own' | 'own-number' | 'other' | 'own-list';
+        };
+    const atPathArb: fc.Arbitrary<AtPath> = fc.oneof(
+      fc.constant({ kind: 'missing' as const }),
+      fc.constant({ kind: 'pdf' as const }),
+      fc.record({
+        kind: fc.constant('note' as const),
+        irId: fc.constantFrom(
+          'none' as const,
+          '' as const,
+          0 as const,
+          'own' as const,
+          'own-number' as const,
+          'other' as const,
+          'own-list' as const
+        ),
+      })
+    );
+    fc.assert(
+      fc.property(
+        fc.array(atPathArb, { minLength: 1, maxLength: 3 }),
+        fc.constantFrom('a', '/'),
+        (atPaths, folder) => {
+          const notes: Record<string, Record<string, unknown> | null> = {};
+          const rows = atPaths.map((at, i) => {
+            // A number's string form, as `ir-id: 7` claims "7"
+            const id = String(i + 1);
+            const path = `a/n${i}.${at.kind === 'pdf' ? 'pdf' : 'md'}`;
+            if (at.kind === 'pdf') notes[path] = null;
+            if (at.kind === 'note') {
+              const irId = {
+                none: undefined,
+                '': '',
+                0: 0,
+                own: id,
+                'own-number': i + 1,
+                other: 'other',
+                'own-list': [id],
+              }[at.irId];
+              notes[path] = irId === undefined ? {} : { 'ir-id': irId };
+            }
+            return { id, path, at };
+          });
+          const wired = wireRenames(notes);
+          for (const { id, path } of rows) wired.insert('article', id, path);
+
+          expect(wired.manager.hasArticleUnder(folder)).toBe(
+            atPaths.some(
+              (at) =>
+                at.kind !== 'note' ||
+                at.irId === 'own' ||
+                at.irId === 'own-number'
+            )
+          );
+        }
+      )
+    );
+  });
+
   it("answers false for a repository that can't answer at once, which a menu can't wait on", () => {
     const repo = makeRepo();
     (repo.query as ReturnType<typeof vi.fn>).mockResolvedValue([{ 1: 1 }]);
@@ -6650,7 +6721,7 @@ describe('ReviewManager.articleIdAt', () => {
     vi.restoreAllMocks();
   });
 
-  it("answers at once with the live article a note's ir-id names, only at that article's own path", () => {
+  it("answers at once with the live article a note's ir-id names, only at that article's own path, and none for a note claiming no id, even at a live article's path", () => {
     fc.assert(
       fc.property(
         fc.constantFrom('article', 'snippet', 'srs_card' as const),
@@ -6672,14 +6743,127 @@ describe('ReviewManager.articleIdAt', () => {
           if (!sameNote && occupied) notes[reference] = { 'ir-id': 'x' };
           const { files, manager } = wireItem(table, reference, notes, deleted);
 
-          // A note claiming no id is the row's at its path, as a review
-          // fetch takes it; one claiming an id must claim the row's
-          const claimsRow = !irId || irId === 'x';
+          // A note holds a row only by claiming its id: one claiming none at
+          // a live article's path is offered an import, which asks the user
+          // what to do with the row
+          const claimsRow = irId === 'x';
           expect(manager.articleIdAt(files.get(asked)!)).toBe(
             table === 'article' && !deleted && sameNote && claimsRow
               ? 'x'
               : null
           );
+        }
+      )
+    );
+  });
+
+  it('asks nothing of the database about a note claiming no id, whatever its tags', () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom(undefined, null, '', 0, false),
+        fc.subarray([ARTICLE_TAG, 'other']),
+        fc.boolean(),
+        (irId, tags, withFrontmatter) => {
+          const frontmatter: Record<string, unknown> = { tags };
+          if (irId !== undefined) frontmatter['ir-id'] = irId;
+          const { files, repo, manager } = wireItem('article', 'a.md', {
+            'a.md': withFrontmatter ? frontmatter : null,
+          });
+          const query = vi.spyOn(repo, 'query');
+
+          expect(manager.articleIdAt(files.get('a.md')!)).toBeNull();
+          expect(query).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+
+  it("takes a note claiming no id at a live article's path for the same thing, tag or no tag: the bar, the position, the menu and the note's type all as for an untagged one", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom<unknown>(undefined, null, '', 0, false, ['x'], {
+          id: 'x',
+        }),
+        fc.subarray(['mine', 'other']),
+        fc.boolean(),
+        async (irId, otherTags, withFrontmatter) => {
+          /** What every lookup makes of the note, with or without the tag. */
+          const lookups = async (tagged: boolean) => {
+            const frontmatter: Record<string, unknown> = {
+              tags: tagged ? [...otherTags, ARTICLE_TAG] : otherTags,
+            };
+            if (irId !== undefined) frontmatter['ir-id'] = irId;
+            const { files, app, manager } = wireItem('article', 'a.md', {
+              'a.md': withFrontmatter || tagged ? frontmatter : null,
+            });
+            const file = files.get('a.md')!;
+            return {
+              type: await manager.articles.getItemType(file),
+              fromCache: await manager.articles.itemTypeFromCache(
+                file,
+                app.metadataCache.getFileCache(file)
+              ),
+              bar: (await manager.getReviewItemFromFile(file))?.data.id ?? null,
+              position: await manager.positionIdOf(file),
+              menu: manager.articleIdAt(file),
+            };
+          };
+
+          const untagged = await lookups(false);
+          expect(await lookups(true)).toEqual(untagged);
+          expect(untagged).toEqual({
+            type: null,
+            fromCache: null,
+            bar: null,
+            position: null,
+            menu: null,
+          });
+        }
+      )
+    );
+  });
+
+  it('agrees with the note bar on the article a note claiming an id is, whatever form the id takes, and on none for a note claiming none', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom<unknown>(
+          undefined,
+          null,
+          '',
+          0,
+          false,
+          'x',
+          'y',
+          7,
+          true,
+          ['x'],
+          { id: 'x' }
+        ),
+        fc.constantFrom('x', '7', 'true'),
+        fc.boolean(),
+        async (irId, rowId, tagged) => {
+          const frontmatter: Record<string, unknown> = tagged
+            ? { tags: [ARTICLE_TAG] }
+            : {};
+          if (irId !== undefined) frontmatter['ir-id'] = irId;
+          const { files, repo, manager } = wireItem('article', 'a.md', {
+            'a.md': frontmatter,
+          });
+          repo.mutate('UPDATE article SET id = $1', [rowId]);
+          const file = files.get('a.md')!;
+
+          const menu = manager.articleIdAt(file);
+          const bar = (await manager.getReviewItemFromFile(file))?.data.id;
+
+          const claim = claimedId(irId);
+          if (claim === undefined) {
+            // None, tag or no tag, at a live article's path
+            expect(menu).toBeNull();
+            expect(bar).toBeUndefined();
+          } else {
+            expect(menu).toBe(claim === rowId ? rowId : null);
+            expect(bar ?? null).toBe(menu);
+          }
         }
       )
     );

@@ -1,3 +1,4 @@
+import { heldClaim } from '#/lib/items/note-holding';
 import type { App, TFile } from 'obsidian';
 import { findNoteSource, type NoteSource } from './item-context';
 import { ObsidianHelpers as Obsidian } from './ObsidianHelpers';
@@ -42,19 +43,23 @@ function itemNodes(
 }
 
 /**
- * The item whose note `file` is, or null. As the plugin tells an item's note
- * everywhere: the row at its path, and when the note claims an `ir-id`, the
- * row with that id; a note claiming one that isn't a string is no item's.
+ * The item whose note `file` is, or null, as the menus tell which article a
+ * file is (`ReviewManager.articleIdAt`), so a note offered an import is
+ * offered no Go to source or Go to context of the row at its path: a note
+ * holds the row at its path only by claiming its id, a file with no
+ * frontmatter, a PDF say, by being there (see `heldClaim`). A note claiming
+ * no id holds nothing, even at a live item's path.
  */
 export function itemNodeAt(
   repo: SQLiteRepository,
   app: App,
   file: TFile
 ): ItemNode | null {
-  const id: unknown =
-    app.metadataCache.getFileCache(file)?.frontmatter?.['ir-id'];
-  if (!id) return itemNodes(repo, 'reference = $1', [file.path])[0] ?? null;
-  if (typeof id !== 'string') return null;
+  const id = heldClaim(file, app);
+  if (id === null) return null;
+  if (id === undefined) {
+    return itemNodes(repo, 'reference = $1', [file.path])[0] ?? null;
+  }
   return (
     itemNodes(repo, 'reference = $1 AND id = $2', [file.path, id])[0] ?? null
   );

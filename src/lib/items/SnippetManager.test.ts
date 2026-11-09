@@ -2870,7 +2870,10 @@ describe('getHighlights for a note with a database entry', () => {
     vi.restoreAllMocks();
   });
 
-  /** An article note whose snippets are reached by parent id, not backlinks. */
+  /**
+   * An article note whose snippets are reached by parent id, not backlinks:
+   * it claims its row's id, which holds its path.
+   */
   function makeArticleManager(rows: SnippetRow[]) {
     vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('article');
     // isSourceNote would still be true for a note that had snippets taken from
@@ -2879,6 +2882,10 @@ describe('getHighlights for a note with a database entry', () => {
 
     const repo = {
       query: vi.fn().mockImplementation((sql: string) => {
+        // Where the claimed id's live rows point
+        if (sql.includes('UNION ALL')) {
+          return [{ type: 'article', reference: ARTICLE.path }];
+        }
         if (sql.includes('FROM article')) return [{ id: 'article-1' }];
         if (sql.includes('WHERE parent = $1')) return rows;
         return [];
@@ -2890,8 +2897,21 @@ describe('getHighlights for a note with a database entry', () => {
       onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
 
+    const app = {
+      ...makeApp(),
+      metadataCache: {
+        getFileCache: (file: TFile) =>
+          file.path === ARTICLE.path
+            ? { frontmatter: { 'ir-id': 'article-1' } }
+            : {},
+      },
+      vault: {
+        getFileByPath: (path: string) =>
+          path === ARTICLE.path ? ARTICLE : null,
+      },
+    };
     return {
-      manager: new SnippetManager({ app: makeApp() } as never, repo),
+      manager: new SnippetManager({ app } as never, repo),
       repo,
     };
   }
@@ -3233,6 +3253,13 @@ describe('refreshAllHighlights', () => {
     const query = vi
       .fn()
       .mockImplementation((sql: string, sqlParams: unknown[]) => {
+        // Where the id an article note claims points: back at that note
+        if (sql.includes('UNION ALL')) {
+          const id = sqlParams[0] as string;
+          return [
+            { type: 'article', reference: id.slice(articleIdFor('').length) },
+          ];
+        }
         if (sql.includes('FROM article')) {
           return [{ id: articleIdFor(sqlParams[0] as string) }];
         }
@@ -3257,13 +3284,27 @@ describe('refreshAllHighlights', () => {
     } as unknown as SQLiteRepository;
 
     const trigger = vi.fn();
+    // One file per path, as the vault hands out, each article note claiming
+    // its row's id
+    const files = new Map<string, TFile>();
     const app = {
       ...makeApp(),
+      metadataCache: {
+        getFileCache: (file: TFile) => ({
+          frontmatter: { 'ir-id': articleIdFor(file.path) },
+        }),
+      },
       vault: {
-        getFileByPath: (path: string) =>
-          existing.has(path)
-            ? ({ path, extension: path.split('.').pop() } as TFile)
-            : null,
+        getFileByPath: (path: string) => {
+          if (!existing.has(path)) return null;
+          if (!files.has(path)) {
+            files.set(path, {
+              path,
+              extension: path.split('.').pop(),
+            } as TFile);
+          }
+          return files.get(path)!;
+        },
       },
       workspace: { trigger },
     };
