@@ -7,12 +7,8 @@ import { SOURCE_PROPERTY_NAME } from './constants';
 import type ReviewManager from './items/ReviewManager';
 import { getMimeType, isEditableText } from './mime';
 import { ObsidianHelpers as Obsidian } from './ObsidianHelpers';
-import {
-  type ReviewArticle,
-  type ReviewCard,
-  type ReviewSnippet,
-  isReviewSnippet,
-} from './types';
+import { markdownLinkTarget } from './source-link';
+import { type ReviewCard, type ReviewSnippet, isReviewSnippet } from './types';
 
 /**
  * The ephemeral state Obsidian's search and backlinks panes open a result
@@ -51,27 +47,42 @@ export type ItemContext = {
 };
 
 /**
- * Why an article has no source to open: its `source` property is missing or
- * blank, or it names something that is not a file in the vault — a web page,
- * or a note that has since been deleted.
+ * What a note's `source` property names: a vault file, or a web page's
+ * address (what importing from the web viewer writes).
  */
-export type MissingSourceReason = 'none' | 'outside-vault';
+export type NoteSource = { file: TFile } | { url: string };
 
 /**
- * The vault file an article was imported from, or why there is none.
+ * `source` as the address of a web page — an absolute http(s) URL, as
+ * written or with the surrounding whitespace a URL may not hold trimmed —
+ * in its normal form, or null when it is anything else.
  */
-export function findArticleSource(
-  app: App,
-  article: ReviewArticle
-): { file: TFile } | { file: null; reason: MissingSourceReason } {
-  const source = Obsidian.getFrontMatter(article.file, app)?.[
-    SOURCE_PROPERTY_NAME
-  ];
-  if (typeof source !== 'string' || source.trim() === '') {
-    return { file: null, reason: 'none' };
+export function webSourceUrl(source: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(source);
+  } catch {
+    return null;
   }
-  const file = Obsidian.getSourceFile(article.file, app);
-  return file ? { file } : { file: null, reason: 'outside-vault' };
+  return url.protocol === 'http:' || url.protocol === 'https:'
+    ? url.href
+    : null;
+}
+
+/**
+ * What `note`'s `source` property names (see {@link NoteSource}), or null
+ * when it is missing or blank, or names neither a vault file nor a web page:
+ * a note since deleted, say. A source that resolves to a vault file is that
+ * file, whatever else it might read as. A web page's address may stand bare
+ * or as a markdown link's target.
+ */
+export function findNoteSource(app: App, note: TFile): NoteSource | null {
+  const source = Obsidian.getFrontMatter(note, app)?.[SOURCE_PROPERTY_NAME];
+  if (typeof source !== 'string' || source.trim() === '') return null;
+  const file = Obsidian.getSourceFile(note, app);
+  if (file) return { file };
+  const url = webSourceUrl(markdownLinkTarget(source) ?? source);
+  return url ? { url } : null;
 }
 
 /**

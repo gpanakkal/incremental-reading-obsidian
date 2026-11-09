@@ -45,6 +45,7 @@ import {
 import { RetiredEditorPark } from '#/lib/retired-editor-park';
 import * as ReviewReminder from '#/lib/review-reminder';
 import { DEFAULT_SETTINGS } from '#/lib/settings';
+import * as sourceMenu from '#/lib/source-menu';
 import {
   resetSession,
   setCurrentItemId,
@@ -183,7 +184,13 @@ function makeReceiver({
     importArticle,
     importFromFolder: vi.fn(),
     unimportFromFolder: vi.fn(),
-    actions: { goToContext },
+    // What `addSourceMenuItems` asks: neither entry, unless a test says
+    actions: {
+      goToContext,
+      goToSource: vi.fn(),
+      hasContext: vi.fn(() => false),
+      sourceRoute: vi.fn(() => null),
+    },
   };
   return {
     receiver,
@@ -230,33 +237,6 @@ function raiseMenu(
 /** Entry icons, in the order they were added; each import carries the plugin's. */
 function iconsOf(menu: Menu) {
   return menu.items.map((item) => item.icon);
-}
-
-/** A click on a menu entry: any button Obsidian reports one for, any keys. */
-const menuClickArb = fc.record({
-  button: fc.constantFrom(0, 1),
-  ctrlKey: fc.boolean(),
-  metaKey: fc.boolean(),
-  altKey: fc.boolean(),
-  shiftKey: fc.boolean(),
-});
-
-/**
- * Where Obsidian opens a link clicked that way: a middle click is a new tab
- * whatever keys are held; Ctrl/Cmd is a new tab, +Alt a split, +Alt+Shift a
- * window; anything else is the tab the user is in.
- */
-function paneFor(click: {
-  button: number;
-  ctrlKey: boolean;
-  metaKey: boolean;
-  altKey: boolean;
-  shiftKey: boolean;
-}): string | false {
-  if (click.button === 1) return 'tab';
-  if (!click.ctrlKey && !click.metaKey) return false;
-  if (!click.altKey) return 'tab';
-  return click.shiftKey ? 'window' : 'split';
 }
 
 /**
@@ -1444,32 +1424,42 @@ describe('IncrementalReadingPlugin.addIRMenuItems', () => {
     expect(menu.items).toHaveLength(0);
   });
 
-  it("offers the context of a note that carries an item's id, and of no other", () => {
+  it('offers Go to context and Go to source for the file, as they decide, outside review', () => {
     fc.assert(
-      fc.property(
-        fc.option(
-          fc.dictionary(
-            fc.constantFrom('ir-id', 'tags', 'source', 'other'),
-            fc.oneof(fc.string(), fc.integer(), fc.constant(null))
-          ),
-          { nil: undefined }
-        ),
-        fc.boolean(),
-        (frontmatter, withLeaf) => {
-          const { receiver } = makeReceiver({ frontmatter });
+      fc.property(fc.constantFrom('none', 'other', 'review'), (leafKind) => {
+        vi.restoreAllMocks();
+        const addSource = vi
+          .spyOn(sourceMenu, 'addSourceMenuItems')
+          .mockImplementation(() => {});
+        const { receiver, file } = makeReceiver();
+        const leaf = {
+          none: undefined,
+          other: otherLeaf(),
+          review: reviewLeaf(),
+        }[leafKind];
 
-          const menu = raiseMenu(receiver, withLeaf ? otherLeaf() : undefined);
+        const menu = raiseMenu(receiver, leaf, file!);
 
-          const entry = menu.items.find((i) => i.title === 'Go to context');
-          if (typeof frontmatter?.['ir-id'] === 'string') {
-            expect(entry?.section).toBe('incremental-reading');
-            expect(entry?.icon).toBe('lucide-locate');
-          } else {
-            expect(entry).toBeUndefined();
-          }
+        if (leafKind === 'review') {
+          expect(addSource).not.toHaveBeenCalled();
+        } else {
+          expect(addSource).toHaveBeenCalledExactlyOnceWith(
+            receiver,
+            menu,
+            file
+          );
         }
-      )
+      })
     );
+  });
+
+  it('offers neither until the plugin has loaded', () => {
+    const addSource = vi.spyOn(sourceMenu, 'addSourceMenuItems');
+    const { receiver } = makeReceiver({ imported: false });
+
+    raiseMenu(receiver);
+
+    expect(addSource).not.toHaveBeenCalled();
   });
 
   it('offers no import on a file whose type it cannot import', () => {
@@ -1521,35 +1511,6 @@ describe('IncrementalReadingPlugin.addIRMenuItems', () => {
           });
         }
       )
-    );
-  });
-
-  it('goes to the context of the note the menu was raised on', () => {
-    const { receiver, goToContext, file } = makeReceiver({
-      frontmatter: { 'ir-id': 'abc' },
-    });
-    const menu = raiseMenu(receiver);
-
-    click(menu.items.find((i) => i.title === 'Go to context'));
-
-    expect(goToContext).toHaveBeenCalledExactlyOnceWith(file, false);
-  });
-
-  it('goes to the context where a modified click asks', () => {
-    fc.assert(
-      fc.property(menuClickArb, (init) => {
-        const { receiver, goToContext, file } = makeReceiver({
-          frontmatter: { 'ir-id': 'abc' },
-        });
-        const menu = raiseMenu(receiver);
-
-        menu.items.find((i) => i.title === 'Go to context')?.callback?.(init);
-
-        expect(goToContext).toHaveBeenCalledExactlyOnceWith(
-          file,
-          paneFor(init)
-        );
-      })
     );
   });
 

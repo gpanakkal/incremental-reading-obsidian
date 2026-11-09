@@ -962,10 +962,10 @@ test.describe('Review history navigation', () => {
       await actions.click();
 
       const menu = window.locator('.menu');
+      // No Go to context: an article has none
       for (const entry of [
         'Source mode',
         'Open in new tab',
-        'Go to context',
         'Rename...',
         'Delete',
       ]) {

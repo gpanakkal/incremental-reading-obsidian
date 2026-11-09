@@ -2,7 +2,9 @@
 import type { QueueRow } from '#/components/types';
 import * as DeleteMissingItemModule from '#/lib/delete-missing-item';
 import * as ItemContextModule from '#/lib/item-context';
+import type { SourceRoute } from '#/lib/item-source';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
+import * as SourceMenuModule from '#/lib/source-menu';
 import type { MaybeMissingItem, ReviewItem } from '#/lib/types';
 import * as UnimportArticleModule from '#/lib/unimport-article';
 import type { Menu, MenuItem } from '#/test/__mocks__/obsidian';
@@ -40,13 +42,39 @@ function makeItem(type: RowType, file: TFile | null = makeFile()) {
   return { data: { id: 'a1', type }, file } as unknown as ReviewItem;
 }
 
+/** What the item's source is reached through, by `SourceRoute` kind. */
+const ROUTES: Record<SourceRoute['kind'], SourceRoute> = {
+  file: { kind: 'file', file: makeFile('sources/book.md') },
+  'web-viewer': {
+    kind: 'web-viewer',
+    url: 'https://x.test/a',
+    viewer: {} as never,
+  },
+  browser: { kind: 'browser', url: 'https://x.test/a' },
+};
+
+/** The icon Go to source's entry takes for each route. */
+const ROUTE_ICONS: Record<SourceRoute['kind'], string> = {
+  file: 'lucide-file-symlink',
+  'web-viewer': 'lucide-globe-2',
+  browser: 'lucide-external-link',
+};
+
 /**
  * A plugin whose collaborators the menu reaches are spies: each lookup
- * answers `item`, and every leaf the workspace hands out is `leaf`.
+ * answers `item`, and every leaf the workspace hands out is `leaf`. The
+ * row's item has a context iff `context`, and its source is reached by
+ * `route` (none when null).
  */
 function makePlugin({
   item = null as MaybeMissingItem | null,
-}: { item?: MaybeMissingItem | null } = {}) {
+  context = false,
+  route = null as SourceRoute | null,
+}: {
+  item?: MaybeMissingItem | null;
+  context?: boolean;
+  route?: SourceRoute | null;
+} = {}) {
   const leaf = { openFile: vi.fn().mockResolvedValue(undefined) };
   const explorer = { revealInFolder: vi.fn() };
   return {
@@ -64,7 +92,10 @@ function makePlugin({
       getItemOrMissingFromId: vi.fn().mockResolvedValue(item),
     },
     actions: {
+      hasContext: vi.fn().mockReturnValue(context),
       goToContext: vi.fn().mockResolvedValue(undefined),
+      sourceRoute: vi.fn().mockReturnValue(route),
+      goToSource: vi.fn().mockResolvedValue(undefined),
       dismissItem: vi.fn().mockResolvedValue(undefined),
     },
   };
@@ -91,6 +122,8 @@ const rowArb = fc.record({
   parent: fc.option(fc.constantFrom('notes/parent.md', 'https://x.test/a'), {
     nil: null,
   }),
+  context: fc.boolean(),
+  route: fc.option(fc.constantFrom(...Object.values(ROUTES)), { nil: null }),
 });
 
 // #endregion
@@ -108,22 +141,25 @@ describe('queue row menu entries', () => {
 
   it('offers each row the entries that apply to its type and file, destructive ones as warnings', () => {
     fc.assert(
-      fc.property(rowArb, ({ type, hasFile, parent }) => {
+      fc.property(rowArb, ({ type, hasFile, parent, context, route }) => {
         const row = makeQueueRow({
           type,
           file: hasFile ? makeFile() : null,
           parent,
         });
 
-        const menu = menuFor(makePlugin(), row);
+        const menu = menuFor(makePlugin({ context, route }), row);
 
         const expected = [
           ...(hasFile ? [['lucide-file-plus', 'open', false, false]] : []),
           ...(hasFile && parent !== null
             ? [['lucide-corner-left-up', 'open', false, false]]
             : []),
-          ...(hasFile && type !== 'article'
+          ...(hasFile && context
             ? [['lucide-locate', 'open', false, false]]
+            : []),
+          ...(hasFile && route
+            ? [[ROUTE_ICONS[route.kind], 'open', false, false]]
             : []),
           ...(hasFile ? [['lucide-folder-open', 'open', false, false]] : []),
           ...(hasFile && type !== 'card'
@@ -158,8 +194,8 @@ describe('queue row menu entries', () => {
     );
     const unimport = vi.spyOn(UnimportArticleModule, 'unimportArticle');
     fc.assert(
-      fc.property(rowArb, ({ type, hasFile, parent }) => {
-        const plugin = makePlugin();
+      fc.property(rowArb, ({ type, hasFile, parent, context, route }) => {
+        const plugin = makePlugin({ context, route });
 
         menuFor(
           plugin,
@@ -173,6 +209,7 @@ describe('queue row menu entries', () => {
           plugin.reviewManager.getItemOrMissingFromId
         ).not.toHaveBeenCalled();
         expect(plugin.actions.goToContext).not.toHaveBeenCalled();
+        expect(plugin.actions.goToSource).not.toHaveBeenCalled();
         expect(plugin.explorer.revealInFolder).not.toHaveBeenCalled();
       })
     );
@@ -222,18 +259,25 @@ describe('queue row menu actions', () => {
     [undefined, false],
     [{ ctrlKey: true }, 'tab'],
   ])(
-    'goes to a snippet’s or card’s context through review’s own action, where the click asks (%o)',
+    'goes to the row’s context and source through review’s own actions, where the click asks (%o)',
     (evt, newLeaf) => {
-      for (const type of ['snippet', 'card'] as const) {
-        const plugin = makePlugin();
+      for (const route of Object.values(ROUTES)) {
+        const plugin = makePlugin({ context: true, route });
         const file = makeFile();
+        const menu = menuFor(plugin, makeQueueRow({ type: 'snippet', file }));
 
-        entry(
-          menuFor(plugin, makeQueueRow({ type, file })),
-          'lucide-locate'
-        ).callback?.(evt);
+        entry(menu, 'lucide-locate').callback?.(evt);
+        entry(menu, ROUTE_ICONS[route.kind]).callback?.(evt);
 
+        expect(plugin.actions.hasContext).toHaveBeenCalledExactlyOnceWith(file);
+        expect(plugin.actions.sourceRoute).toHaveBeenCalledExactlyOnceWith(
+          file
+        );
         expect(plugin.actions.goToContext).toHaveBeenCalledExactlyOnceWith(
+          file,
+          newLeaf
+        );
+        expect(plugin.actions.goToSource).toHaveBeenCalledExactlyOnceWith(
           file,
           newLeaf
         );
@@ -241,11 +285,28 @@ describe('queue row menu actions', () => {
     }
   );
 
+  it('offers Go to context and Go to source as review’s ⋮ menu decides them, in the open section', () => {
+    const addSource = vi.spyOn(SourceMenuModule, 'addSourceMenuItems');
+    fc.assert(
+      fc.property(rowArb, ({ type, hasFile, parent }) => {
+        addSource.mockClear();
+        const plugin = makePlugin();
+        const file = hasFile ? makeFile() : null;
+
+        const menu = menuFor(plugin, makeQueueRow({ type, file, parent }));
+
+        expect(addSource.mock.calls).toEqual(
+          hasFile ? [[plugin, menu, file, 'open']] : []
+        );
+      })
+    );
+  });
+
   it('opens an article’s source note in a new tab', async () => {
     const source = makeFile('sources/book.md');
     const article = makeItem('article');
     const findSource = vi
-      .spyOn(ItemContextModule, 'findArticleSource')
+      .spyOn(ItemContextModule, 'findNoteSource')
       .mockReturnValue({ file: source });
     const findContext = vi.spyOn(ItemContextModule, 'findContextFile');
     const plugin = makePlugin({ item: article });
@@ -257,7 +318,10 @@ describe('queue row menu actions', () => {
     await settle();
 
     expect(plugin.reviewManager.getReviewItemFromId).toHaveBeenCalledWith('a1');
-    expect(findSource).toHaveBeenCalledExactlyOnceWith(plugin.app, article);
+    expect(findSource).toHaveBeenCalledExactlyOnceWith(
+      plugin.app,
+      article.file
+    );
     expect(findContext).not.toHaveBeenCalled();
     expect(plugin.app.workspace.getLeaf).toHaveBeenCalledExactlyOnceWith('tab');
     expect(plugin.leaf.openFile).toHaveBeenCalledExactlyOnceWith(source, {
@@ -273,7 +337,7 @@ describe('queue row menu actions', () => {
       const findContext = vi
         .spyOn(ItemContextModule, 'findContextFile')
         .mockResolvedValue(parent);
-      const findSource = vi.spyOn(ItemContextModule, 'findArticleSource');
+      const findSource = vi.spyOn(ItemContextModule, 'findNoteSource');
       const plugin = makePlugin({ item });
 
       entry(
@@ -296,33 +360,36 @@ describe('queue row menu actions', () => {
 
   it('says so, and opens nothing, when the item has no parent or source note left', async () => {
     const notify = vi.spyOn(Obsidian, 'notify').mockImplementation(() => {});
-    vi.spyOn(ItemContextModule, 'findArticleSource').mockReturnValue({
-      file: null,
-      reason: 'outside-vault',
-    });
+    const findSource = vi.spyOn(ItemContextModule, 'findNoteSource');
     vi.spyOn(ItemContextModule, 'findContextFile').mockResolvedValue(null);
     await fc.assert(
-      fc.asyncProperty(fc.constantFrom(...TYPES), async (type) => {
-        notify.mockClear();
-        const plugin = makePlugin({ item: makeItem(type) });
-        const file = makeFile('notes/Row title.md');
+      fc.asyncProperty(
+        fc.constantFrom(...TYPES),
+        // An article's source that is none, or a web page: nothing in the vault
+        fc.constantFrom(null, { url: 'https://x.test/a' }),
+        async (type, source) => {
+          notify.mockClear();
+          findSource.mockReturnValue(source);
+          const plugin = makePlugin({ item: makeItem(type) });
+          const file = makeFile('notes/Row title.md');
 
-        entry(
-          menuFor(plugin, makeQueueRow({ type, file, parent: 'p.md' })),
-          'lucide-corner-left-up'
-        ).callback?.(undefined);
-        await settle();
+          entry(
+            menuFor(plugin, makeQueueRow({ type, file, parent: 'p.md' })),
+            'lucide-corner-left-up'
+          ).callback?.(undefined);
+          await settle();
 
-        expect(plugin.leaf.openFile).not.toHaveBeenCalled();
-        expect(notify).toHaveBeenCalledTimes(1);
-        expect(notify.mock.calls[0][0]).toContain('Row title');
-      })
+          expect(plugin.leaf.openFile).not.toHaveBeenCalled();
+          expect(notify).toHaveBeenCalledTimes(1);
+          expect(notify.mock.calls[0][0]).toContain('Row title');
+        }
+      )
     );
   });
 
   it('says so, and does nothing else, when the row’s item is gone by the time an entry is picked', async () => {
     const notify = vi.spyOn(Obsidian, 'notify').mockImplementation(() => {});
-    const findSource = vi.spyOn(ItemContextModule, 'findArticleSource');
+    const findSource = vi.spyOn(ItemContextModule, 'findNoteSource');
     const findContext = vi.spyOn(ItemContextModule, 'findContextFile');
     const open = vi
       .spyOn(SchedulingModal.prototype, 'open')

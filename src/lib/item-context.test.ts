@@ -1,10 +1,11 @@
 import {
   backlinkRange,
-  findArticleSource,
   findContextFile,
+  findNoteSource,
   highlightRange,
   resolveItemContext,
   revealPdfContext,
+  webSourceUrl,
 } from '#/lib/item-context';
 import type ReviewManager from '#/lib/items/ReviewManager';
 import { ObsidianHelpers } from '#/lib/ObsidianHelpers';
@@ -16,12 +17,7 @@ import {
 } from '#/lib/pdf/pdf-anchor';
 import type { PdfPageText } from '#/lib/pdf/pdf-text';
 import * as pdfText from '#/lib/pdf/pdf-text';
-import type {
-  ReviewArticle,
-  ReviewCard,
-  ReviewItem,
-  ReviewSnippet,
-} from '#/lib/types';
+import type { ReviewCard, ReviewItem, ReviewSnippet } from '#/lib/types';
 import fc from 'fast-check';
 import type {
   App,
@@ -344,6 +340,76 @@ const crossPageCaseArb = fc
       }));
   });
 
+/** Whitespace a source could be written with around its value. */
+const blankArb = fc.string({ unit: fc.constantFrom(' ', '\t', '\n') });
+
+/**
+ * A web page's address as an article's `source` could hold it: http or
+ * https, its scheme in either case, whitespace around it or not; with the
+ * address it names, in its normal form.
+ */
+const webSourceArb = fc
+  .tuple(
+    fc.webUrl({ withQueryParameters: true, withFragments: true }),
+    fc.boolean(),
+    blankArb,
+    blankArb
+  )
+  .map(([url, upper, before, after]) => ({
+    source:
+      before +
+      (upper ? url.replace(/^https?/, (s) => s.toUpperCase()) : url) +
+      after,
+    url: new URL(url).href,
+  }));
+
+/**
+ * A web page's address held as a markdown link's target, bare or in angle
+ * brackets, maybe with whitespace around the link; with the address it
+ * names, in its normal form.
+ */
+const markdownWebSourceArb = fc
+  .tuple(
+    fc
+      .webUrl({ withQueryParameters: true, withFragments: true })
+      // A bare target's round brackets must balance
+      .filter((url) => !/[()]/.test(url)),
+    fc.string().filter((alias) => !/[[\]]/.test(alias)),
+    fc.boolean(),
+    blankArb
+  )
+  .map(([url, alias, angled, around]) => ({
+    source: `${around}[${alias}](${angled ? `<${url}>` : url})${around}`,
+    url: new URL(url).href,
+  }));
+
+/**
+ * A `source` that names no web page: an address of another scheme, a link
+ * or path into the vault, or any text with no scheme at all.
+ */
+const nonWebSourceArb = fc.oneof(
+  fc.webUrl({
+    validSchemes: ['ftp', 'file', 'obsidian', 'mailto', 'javascript', 'ws'],
+  }),
+  fc.constantFrom(
+    '[[Note]]',
+    '[[sources/Book.pdf|Book]]',
+    '[Page](https://example.com)',
+    'notes/Book.pdf',
+    'www.example.com',
+    'https//example.com',
+    'javascript:alert(1)',
+    'JavaScript:alert(1)',
+    'file:///C:/notes/Book.pdf',
+    'obsidian://open?vault=Vault&file=Note',
+    'data:text/html,<p>page</p>',
+    'about:blank',
+    'mailto:someone@example.com',
+    'https://exa mple.com'
+  ),
+  fc.string().filter((s) => !s.includes(':'))
+);
+
 // #endregion
 
 afterEach(() => {
@@ -611,62 +677,103 @@ describe('resolveItemContext', () => {
   });
 });
 
-describe('findArticleSource', () => {
-  it('is the vault file the source names, else why there is none', () => {
+describe('webSourceUrl', () => {
+  it('property: is the address of a web page, in its normal form', () => {
+    fc.assert(
+      fc.property(webSourceArb, ({ source, url }) => {
+        expect(webSourceUrl(source)).toBe(url);
+      })
+    );
+  });
+
+  it('property: is an address safe to open whatever text its path, query or fragment holds, unchanged when normalized again', () => {
+    fc.assert(
+      fc.property(
+        fc.webUrl({ withQueryParameters: true, withFragments: true }),
+        fc.constantFrom('/', '?', '#'),
+        fc.string({ unit: 'grapheme' }),
+        (url, separator, text) => {
+          const result = webSourceUrl(url + separator + text);
+
+          // Spaces and characters beyond ASCII percent-encoded
+          expect(result).toMatch(/^https?:\/\/[!-~]+$/);
+          expect(webSourceUrl(result!)).toBe(result);
+        }
+      )
+    );
+  });
+
+  it('percent-encodes spaces and unicode, and writes an international domain in punycode', () => {
+    expect(webSourceUrl('https://bücher.example/a b/ü?q=é#ß')).toBe(
+      'https://xn--bcher-kva.example/a%20b/%C3%BC?q=%C3%A9#%C3%9F'
+    );
+  });
+
+  it('property: is nothing for a source that names no web page', () => {
+    fc.assert(
+      fc.property(nonWebSourceArb, (source) => {
+        expect(webSourceUrl(source)).toBeNull();
+      })
+    );
+  });
+});
+
+describe('findNoteSource', () => {
+  it('property: is the vault file the source names, else the web page it names, else nothing', () => {
     fc.assert(
       fc.property(
         fc.oneof(
-          fc.constant(undefined),
-          fc.string({ unit: fc.constantFrom(' ', '\t', '\n') }),
-          fc.string(),
-          fc.integer(),
-          fc.array(fc.string(), { maxLength: 2 })
+          fc.constant({ source: undefined, url: null }),
+          fc
+            .oneof(
+              blankArb,
+              fc.integer(),
+              fc.array(fc.string(), { maxLength: 2 })
+            )
+            .map((source) => ({ source, url: null })),
+          webSourceArb,
+          markdownWebSourceArb,
+          nonWebSourceArb
+            // A markdown link to a web page names it here
+            .filter((source) => !source.startsWith('[Page]('))
+            .map((source) => ({ source, url: null }))
         ),
         fc.boolean(),
-        (source, resolves) => {
+        ({ source, url }, resolves) => {
           vi.restoreAllMocks();
-          const article = {
-            data: { id: 'article-1', type: 'article' },
-            file: makeTFile('ir/articles/Article.md'),
-          } as unknown as ReviewArticle;
+          const note = makeTFile('ir/articles/Article.md');
           const sourceFile = makeTFile('sources/Book.pdf');
           const getSourceFile = vi
             .spyOn(ObsidianHelpers, 'getSourceFile')
             .mockReturnValue(resolves ? sourceFile : null);
           const app = makeApp();
           app.metadataCache.getFileCache.mockImplementation((file: TFile) =>
-            file === article.file
+            file === note
               ? { frontmatter: source === undefined ? {} : { source } }
               : null
           );
 
-          const result = findArticleSource(app, article);
+          const result = findNoteSource(app, note);
 
           if (typeof source !== 'string' || source.trim() === '') {
-            expect(result).toEqual({ file: null, reason: 'none' });
+            expect(result).toBeNull();
             return;
           }
-          expect(getSourceFile).toHaveBeenCalledWith(article.file, app);
-          expect(result).toEqual(
-            resolves
-              ? { file: sourceFile }
-              : { file: null, reason: 'outside-vault' }
-          );
+          expect(getSourceFile).toHaveBeenCalledWith(note, app);
+          if (resolves) {
+            expect(result).toEqual({ file: sourceFile });
+          } else {
+            expect(result).toEqual(url === null ? null : { url });
+          }
         }
       )
     );
   });
 
-  it('is none when the article has no metadata cached', () => {
-    const article = {
-      data: { id: 'article-1', type: 'article' },
-      file: makeTFile('ir/articles/Article.md'),
-    } as unknown as ReviewArticle;
-
-    expect(findArticleSource(makeApp(), article)).toEqual({
-      file: null,
-      reason: 'none',
-    });
+  it('is nothing when the note has no metadata cached', () => {
+    expect(
+      findNoteSource(makeApp(), makeTFile('ir/articles/Article.md'))
+    ).toBeNull();
   });
 });
 

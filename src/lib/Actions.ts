@@ -31,10 +31,15 @@ import { createEmitter } from './emitter';
 import IRScheduler from './IRScheduler';
 import {
   type ItemContext,
-  findArticleSource,
   resolveItemContext,
   revealPdfContext,
 } from './item-context';
+import {
+  type SourceRoute,
+  findItemSource,
+  hasContext as itemHasContext,
+  routeSource,
+} from './item-source';
 import type { CardSelection } from './items/CardManager';
 import { NO_SNIPPET_FROM_CARD } from './items/SnippetManager';
 import { getMimeType } from './mime';
@@ -1171,8 +1176,8 @@ export class Actions {
    * Open the location of a snippet's highlight or a card's embed in its parent.
    * If the highlight or embed doesn't exist, fall back to opening the parent.
    * If there's no parent and the source is a local link, open the source.
-   *
-   * An article opens its source, if that is a file in the vault.
+   * An article has no context: its source is Go to source's (see
+   * {@link goToSource}).
    *
    * Takes the item's note rather than a view, since it is reached from
    * anywhere a file menu opens — the file explorer included, where no view
@@ -1180,8 +1185,8 @@ export class Actions {
    *
    * Opens where the user is, as following a link does: in review, a context
    * that is an item is shown in review (see `ReviewView.interceptOpenFile`),
-   * at the highlight or link when it is known. One review can't show — an
-   * article's source, a note that is no item — opens in a new tab instead, as
+   * at the highlight or link when it is known. One review can't show — a
+   * note that is no item — opens in a new tab instead, as
    * Go to context always did, rather than put review out of its tab. Either
    * way, a snippet's highlight in a note flashes for a moment, where it is
    * known (see `flashSnippetContext` and `markContextFlash`); one in a PDF is
@@ -1203,25 +1208,13 @@ export class Actions {
       return;
     }
 
-    if (isReviewArticle(item)) {
-      const source = findArticleSource(this.plugin.app, item);
-      if (source.file === null) {
-        Obsidian.notify(
-          source.reason === 'none'
-            ? `"${itemTitle}" has no source`
-            : `The source of "${itemTitle}" is outside the vault`
+    const context = isReviewArticle(item)
+      ? null
+      : await resolveItemContext(
+          this.plugin.app,
+          this.plugin.reviewManager,
+          item
         );
-        return;
-      }
-      await this._openFile(source.file, null, newLeaf);
-      return;
-    }
-
-    const context = await resolveItemContext(
-      this.plugin.app,
-      this.plugin.reviewManager,
-      item
-    );
     if (!context) {
       Obsidian.notify(`"${itemTitle}" has no parent or local source to open`);
       return;
@@ -1234,6 +1227,52 @@ export class Actions {
       await revealPdfContext(leaf.view, context.pdfRange);
     } else if (leaf && snippet) {
       flashSnippetContext(leaf.view, snippet, context);
+    }
+  };
+
+  /**
+   * Whether the item at `file` has a context for {@link goToContext} to
+   * open: what offers Go to context. Never waits, for a menu being built.
+   */
+  hasContext = (file: TFile): boolean =>
+    itemHasContext(this.plugin.reviewManager.repo, this.plugin.app, file);
+
+  /**
+   * How {@link goToSource} opens the source of the item at `file`, or null
+   * when it has none: what offers Go to source, and names its entry (see
+   * `goToSourceTitle`). Never waits, for a menu being built.
+   */
+  sourceRoute = (file: TFile): SourceRoute | null => {
+    const { app, reviewManager } = this.plugin;
+    const source = findItemSource(reviewManager.repo, app, file);
+    return source && routeSource(app, source);
+  };
+
+  /**
+   * Open where the item at `file` came from at first: its article's source,
+   * as {@link sourceRoute} says. A vault file opens as following a link to it
+   * would (see {@link _openFile}); a web page in the web viewer, or the
+   * system's browser when the web viewer doesn't open links.
+   * @param newLeaf where to open it instead: a new tab, split or window, as
+   *   `Keymap.isModEvent` answers for a modified or middle click
+   */
+  goToSource = async (file: TFile, newLeaf: PaneType | boolean = false) => {
+    const itemTitle = getContentSlice(
+      file.basename,
+      CONTENT_TITLE_SLICE_LENGTH,
+      true
+    );
+    const route = this.sourceRoute(file);
+    if (!route) {
+      Obsidian.notify(`"${itemTitle}" has no source to open`);
+      return;
+    }
+    if (route.kind === 'file') {
+      await this._openFile(route.file, null, newLeaf);
+      return;
+    }
+    if (!this._openUrl(route, newLeaf)) {
+      Obsidian.notify(`Couldn't open the source of "${itemTitle}"`);
     }
   };
 
@@ -1482,6 +1521,46 @@ export class Actions {
     }
     await leaf.openFile(file, openState);
     return leaf;
+  };
+
+  /**
+   * Open a web page as `route` says: in Obsidian's web viewer, in the leaf
+   * `Workspace.getLeaf(newLeaf)` picks, as {@link _openFile} opens a file — a
+   * new tab instead when that leaf is review's, rather than replace review —
+   * or in the system's browser. A web viewer that fails hands the page to
+   * the system's browser instead.
+   * @returns whether the page was handed to either
+   */
+  _openUrl = (
+    route: Exclude<SourceRoute, { kind: 'file' }>,
+    newLeaf: PaneType | boolean
+  ): boolean => {
+    const { app } = this.plugin;
+    if (route.kind === 'web-viewer') {
+      try {
+        // `getLeaf(false)` makes the leaf it picks active, so the web viewer
+        // asking again picks the same one
+        const inReview =
+          !newLeaf &&
+          app.workspace.getLeaf(false) === this.plugin.getOpenReviewLeaf();
+        route.viewer.openUrl(route.url, inReview ? 'tab' : newLeaf, true);
+        return true;
+      } catch (error) {
+        console.warn(
+          "Incremental Reading: the web viewer can't open the page",
+          error
+        );
+      }
+    }
+    try {
+      // Desktop hands an http(s) address to the system's browser, the web
+      // viewer not taking links
+      window.open(route.url);
+      return true;
+    } catch (error) {
+      console.warn("Incremental Reading: can't open the page", error);
+      return false;
+    }
   };
 
   /**

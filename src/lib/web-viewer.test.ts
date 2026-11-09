@@ -1,6 +1,12 @@
 import fc from 'fast-check';
+import { type App, Platform } from 'obsidian';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { asWebViewer, readWebPage } from './web-viewer';
+import {
+  asWebViewer,
+  enabledWebViewer,
+  linkWebViewer,
+  readWebPage,
+} from './web-viewer';
 
 // #region HELPERS
 /**
@@ -22,6 +28,21 @@ const memberArb = fc.oneof(
   fc.constant(() => undefined),
   fc.func(fc.anything())
 );
+
+/**
+ * An app whose internal plugins answer `answer` for an enabled plugin, or
+ * throw it when `throws`.
+ */
+function makeApp(answer: unknown, throws = false) {
+  const getEnabledPluginById = vi.fn((_id: string) => {
+    if (throws) throw answer;
+    return answer;
+  });
+  return {
+    app: { internalPlugins: { getEnabledPluginById } } as unknown as App,
+    getEnabledPluginById,
+  };
+}
 // #endregion
 
 describe('asWebViewer', () => {
@@ -163,5 +184,91 @@ describe('readWebPage', () => {
         }
       )
     );
+  });
+});
+
+describe('enabledWebViewer', () => {
+  it("is the web viewer plugin's instance while it is on and opens pages", () => {
+    const instance = { openUrl: vi.fn() };
+    const { app, getEnabledPluginById } = makeApp(instance);
+
+    expect(enabledWebViewer(app)).toBe(instance);
+    expect(getEnabledPluginById).toHaveBeenCalledExactlyOnceWith('webviewer');
+  });
+
+  it('property: is nothing for any other answer, an instance that cannot open pages among them', () => {
+    fc.assert(
+      fc.property(
+        fc.oneof(
+          fc.anything(),
+          fc.record({ openUrl: fc.anything() }, { requiredKeys: [] })
+        ),
+        (answer) => {
+          fc.pre(
+            !(
+              typeof answer === 'object' &&
+              answer !== null &&
+              'openUrl' in answer &&
+              typeof answer.openUrl === 'function'
+            )
+          );
+
+          expect(enabledWebViewer(makeApp(answer).app)).toBeNull();
+        }
+      )
+    );
+  });
+
+  it('property: is nothing when asking for it throws', () => {
+    fc.assert(
+      fc.property(fc.anything(), (thrown) => {
+        expect(enabledWebViewer(makeApp(thrown, true).app)).toBeNull();
+      })
+    );
+  });
+
+  it('is nothing when the app has no internal plugins to ask', () => {
+    expect(enabledWebViewer({} as App)).toBeNull();
+  });
+});
+
+describe('linkWebViewer', () => {
+  afterEach(() => {
+    Platform.isMobileApp = false;
+  });
+
+  it('property: is the web viewer exactly when it is on and set to open external links, never on the mobile app', () => {
+    fc.assert(
+      fc.property(
+        fc.boolean(),
+        fc.boolean(),
+        fc.oneof(
+          fc.constant(undefined),
+          fc.anything(),
+          fc.record({ openExternalURLs: fc.anything() }, { requiredKeys: [] }),
+          fc.record({ openExternalURLs: fc.boolean() })
+        ),
+        (mobileApp, enabled, options) => {
+          Platform.isMobileApp = mobileApp;
+          const instance = { openUrl: vi.fn(), options };
+          const { app } = makeApp(enabled ? instance : null);
+
+          const opensLinks =
+            typeof options === 'object' &&
+            options !== null &&
+            'openExternalURLs' in options &&
+            options.openExternalURLs === true;
+          expect(linkWebViewer(app)).toBe(
+            !mobileApp && enabled && opensLinks ? instance : null
+          );
+        }
+      )
+    );
+  });
+
+  it('is the web viewer when it is on and set to open external links, on desktop', () => {
+    const instance = { openUrl: vi.fn(), options: { openExternalURLs: true } };
+
+    expect(linkWebViewer(makeApp(instance).app)).toBe(instance);
   });
 });
