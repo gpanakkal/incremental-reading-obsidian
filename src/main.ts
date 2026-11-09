@@ -169,6 +169,18 @@ import ReviewView from './views/ReviewView';
  * data loss.
  */
 export function startupFailureMessage(error: unknown): string {
+  if (error instanceof DatabaseLoadError && error.newerCopyPaths.length > 0) {
+    const kept = error.corruptCopyPath
+      ? ` The damaged file was kept at ${error.corruptCopyPath}.`
+      : '';
+    return (
+      `Incremental reading: the database file ${error.dbFilePath} is ` +
+      `missing or damaged, and the only local copies that could replace it ` +
+      `(${error.newerCopyPaths.join(', ')}) were written by a newer version ` +
+      `of the plugin, so the plugin did not start and left them as they ` +
+      `were. Update the plugin to load them.${kept}`
+    );
+  }
   if (error instanceof DatabaseLoadError && error.corruptCopyPath) {
     return (
       `Incremental reading: the database file ${error.dbFilePath} holds no ` +
@@ -206,16 +218,46 @@ export function recoveryMessage(
       ? ''
       : ` Changes made after that copy was saved are missing; Obsidian ` +
         `Sync's version history for the file may hold a newer copy.`;
+  // Kept aside after a plugin downgrade; nothing loads them on its own
+  const newer =
+    report.newerCopyPaths.length === 0
+      ? ''
+      : ` A copy written by a newer version of the plugin was kept at ` +
+        `${report.newerCopyPaths.join(', ')}; updating the plugin again ` +
+        `will not bring it back by itself.`;
+  // Saves wait on these; `savesPausedMessage` says so too
+  const stuck =
+    report.stuckNewerCopyPaths.length === 0
+      ? ''
+      : ` A copy written by a newer version of the plugin could not be ` +
+        `moved aside and is still at ` +
+        `${report.stuckNewerCopyPaths.join(', ')}, so the plugin cannot ` +
+        `save until it is moved or removed. Updating the plugin may load it.`;
   if (report.corruptCopyPath === null) {
     return (
       `Incremental reading: the database file ${dbFilePath} was not there, so ` +
-      `it was restored from ${from}.${missing}`
+      `it was restored from ${from}.${missing}${newer}${stuck}`
     );
   }
   return (
     `Incremental reading: the database file ${dbFilePath} held no database ` +
     `(it may have been cut short), so it was restored from ${from}. ` +
-    `The damaged file was kept at ${report.corruptCopyPath}.${missing}`
+    `The damaged file was kept at ${report.corruptCopyPath}.` +
+    `${missing}${newer}${stuck}`
+  );
+}
+
+/**
+ * The notice for saves failing on copies from a newer plugin version that
+ * could not be moved aside (see `SQLJSRepository.#keepNewerCopies`).
+ */
+export function savesPausedMessage(stuckPaths: readonly string[]): string {
+  return (
+    `Incremental reading: changes are not being saved. A copy of the ` +
+    `database written by a newer version of the plugin, at ` +
+    `${stuckPaths.join(', ')}, could not be moved aside, and saving would ` +
+    `write over it. Move or remove it to resume saving; see the console ` +
+    `for the error.`
   );
 }
 
@@ -774,6 +816,7 @@ export default class IncrementalReadingPlugin extends Plugin {
 
   private async initReviewManager() {
     let writesBlockedNotice: NoticeTarget | null = null;
+    let savesPausedNotice: NoticeTarget | null = null;
     // An instance unloaded while its database starts — by an update installed
     // in place, say, while startup waits on Sync — must not go on to migrate
     // and save after the instance replacing it has loaded the file
@@ -822,6 +865,15 @@ export default class IncrementalReadingPlugin extends Plugin {
       },
       onRecovered: (report) => {
         persistentNotice(recoveryMessage(DATABASE_FILE_PATH, report));
+      },
+      // Up until a save gets past the copy, as for `onWriteBlocked`
+      onSavesPaused: (stuckPaths) => {
+        savesPausedNotice?.hide();
+        savesPausedNotice = persistentNotice(savesPausedMessage(stuckPaths));
+      },
+      onSavesResumed: () => {
+        savesPausedNotice?.hide();
+        savesPausedNotice = null;
       },
       onWritesResumed: () => {
         writesBlockedNotice?.hide();

@@ -47,6 +47,7 @@ import {
   dbFilePaths,
   fingerprintOf,
   isDatabaseBuffer,
+  schemaVersionOf,
   writeDatabaseFile,
   type DbFilePaths,
   type FileFingerprint,
@@ -131,17 +132,22 @@ function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
 }
 
 /**
- * The database file is on disk but could not be loaded. Nothing was written
- * to it.
+ * The database file is on disk but could not be loaded, or is missing or
+ * damaged and only copies from a newer plugin version could stand in for it.
+ * Nothing was written to it.
  */
 export class DatabaseLoadError extends Error {
   /**
    * @param corruptCopyPath where a file that held no database was copied
    * before no local copy could stand in for it (see `#recover`)
+   * @param newerCopyPaths the local copies (`tmp`, `prev`) that hold a
+   * database from a newer plugin version, left where they are: the only ones
+   * that could have stood in for the file (see `#loadLocalCopy`)
    */
   constructor(
     readonly dbFilePath: string,
-    readonly corruptCopyPath: string | null = null
+    readonly corruptCopyPath: string | null = null,
+    readonly newerCopyPaths: readonly string[] = []
   ) {
     super(`Db file found at ${dbFilePath}, but failed to load`);
     this.name = 'DatabaseLoadError';
@@ -166,6 +172,32 @@ export interface RecoveryReport {
    * copy: it was missing, and a local copy stood in for it.
    */
   corruptCopyPath: string | null;
+  /**
+   * Where each local copy from a newer plugin version that saves would have
+   * written over (`tmp`, `prev`) was moved aside (see `#keepNewerCopies`).
+   * Nothing loads it from there, a newer plugin included.
+   */
+  newerCopyPaths: string[];
+  /**
+   * Those copies that could not be moved aside, still at their own paths:
+   * saves fail until they are moved (`onSavesPaused` says so), and a newer
+   * plugin's own recovery may still load them.
+   */
+  stuckNewerCopyPaths: string[];
+}
+
+/** The local copy loaded in place of the database file. */
+type LocalCopy = Pick<RecoveryReport, 'source' | 'path'>;
+
+/** What recovery loaded, before it looks for copies to move aside. */
+type RestoredCopy = Omit<
+  RecoveryReport,
+  'newerCopyPaths' | 'stuckNewerCopyPaths'
+>;
+
+/** The schema version this plugin version migrates databases up to. */
+function latestSchemaVersion(): number {
+  return migrations[migrations.length - 1].version;
 }
 
 /** A file that opened as something other than a whole database. */
@@ -280,6 +312,15 @@ export class SQLJSRepository implements SQLiteRepository {
   #onWriteBlocked?: (error: Error) => void;
   #onWritesResumed?: () => void;
   /**
+   * Told when saves start failing on a copy from a newer plugin version
+   * that could not be moved aside (see {@link #keepNewerCopies}), once
+   * until a move succeeds, which `#onSavesResumed` is told of.
+   */
+  #onSavesPaused?: (stuckPaths: readonly string[]) => void;
+  #onSavesResumed?: () => void;
+  /** Whether `#onSavesPaused` was told and `#onSavesResumed` not since. */
+  #savesPaused = false;
+  /**
    * Whether `db` is a new database made because no file was on disk at
    * startup, rather than one loaded from the file. Its saves wait on one
    * check that the path is still free; see {@link save}.
@@ -299,6 +340,22 @@ export class SQLJSRepository implements SQLiteRepository {
   #restoredPending = false;
   /** The check, made by the first save, of a restored database's path. */
   #restoredPathCheck: Promise<void> | null = null;
+  /**
+   * Whether `tmp` and `prev` may hold a database from a newer plugin version
+   * that the next file write must move aside first (see
+   * {@link #keepNewerCopies}): set once startup has looked for a local copy
+   * in place of the live file, which is when a plugin downgrade finds them.
+   */
+  #newerCheckPending = false;
+  /**
+   * The local copies {@link #loadLocalCopy} passed over as from a newer
+   * plugin version, at their own paths.
+   */
+  #newerFound: string[] = [];
+  /** Where {@link #keepNewerCopies} moved copies from a newer version. */
+  #newerKept: string[] = [];
+  /** Copies from a newer version {@link #keepNewerCopies} could not move. */
+  #newerStuck: string[] = [];
   /** Set by {@link dispose}; nothing is read from or written to disk after. */
   #disposed = false;
   /** Settles {@link #whenDisposed}. */
@@ -396,6 +453,8 @@ export class SQLJSRepository implements SQLiteRepository {
     onReloadFromDisk?: () => void | Promise<void>;
     onWriteBlocked?: (error: Error) => void;
     onWritesResumed?: () => void;
+    onSavesPaused?: (stuckPaths: readonly string[]) => void;
+    onSavesResumed?: () => void;
     onRecovered?: (report: RecoveryReport) => void;
     backupFailurePrompt?: BackupFailurePrompt;
     /** Stands in for this install's id (see `getDeviceId`), for tests. */
@@ -420,6 +479,8 @@ export class SQLJSRepository implements SQLiteRepository {
     this.onReloadFromDisk = params.onReloadFromDisk;
     this.#onWriteBlocked = params.onWriteBlocked;
     this.#onWritesResumed = params.onWritesResumed;
+    this.#onSavesPaused = params.onSavesPaused;
+    this.#onSavesResumed = params.onSavesResumed;
     this.handleFileChange = this.handleFileChange.bind(this) as (
       file: TAbstractFile
     ) => Promise<void>;
@@ -438,6 +499,9 @@ export class SQLJSRepository implements SQLiteRepository {
    * @param onWritesResumed called when a reload ends the refusal
    * @param onRecovered called once startup has put a local copy in place of
    * a file that held no database (see `#recover`)
+   * @param onSavesPaused called when saves start failing on a copy from a
+   * newer plugin version that could not be moved aside, once until a move
+   * succeeds, which `onSavesResumed` is called for
    * @param holdForSync awaited before migrating the file, after which a wait
    * has the file read afresh: Sync may have delivered a newer one meanwhile.
    * Not awaited on a startup with nothing to migrate, a new database
@@ -462,6 +526,8 @@ export class SQLJSRepository implements SQLiteRepository {
     onReloadFromDisk?: () => void | Promise<void>;
     onWriteBlocked?: (error: Error) => void;
     onWritesResumed?: () => void;
+    onSavesPaused?: (stuckPaths: readonly string[]) => void;
+    onSavesResumed?: () => void;
     onRecovered?: (report: RecoveryReport) => void;
     backupFailurePrompt?: BackupFailurePrompt;
     holdForSync?: SyncHold;
@@ -515,7 +581,7 @@ export class SQLJSRepository implements SQLiteRepository {
           // A file from a newer plugin version, or one that can't be read,
           // may hold everything: left alone
           if (!repo.#loadDamaged) throw new DatabaseLoadError(repo.dbFilePath);
-          let report: RecoveryReport;
+          let report: RestoredCopy;
           try {
             report = await repo.#recover();
           } finally {
@@ -529,7 +595,7 @@ export class SQLJSRepository implements SQLiteRepository {
       // before a new database does (0217). Sync may bring the file down
       // meanwhile, which its first save then merges (see `save`)
       repo.#restoredPending = true;
-      let restored: Omit<RecoveryReport, 'corruptCopyPath'> | null;
+      let restored: LocalCopy | null;
       try {
         restored = await repo.#loadLocalCopy();
       } finally {
@@ -544,6 +610,11 @@ export class SQLJSRepository implements SQLiteRepository {
           assertLive
         );
         return repo;
+      }
+      // A downgraded plugin: what a new database's save would write over
+      // holds everything, for the plugin version that wrote it to load
+      if (repo.#newerFound.length > 0) {
+        throw new DatabaseLoadError(repo.dbFilePath, null, repo.#newerFound);
       }
       const created = await repo.initDb();
       assertLive();
@@ -665,7 +736,7 @@ export class SQLJSRepository implements SQLiteRepository {
    * @throws {DatabaseLoadError} if nothing loads, or the copy fails
    * @throws {MigrationVerificationError} if migrating a copy loses data
    */
-  async #recover(): Promise<RecoveryReport> {
+  async #recover(): Promise<RestoredCopy> {
     const { live } = this.#paths;
     const corruptCopyPath = this.#paths.corrupt(new Date(this.#stampClock()));
     try {
@@ -678,7 +749,13 @@ export class SQLJSRepository implements SQLiteRepository {
       throw new DatabaseLoadError(this.#dbFilePath);
     }
     const loaded = await this.#loadLocalCopy();
-    if (!loaded) throw new DatabaseLoadError(this.#dbFilePath, corruptCopyPath);
+    if (!loaded) {
+      throw new DatabaseLoadError(
+        this.#dbFilePath,
+        corruptCopyPath,
+        this.#newerFound
+      );
+    }
     return { ...loaded, corruptCopyPath };
   }
 
@@ -687,16 +764,21 @@ export class SQLJSRepository implements SQLiteRepository {
    * of {@link #recover}: `tmp`, `prev`, then the backups newest first.
    * Startup's Sync hold is dropped: it would read the live file again,
    * which is the file being stood in for.
+   *
+   * A copy from a newer plugin version is passed over, as after a plugin
+   * downgrade; `tmp` and `prev`, which saves write over, are noted in
+   * {@link #newerFound}, and every file write from here on first moves them
+   * aside (see {@link #keepNewerCopies}), the migration save of the copy
+   * loaded below included.
    * @returns what was loaded, or null if nothing was
    * @throws {MigrationVerificationError} if migrating a copy loses data
    */
-  async #loadLocalCopy(): Promise<Omit<
-    RecoveryReport,
-    'corruptCopyPath'
-  > | null> {
+  async #loadLocalCopy(): Promise<LocalCopy | null> {
     this.#syncHold = undefined;
+    this.#newerCheckPending = true;
+    this.#newerFound = [];
     const { live, tmp, prev } = this.#paths;
-    const candidates: Array<Omit<RecoveryReport, 'corruptCopyPath'>> = [
+    const candidates: LocalCopy[] = [
       { source: 'tmp', path: tmp },
       { source: 'prev', path: prev },
       ...(await this.#listBackups()).map((path) => ({
@@ -712,7 +794,14 @@ export class SQLJSRepository implements SQLiteRepository {
         continue; // not there
       }
       // `reloadDb` refuses these too; skipped here without its error log
-      if (!isDatabaseBuffer(new Uint8Array(bytes))) continue;
+      const whole = new Uint8Array(bytes);
+      if (!isDatabaseBuffer(whole)) continue;
+      if (schemaVersionOf(whole) > latestSchemaVersion()) {
+        if (candidate.source !== 'backup') {
+          this.#newerFound.push(candidate.path);
+        }
+        continue;
+      }
       // Loads nothing once disposed
       const loaded = await this.reloadDb(bytes, true);
       if (loaded) {
@@ -734,13 +823,18 @@ export class SQLJSRepository implements SQLiteRepository {
    * then prune and tell `onRecovered`.
    */
   async #finishRecovery(
-    report: RecoveryReport,
+    restored: RestoredCopy,
     known: WriteVector | null,
     knownEpoch: number | null,
     assertLive: () => void
   ) {
     // Before the save below bumps this device's stamp
     this.#classifyAtStartup(known, knownEpoch);
+    // Even while writes are refused, so the report says where they are
+    const keeping = this.#fileWrites.then(() => this.#keepNewerCopies());
+    this.#fileWrites = keeping.catch(() => undefined);
+    await keeping.catch(() => undefined); // logged; saves try again
+    assertLive();
     // `save` logs its own failure, and the next write saves again. Not
     // while writes are refused: a file met at the path refused them, and
     // its hold saves (see `#holdDamaged`)
@@ -748,7 +842,78 @@ export class SQLJSRepository implements SQLiteRepository {
     assertLive();
     await this.applyRetention();
     assertLive();
-    this.#onRecovered?.(report);
+    this.#onRecovered?.({
+      ...restored,
+      newerCopyPaths: [...this.#newerKept],
+      stuckNewerCopyPaths: [...this.#newerStuck],
+    });
+  }
+
+  /**
+   * Move `tmp` and `prev` aside wherever one holds a whole database from a
+   * newer plugin version, before a file write after {@link #loadLocalCopy}
+   * would write over it: after a plugin downgrade, the only local copy of
+   * that version's data. Reads them afresh rather than going by what
+   * `#loadLocalCopy` read, which may have met a write still under way. Done
+   * once both are clear. Nothing is moved once disposed.
+   * @throws if one could not be moved, which the write must not go past
+   */
+  async #keepNewerCopies() {
+    if (!this.#newerCheckPending) return;
+    this.#newerStuck = [];
+    let failure: Error | null = null;
+    for (const source of ['tmp', 'prev'] as const) {
+      const path = this.#paths[source];
+      let bytes: Uint8Array;
+      try {
+        bytes = new Uint8Array(await this.adapter.readBinary(path));
+      } catch {
+        continue; // not there
+      }
+      if (!isDatabaseBuffer(bytes)) continue;
+      const version = schemaVersionOf(bytes);
+      if (version <= latestSchemaVersion()) continue;
+      // Left for the instance that replaced this one, which may be the
+      // newer version, loading it; the write this was for is dropped
+      if (this.#disposed) return;
+      const keptAt = this.#paths.newer(
+        source,
+        version,
+        new Date(this.#stampClock())
+      );
+      try {
+        // Obsidian's adapter renames a hidden file on disk alone, raising
+        // no vault event, and refuses a destination that is there
+        await this.adapter.rename(path, keptAt);
+      } catch (error: unknown) {
+        console.error(
+          'Incremental Reading - Could not move aside a copy of the ' +
+            'database file from a newer plugin version; not saving over it:',
+          { path, version, error }
+        );
+        this.#newerStuck.push(path);
+        failure ??= error instanceof Error ? error : new Error(String(error));
+        continue;
+      }
+      this.#newerKept.push(keptAt);
+      console.warn(
+        'Incremental Reading - Moved aside a copy of the database file from ' +
+          'a newer plugin version, which saves would have written over:',
+        { from: path, to: keptAt, version }
+      );
+    }
+    if (failure !== null) {
+      if (!this.#savesPaused) {
+        this.#savesPaused = true;
+        this.#onSavesPaused?.([...this.#newerStuck]);
+      }
+      throw failure;
+    }
+    this.#newerCheckPending = false;
+    if (this.#savesPaused) {
+      this.#savesPaused = false;
+      this.#onSavesResumed?.();
+    }
   }
 
   /**
@@ -1313,7 +1478,7 @@ export class SQLJSRepository implements SQLiteRepository {
         ? readFileStamps(
             this.#sql,
             new Uint8Array(bytes),
-            migrations[migrations.length - 1].version
+            latestSchemaVersion()
           )
         : { stamp: 'unreadable', epoch: NEVER_RESTORED };
       return { bytes, ...stamps };
@@ -2047,17 +2212,17 @@ export class SQLJSRepository implements SQLiteRepository {
       // the last right before the live file is replaced: a save waiting on
       // another's write must not land after a reload or a newer instance
       // took the file on (0217)
-      const write = this.#fileWrites.then(() =>
-        writeDatabaseFile(
+      const stillCurrent = () => !this.#disposed && this.db === source;
+      const write = this.#fileWrites.then(async () => {
+        // Not for a write that is dropped anyway
+        if (stillCurrent()) await this.#keepNewerCopies();
+        return writeDatabaseFile(
           this.app.vault.adapter,
           this.#paths,
           data as ArrayBuffer,
-          {
-            stillCurrent: () => !this.#disposed && this.db === source,
-            knownGood: () => this.#knownGood,
-          }
-        )
-      );
+          { stillCurrent, knownGood: () => this.#knownGood }
+        );
+      });
       this.#fileWrites = write.catch(() => undefined);
       const written = await write;
       if (!written.landed) return;
@@ -2277,8 +2442,7 @@ export class SQLJSRepository implements SQLiteRepository {
       const loadedEpoch = readRestoreEpoch(candidate);
 
       const currentDbVersion = getSchemaVersion(candidate);
-      const latestSchemaVersion = migrations[migrations.length - 1].version;
-      if (currentDbVersion > latestSchemaVersion) {
+      if (currentDbVersion > latestSchemaVersion()) {
         throw new Error(
           `Plugin is out of date with the database. ` +
             `Please ensure the plugin is fully updated, then re-enable it.`

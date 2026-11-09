@@ -60,6 +60,7 @@ import {
 } from '#/lib/watched-folder-ledger';
 import IncrementalReadingPlugin, {
   recoveryMessage,
+  savesPausedMessage,
   startupFailureMessage,
   STILL_STARTING_NOTICE,
 } from '#/main';
@@ -5173,6 +5174,27 @@ describe('startupFailureMessage', () => {
     );
   });
 
+  it('property: names every copy from a newer version of the plugin, in a message of its own, when only those hold a database', () => {
+    fc.assert(
+      fc.property(
+        fc.string(),
+        fc.option(fc.string({ minLength: 1 })),
+        fc.array(fc.string({ minLength: 1 }), { minLength: 1, maxLength: 2 }),
+        (path, copy, newer) => {
+          const message = startupFailureMessage(
+            new DatabaseLoadError(path, copy, newer)
+          );
+          expect(message).toContain(path);
+          for (const newerPath of newer) expect(message).toContain(newerPath);
+          if (copy !== null) expect(message).toContain(copy);
+          expect(message).not.toBe(
+            startupFailureMessage(new DatabaseLoadError(path, copy))
+          );
+        }
+      )
+    );
+  });
+
   it.each([new Error('boom'), 'not an error', undefined])(
     'falls back to a general message for %s',
     (error) => {
@@ -5189,19 +5211,50 @@ describe('recoveryMessage', () => {
     .string()
     .filter((path) => !path.includes('missing') && !path.includes('null'));
 
-  it('property: names the file, what it was restored from and any damaged copy, and says changes may be missing unless the save under way was restored', () => {
+  it('property: names the file, what it was restored from, any damaged copy and any copy from a newer version, and says changes may be missing unless the save under way was restored', () => {
     fc.assert(
       fc.property(
         pathArb,
         fc.constantFrom('tmp' as const, 'prev' as const, 'backup' as const),
         pathArb,
         fc.option(pathArb),
-        (dbFilePath, source, path, corruptCopyPath) => {
+        fc.array(pathArb, { maxLength: 2 }),
+        fc.array(pathArb, { maxLength: 2 }),
+        (
+          dbFilePath,
+          source,
+          path,
+          corruptCopyPath,
+          newerCopyPaths,
+          stuckNewerCopyPaths
+        ) => {
+          const restored = { source, path, corruptCopyPath };
           const message = recoveryMessage(dbFilePath, {
-            source,
-            path,
-            corruptCopyPath,
+            ...restored,
+            newerCopyPaths,
+            stuckNewerCopyPaths,
           });
+          for (const newer of [...newerCopyPaths, ...stuckNewerCopyPaths]) {
+            expect(message).toContain(newer);
+          }
+          const without = (moved: string[], stuck: string[]): string =>
+            recoveryMessage(dbFilePath, {
+              ...restored,
+              newerCopyPaths: moved,
+              stuckNewerCopyPaths: stuck,
+            });
+          expect(message === without([], stuckNewerCopyPaths)).toBe(
+            newerCopyPaths.length === 0
+          );
+          expect(message === without(newerCopyPaths, [])).toBe(
+            stuckNewerCopyPaths.length === 0
+          );
+          // A copy still in place is told apart from one moved aside
+          if (stuckNewerCopyPaths.length > 0) {
+            expect(message).not.toBe(
+              without([...newerCopyPaths, ...stuckNewerCopyPaths], [])
+            );
+          }
           expect(message).toContain(dbFilePath);
           expect(message).toContain(path);
           if (corruptCopyPath === null) {
@@ -5210,6 +5263,20 @@ describe('recoveryMessage', () => {
             expect(message).toContain(corruptCopyPath);
           }
           expect(message.includes('missing')).toBe(source !== 'tmp');
+        }
+      )
+    );
+  });
+});
+
+describe('savesPausedMessage', () => {
+  it('property: names every copy from a newer version of the plugin that saves wait on', () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.string({ minLength: 1 }), { minLength: 1, maxLength: 2 }),
+        (paths) => {
+          const message = savesPausedMessage(paths);
+          for (const path of paths) expect(message).toContain(path);
         }
       )
     );
