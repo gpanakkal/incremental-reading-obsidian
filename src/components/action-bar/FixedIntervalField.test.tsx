@@ -4,6 +4,12 @@ import {
   MINIMUM_FIXED_REVIEW_INTERVAL,
 } from '#/lib/constants';
 import IRScheduler from '#/lib/IRScheduler';
+import {
+  insert,
+  insertionArb,
+  isFiltered,
+  selectionOf,
+} from '#/test/text-insertion';
 import fc from 'fast-check';
 import { type ComponentChild, h, render } from 'preact';
 import { act } from 'preact/test-utils';
@@ -33,18 +39,22 @@ function field(
   return { root, input, onBlur };
 }
 
+const ASCII_DIGITS = /[0-9]/g;
+
+/** The ASCII digits of `text`, in order. */
+const digitsOf = (text: string) => (text.match(ASCII_DIGITS) ?? []).join('');
+
 /**
- * Types `text` over the field's contents, as one edit, and returns what the
- * field reads back from it: a number input drops text that is no number.
+ * Puts `text` over the field's contents, as one edit that reaches the input
+ * without a `beforeinput` the field can cancel (a drop, an IME composition,
+ * autofill), and returns what the field keeps of it: its digits.
  */
 function type(input: HTMLInputElement, text: string): string {
-  let read = '';
   void act(() => {
     input.value = text;
-    read = input.value;
     input.dispatchEvent(new Event('input', { bubbles: true }));
   });
-  return read;
+  return digitsOf(text);
 }
 
 function press(input: HTMLInputElement, key: string) {
@@ -127,9 +137,11 @@ function noOpArb(interval: number): fc.Arbitrary<string> {
   const options = [notAnIntervalArb];
   if (interval <= MAXIMUM_FIXED_REVIEW_INTERVAL) {
     options.push(
-      fc.constantFrom(`${interval}`, `0${interval}`, `-${interval}`),
-      // Fractions are cut off
-      fc.stringMatching(/^\d{1,2}$/).map((tail) => `${interval}.${tail}`)
+      fc.constantFrom(`${interval}`, `0${interval}`),
+      // Whatever is not a digit is dropped
+      fc
+        .tuple(notAnIntervalArb, notAnIntervalArb)
+        .map(([before, after]) => `${before}${interval}${after}`)
     );
   }
   // Clamped down or up into range
@@ -141,7 +153,7 @@ function noOpArb(interval: number): fc.Arbitrary<string> {
     );
   }
   if (interval === MINIMUM_FIXED_REVIEW_INTERVAL) {
-    options.push(fc.constantFrom('0', '-0', '0.5', '-1'));
+    options.push(fc.constantFrom('0', '-0', '00', '-1'));
   }
   return fc.oneof(...options);
 }
@@ -230,6 +242,72 @@ describe('FixedIntervalField', () => {
         }
       )
     );
+  });
+
+  it('shows only the digits of text put into it, beside what it had, caret after them', () => {
+    fc.assert(
+      fc.property(intervalArb, insertionArb, (interval, insertion) => {
+        const { input, onBlur } = field({ initialInterval: interval });
+        const held = interval ?? MINIMUM_FIXED_REVIEW_INTERVAL;
+        const before = input.value;
+        const [start, end] = selectionOf(before, insertion);
+        const { text } = insertion;
+        const digits = digitsOf(text);
+
+        void act(() => {
+          insert(input, insertion);
+        });
+
+        const filtered = isFiltered(insertion);
+        if (filtered && digits === '' && text !== '') {
+          // Nothing happens, as for any key the input ignores
+          expect(input.value).toBe(before);
+          expect([input.selectionStart, input.selectionEnd]).toEqual([
+            start,
+            end,
+          ]);
+        } else {
+          const kept = before.slice(0, start) + digits + before.slice(end);
+          const next = keptAfterTyping(held, kept);
+          // Cleaned up to the interval it makes, as any edit is
+          const shownText = next === held ? kept : String(next);
+          expect(input.value).toBe(shownText);
+          if (filtered && shownText === kept) {
+            const caret = start + digits.length;
+            expect([input.selectionStart, input.selectionEnd]).toEqual([
+              caret,
+              caret,
+            ]);
+          }
+          blur(input);
+          expect(onBlur).toHaveBeenCalledExactlyOnceWith(next);
+        }
+        document.body.innerHTML = '';
+      })
+    );
+  });
+
+  it('keeps the digits typed around a character it drops', () => {
+    const { input, onBlur } = field({ initialInterval: 7 });
+    const typeKey = (text: string) =>
+      void act(() => {
+        insert(input, {
+          inputType: 'insertText',
+          text,
+          via: 'data',
+          cancelable: true,
+          anchor: input.selectionStart!,
+          head: input.selectionEnd!,
+        });
+      });
+    input.select();
+
+    for (const key of '1a2') typeKey(key);
+
+    expect(input.value).toBe('12');
+    blur(input);
+    expect(input.value).toBe('12');
+    expect(onBlur).toHaveBeenCalledExactlyOnceWith(12);
   });
 
   it('saves on Enter by giving up focus', () => {

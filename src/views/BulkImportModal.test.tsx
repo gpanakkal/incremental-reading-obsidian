@@ -660,7 +660,11 @@ describe('BulkImportModal', () => {
               ? {
                   priority: plugin.settings.defaultPriority,
                   fixedIntervalDays: orKept(
-                    () => IRScheduler.adjustFixedIntervalOnChange(typed),
+                    // The field holds whole days: digits only, no point
+                    () =>
+                      IRScheduler.adjustFixedIntervalOnChange(
+                        typed.replaceAll(/[^0-9]/g, '')
+                      ),
                     MINIMUM_FIXED_REVIEW_INTERVAL
                   ),
                   makeCopy: plugin.settings.copyOnImport,
