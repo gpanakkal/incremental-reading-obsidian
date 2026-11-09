@@ -1,10 +1,8 @@
-import {
-  MAXIMUM_FIXED_REVIEW_INTERVAL,
-  MINIMUM_FIXED_REVIEW_INTERVAL,
-} from '#/lib/constants';
+import { MINIMUM_FIXED_REVIEW_INTERVAL } from '#/lib/constants';
 import IRScheduler from '#/lib/IRScheduler';
+import { filterDigitInsertions, sanitizeDigitText } from '#/lib/numeric-input';
 import type { ComponentChildren } from 'preact';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 /**
  * `leading` takes the place of the label text on both sides of the input, e.g.
@@ -15,6 +13,11 @@ import { useState } from 'react';
  * Escape drops the edit in progress and shows the stored interval again: the
  * one this field last saved, even before it comes back as `initialInterval`,
  * or else the one passed in.
+ *
+ * Only digits ever show: other characters are dropped from text as it goes in,
+ * and from what reaches the input some other way. A text input rather than a
+ * number one, which shows a sign, point or exponent typed into it while
+ * reporting its value as empty, so the edit would read as a cleared field.
  */
 export function FixedIntervalField({
   initialInterval,
@@ -26,6 +29,10 @@ export function FixedIntervalField({
   leading?: ComponentChildren;
 }) {
   const hasLeading = leading !== undefined;
+  const inputRef = useRef<HTMLInputElement>(null);
+  // A plain listener, since preact only hears `onBeforeInput` in engines that
+  // have an `onbeforeinput` property
+  useEffect(() => filterDigitInsertions(inputRef.current!), []);
   /** The interval last stored, whether passed in or saved from here. */
   const [stored, setStored] = useState(initialInterval);
   /** The `initialInterval` of the last render. */
@@ -59,19 +66,18 @@ export function FixedIntervalField({
         <label className={'ir-fixed-interval-label'}>
           {!hasLeading && 'Every'}
           <input
+            ref={inputRef}
             id={'ir-fixed-interval-input'}
             aria-label={hasLeading ? 'Fixed interval in days' : undefined}
             value={
               draft ? (draft.text ?? String(draft.value)) : String(storedValue)
             }
             className={'ir-fixed-interval-input'}
-            type="number"
-            min={MINIMUM_FIXED_REVIEW_INTERVAL}
-            max={MAXIMUM_FIXED_REVIEW_INTERVAL}
-            step={1}
+            type="text"
             inputMode="numeric"
             onChange={(e) => {
-              const text = e.currentTarget.value;
+              // Drops what got past the filter: compositions, drops, autofill
+              const text = sanitizeDigitText(e.currentTarget.value);
               let value = held;
               try {
                 value = IRScheduler.adjustFixedIntervalOnChange(text);

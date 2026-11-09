@@ -1,3 +1,5 @@
+import { filterInsertions } from './numeric-input';
+
 /**
  * What a priority input can show of `text`: its ASCII digits and its first
  * decimal point, or no point at all if `pointTaken` (the text goes into a
@@ -32,40 +34,7 @@ export function sanitizePriorityText(text: string, pointTaken = false): string {
  * @returns a function that stops the filtering
  */
 export function filterPriorityInsertions(input: HTMLInputElement): () => void {
-  const onBeforeInput = (event: InputEvent) => {
-    const { inputType } = event;
-    if (
-      !event.cancelable ||
-      !inputType.startsWith('insert') ||
-      inputType === 'insertFromDrop' ||
-      inputType === 'insertReplacementText' ||
-      inputType === 'insertCompositionText'
-    ) {
-      return;
-    }
-    // Pastes into an input carry their text as `data` in Chromium and Firefox,
-    // but may carry it as `dataTransfer` instead, as rich text editors get it
-    const text = event.data ?? event.dataTransfer?.getData('text/plain');
-    if (text === undefined) return;
-
-    const { value } = input;
-    // Only inputs without text selection (number, date...) have none, and
-    // setRangeText throws on those anyway
-    const start = input.selectionStart!;
-    const end = input.selectionEnd!;
-    const rest = value.slice(0, start) + value.slice(end);
-    const kept = sanitizePriorityText(text, rest.includes('.'));
-    if (kept === text) return;
-
-    event.preventDefault();
-    if (kept === '') return;
-    input.setRangeText(kept, start, end, 'end');
-    // setRangeText fires no input event of its own
-    input.dispatchEvent(
-      new InputEvent('input', { bubbles: true, inputType, data: kept })
-    );
-  };
-
-  input.addEventListener('beforeinput', onBeforeInput);
-  return () => input.removeEventListener('beforeinput', onBeforeInput);
+  return filterInsertions(input, (text, rest) =>
+    sanitizePriorityText(text, rest.includes('.'))
+  );
 }
