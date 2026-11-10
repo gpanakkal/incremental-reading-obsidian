@@ -94,6 +94,8 @@ export default class ReviewView
   /* required for review view to open */
   allowNoFile: boolean = true;
   #lastFocusedEl: Element | null = null;
+  /** The leaf's activation last refocused for; see {@link claimActivation}. */
+  #claimedActivation: number | null = null;
   /**
    * Keyboard focus passing from one item's editor to the next, which a note
    * tab's single editor never has to do. Each item's editor releases it as it
@@ -111,6 +113,12 @@ export default class ReviewView
    * every title — see {@link titleOn}.
    */
   fileType: NoteType | null = null;
+  /**
+   * The current item's file, as {@link setFile} last set it. `file` follows it
+   * while review shows the item and is `null` on the home screen; see
+   * {@link syncFile}.
+   */
+  itemFile: TFile | null = null;
   /**
    * The page as of the last store notification, kept only to spot page
    * *changes*. Read the store for the current page — see {@link getDisplayText}.
@@ -224,7 +232,11 @@ export default class ReviewView
       const currentPage = plugin.store.getState().page;
       if (currentPage !== this.#page) {
         this.#page = plugin.store.getState().page;
+        // After `trackPlace`: the entry it writes for the page being left
+        // reads that page's file.
+        const changed = this.syncFile();
         this.setTitle();
+        if (changed) this.announceFile();
       }
     });
     this.register(() => unsub());
@@ -237,9 +249,59 @@ export default class ReviewView
    * @param type the type of the item `file` belongs to
    */
   setFile(file: TFile | null, type: NoteType | null) {
-    this.file = file;
+    this.itemFile = file;
     this.fileType = type;
+    const changed = this.syncFile();
     this.setTitle();
+    if (changed) this.announceFile();
+  }
+
+  /**
+   * Point `file` at the item's file while review shows the item, and at
+   * nothing on the home screen. The workspace reads its active file from
+   * `file` (see {@link announceFile}), and the home screen shows no item: with
+   * the last item's file left there, the file explorer kept that item's row
+   * marked, and the side panes kept showing its links.
+   *
+   * @returns whether `file` changed
+   */
+  syncFile(): boolean {
+    const page = this.plugin.store.getState().page;
+    const shown = page === 'review' ? this.itemFile : null;
+    // `FileView` leaves `file` undefined until something loads one into it
+    if (shown === (this.file ?? null)) return false;
+    this.file = shown;
+    return true;
+  }
+
+  /**
+   * Have the workspace announce this view's file as its active file, as
+   * `FileView.loadFile` does when a tab loads another file.
+   *
+   * The file explorer marks its active row, and swallows plain clicks on that
+   * row, from the workspace's `file-open`; backlinks, outgoing links and the
+   * recent files list follow the same event. The workspace sends it only from
+   * its active-leaf events, when the file `getActiveFile` names has changed,
+   * and moving between items is not a leaf change. So without this the row
+   * stayed on the first item, and a click on it to go back did nothing.
+   *
+   * `requestActiveLeafEvents` (undocumented; typed by obsidian-typings) is the
+   * call `FileView.loadFile` makes, and also keeps the workspace's own record
+   * of the last active file and its recent files in step, which triggering
+   * `file-open` here would leave behind. It sends `active-leaf-change` for
+   * the active leaf too, as it does for a note tab moving to another note.
+   *
+   * `loadFile` asks only while its leaf is the active one; this asks while
+   * this view is the one `getActiveFileView` (undocumented; typed by
+   * obsidian-typings) resolves the active file through, which also covers a
+   * sidebar having focus — a review command run from the file explorer, say.
+   * Any other tab holding the active file has the events sent for it when
+   * this one is activated.
+   */
+  announceFile(): void {
+    const { workspace } = this.app;
+    if (workspace.getActiveFileView() !== this) return;
+    workspace.requestActiveLeafEvents();
   }
 
   /**
@@ -310,10 +372,11 @@ export default class ReviewView
    * file entries in {@link onPaneMenu} — keys off this one answer, so they can
    * never end up describing different items.
    *
-   * `file` legitimately stays pointed at the last item while the home screen is
-   * up, so the page is what decides, not the file alone. A file with an empty
-   * basename counts as no item, rather than leaving the tab and the taskbar
-   * blank.
+   * The page decides as well as `file`: `file` follows the page only once the
+   * store notifies (see {@link syncFile}), and a history entry asks about the
+   * page being left before then (see {@link historyEntryFor}). A file with an
+   * empty basename counts as no item, rather than leaving the tab and the
+   * taskbar blank.
    *
    * Reads the page from the store rather than {@link #page}, which exists only to
    * detect page *changes*: Obsidian calls this from paths the store subscription
@@ -771,7 +834,9 @@ export default class ReviewView
     this.registerEvent(
       this.app.workspace.on('active-leaf-change', (leaf) => {
         if (leaf === this.leaf) {
-          this.refocusWithoutScroll(this.#lastFocusedEl);
+          if (this.claimActivation()) {
+            this.refocusWithoutScroll(this.#lastFocusedEl);
+          }
           // Reclaim the workspace editor slot that setActiveLeaf just cleared,
           // so the search commands resolve without waiting for a click.
           this.setActiveEditor(this.activeEditor);
@@ -789,6 +854,28 @@ export default class ReviewView
     this.plugin.leftovers?.reviewOpened();
     // Automatic imports waiting for Sync are told of in review tabs alone
     this.plugin.syncWaitNotice?.reviewOpened();
+  }
+
+  /**
+   * Whether an `active-leaf-change` naming this tab's leaf is the tab being
+   * activated, rather than the workspace announcing it again while it stays
+   * active — as it does whenever review moves to another item (see
+   * {@link announceFile}). Answers yes once per activation.
+   *
+   * `WorkspaceLeaf.activeTime` (undocumented; typed by obsidian-typings) is
+   * stamped with `Date.now()` by `Workspace.setActiveLeaf` on every switch to
+   * the leaf, and written nowhere else after construction (read from
+   * obsidian.asar 1.14.5). The events are debounced, so an activation and a
+   * re-announcement can arrive as one; the stamp has moved on then, and that
+   * one counts as the activation. A leaf without a stamp answers yes every
+   * time, which is how this behaved before re-announcements existed.
+   */
+  claimActivation(): boolean {
+    const { activeTime } = this.leaf;
+    if (typeof activeTime !== 'number') return true;
+    if (activeTime === this.#claimedActivation) return false;
+    this.#claimedActivation = activeTime;
+    return true;
   }
 
   /** Whether the tab has opened and not begun to close since. */
@@ -953,11 +1040,12 @@ export default class ReviewView
    * active tab's history.
    *
    * The navbar re-reads history only on `active-leaf-change`, which a markdown
-   * tab raises each time it loads a file. Review raises it for none of the moves
-   * it records — the file stays the same between the home screen and an item, and
-   * is never loaded by Obsidian otherwise — nor when back and forward move between
-   * its own entries, so without this the buttons stay greyed out over a history
-   * they could walk. The navbar exists only on mobile.
+   * tab raises each time it loads a file. Review raises it for the moves it
+   * records only while it holds the workspace's active file (see
+   * {@link announceFile}) — Obsidian never loads its file — and not at all when
+   * back and forward move between its own entries, so without this the buttons
+   * stay greyed out over a history they could walk. The navbar exists only on
+   * mobile.
    */
   refreshMobileNavbar(): void {
     this.app.mobileNavbar?.onLeafChange();
@@ -1283,9 +1371,9 @@ export default class ReviewView
    * file explorer's own reveal entry, for one, skips its own context menu that
    * way.
    *
-   * Guarded on {@link currentItemFile} rather than `file`, which stays pointed
-   * at the last item while the home screen is up: a menu offering to rename or
-   * delete a note the tab is not showing would act on the wrong file.
+   * Guarded on {@link currentItemFile}, the one answer to which item the tab
+   * shows: a menu offering to rename or delete a note the tab is not showing
+   * would act on the wrong file.
    *
    * Rename is left out for a card, as the header title's rename is — see
    * {@link renamableItemFile}: its prompt opens on the note's name, which is the
@@ -1385,14 +1473,15 @@ export default class ReviewView
    * Keep the view header in step when the file it names is renamed or moved.
    *
    * `FileView`'s own handler writes the file's name and folder into the header
-   * whenever `file` is renamed, and `file` stays pointed at the last item while
-   * the home screen is up — so renaming that note from the file explorer would
-   * put its name over the home screen. {@link setTitle} redraws both halves from
-   * the page the tab is actually on.
+   * whenever `file` is renamed, whatever {@link titleOn} would put there — a
+   * card's name, say. {@link setTitle} redraws both halves from the page the tab
+   * is actually on. Keyed on the item's file rather than `file`, which is
+   * `null` on the home screen (see {@link syncFile}), so a header showing
+   * either page is kept right.
    */
   async onRename(file: TFile): Promise<void> {
     await super.onRename(file);
-    if (file === this.file) this.setTitle();
+    if (file === this.itemFile) this.setTitle();
   }
 
   /**

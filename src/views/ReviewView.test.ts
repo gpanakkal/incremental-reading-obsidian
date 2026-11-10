@@ -169,7 +169,15 @@ function makeTitleReceiver(
     // classes for styles.css
     containerEl: document.createElement('div'),
     leaf: { updateHeader: vi.fn(), getContainer: () => container },
-    app: { workspace: { updateTitle: vi.fn() } },
+    app: {
+      workspace: {
+        updateTitle: vi.fn(),
+        // Another tab holds the workspace's active file unless a test says the
+        // view does: see `setFile`.
+        getActiveFileView: vi.fn((): unknown => null),
+        requestActiveLeafEvents: vi.fn(),
+      },
+    },
     /** Move between the home screen and an item, as the store would. */
     setPage: (next: ReviewPage) => {
       state.page = next;
@@ -620,6 +628,8 @@ async function openHistoryView({
         setActiveLeaf: vi.fn(),
         // Another tab active: the window's native undo listener stays out.
         getActiveViewOfType: () => null,
+        // ...and holding the workspace's active file.
+        getActiveFileView: () => null,
         ...workspace,
       },
     },
@@ -645,6 +655,48 @@ function backPlaces(leaf: ReturnType<typeof makeHistoryLeaf>) {
 
 /** Let a lookup `leaveIfGone` started settle. */
 const flushLookups = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+/**
+ * An open view whose `active-leaf-change` listeners the test fires by hand,
+ * with a button in the tab as the element it last focused. `activeTime` is
+ * the stamp `Workspace.setActiveLeaf` puts on the leaf it activates; leave it
+ * out for a leaf without one.
+ */
+async function openActivationView(activeTime?: number) {
+  const listeners: ((leaf: unknown) => void)[] = [];
+  const opened = await openHistoryView({
+    workspace: {
+      on: (name: string, callback: (leaf: unknown) => void) => {
+        if (name === 'active-leaf-change') listeners.push(callback);
+        return {};
+      },
+    },
+  });
+  Object.assign(opened.leaf, { activeTime });
+  const focused = document.createElement('button');
+  opened.view.contentEl.appendChild(focused);
+  focused.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+  const refocus = vi
+    .spyOn(opened.view, 'refocusWithoutScroll')
+    .mockImplementation(() => {});
+  const reclaimEditor = vi
+    .spyOn(opened.view, 'setActiveEditor')
+    .mockImplementation(() => {});
+  return {
+    ...opened,
+    focused,
+    refocus,
+    reclaimEditor,
+    /** Run the workspace's `active-leaf-change` listeners for `leaf`. */
+    announce: (leaf: unknown) =>
+      listeners.forEach((listener) => listener(leaf)),
+    /** Stamp the leaf as `setActiveLeaf` does when it switches to it. */
+    activate: () => {
+      (opened.leaf as { activeTime?: number }).activeTime =
+        ((opened.leaf as { activeTime?: number }).activeTime ?? 0) + 1;
+    },
+  };
+}
 
 /**
  * An item's note, with the folder its rename has to stay in. `parentPath` of
@@ -700,7 +752,8 @@ function makeRenameView({
     leaf: { updateHeader: vi.fn(), getContainer: () => ({}) },
     app: {
       fileManager: { renameFile },
-      workspace: { updateTitle: vi.fn() },
+      // Another tab holds the workspace's active file: see `setFile`
+      workspace: { updateTitle: vi.fn(), getActiveFileView: () => null },
     },
   });
   const previous = Platform.isMobileApp;
@@ -1711,6 +1764,188 @@ describe('ReviewView.setFile', () => {
     expect(receiver.file).toBeNull();
     expect(receiver.titleEl.setText).toHaveBeenLastCalledWith(
       REVIEW_VIEW_DEFAULT_TITLE
+    );
+  });
+
+  it('has the workspace announce each file review moves to while it holds the active file', () => {
+    // The file explorer marks its active row from `file-open`, which only the
+    // workspace's active-leaf events send. Moving between items is not a leaf
+    // change, so the row stayed on the first item and a click on it was
+    // swallowed as a click on the file already open.
+    fc.assert(
+      fc.property(
+        fc.array(fc.option(fc.integer({ min: 0, max: 2 }), { nil: null }), {
+          maxLength: 8,
+        }),
+        (picks) => {
+          const pool = [makeFile('A'), makeFile('B'), makeFile('C')];
+          const receiver = makeTitleReceiver('review', null);
+          const { workspace } = receiver.app;
+          workspace.getActiveFileView.mockReturnValue(receiver);
+          // What the workspace reads back once its events run: the view's file
+          // as of the request
+          const announced: (TFile | null)[] = [];
+          workspace.requestActiveLeafEvents.mockImplementation(() => {
+            announced.push(receiver.file);
+          });
+
+          const moves: (TFile | null)[] = [];
+          let shown: TFile | null = null;
+          for (const pick of picks) {
+            const file = pick === null ? null : pool[pick];
+            asView(receiver).setFile(file, 'article');
+            if (file !== shown) moves.push(file);
+            shown = file;
+          }
+
+          expect(announced).toStrictEqual(moves);
+        }
+      )
+    );
+  });
+
+  it('leaves the announcing to Obsidian while another tab holds the active file', () => {
+    // Activating this tab later sends the events itself; sending them now
+    // would announce the other tab's file a second time.
+    fc.assert(
+      fc.property(
+        fc.constantFrom(null, {}),
+        fc.array(fc.string({ minLength: 1 }), { minLength: 1, maxLength: 4 }),
+        (activeFileView, basenames) => {
+          const receiver = makeTitleReceiver('review', null);
+          const { workspace } = receiver.app;
+          workspace.getActiveFileView.mockReturnValue(activeFileView);
+
+          for (const basename of basenames) {
+            asView(receiver).setFile(makeFile(basename), 'article');
+          }
+
+          expect(workspace.requestActiveLeafEvents).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+
+  it('reports the item as the active file only while it shows, announcing each change', () => {
+    // The home screen shows no item, so the file explorer should mark no row
+    // there. `file` is what the workspace reads the active file from.
+    const stepArb = fc.oneof(
+      fc.record({ page: pageArb }),
+      fc.record({
+        pick: fc.option(fc.integer({ min: 0, max: 2 }), { nil: null }),
+      })
+    );
+    fc.assert(
+      fc.property(
+        pageArb,
+        fc.array(stepArb, { maxLength: 10 }),
+        (start, steps) => {
+          const pool = ['A', 'B', 'C'].map((name) =>
+            makeItemFile(name, 'Articles')
+          );
+          const { view, store } = makeRenameView({ page: start, file: null });
+          const announced: (TFile | null)[] = [];
+          Object.assign(view.app.workspace, {
+            getActiveFileView: () => view,
+            requestActiveLeafEvents: () => announced.push(view.file),
+          });
+
+          let page = start;
+          let item: TFile | null = null;
+          let reported: TFile | null = null;
+          const changes: (TFile | null)[] = [];
+          for (const step of steps) {
+            if ('page' in step) {
+              page = step.page;
+              store.dispatchPage(page);
+            } else {
+              item = step.pick === null ? null : pool[step.pick];
+              view.setFile(item, item && 'article');
+            }
+            const shown = page === 'review' ? item : null;
+            if (shown !== reported) changes.push(shown);
+            reported = shown;
+
+            // `FileView` leaves `file` undefined until one is loaded
+            expect(view.file ?? null).toBe(shown);
+          }
+
+          expect(announced).toStrictEqual(changes);
+          unload(view);
+        }
+      )
+    );
+  });
+});
+
+describe('ReviewView active-leaf-change', () => {
+  // Each step: whether the workspace switched to this tab first (stamping its
+  // leaf), and whether the announcement names this tab's leaf or another.
+  const stepsArb = fc.array(
+    fc.record({ activated: fc.boolean(), own: fc.boolean() }),
+    { maxLength: 8 }
+  );
+
+  it('refocuses what the tab last focused once per activation of the tab', async () => {
+    // The workspace also re-announces a tab that is already active — every time
+    // review moves to another item, so the explorer follows. Refocusing on
+    // those would pull focus back to a field the reader had already left.
+    await fc.assert(
+      fc.asyncProperty(stepsArb, async (steps) => {
+        const view = await openActivationView(1);
+        let expected = 0;
+        let pending = true;
+        for (const { activated, own } of steps) {
+          if (activated) {
+            view.activate();
+            pending = true;
+          }
+          view.announce(own ? view.leaf : {});
+          if (own && pending) {
+            expected++;
+            pending = false;
+          }
+        }
+
+        expect(view.refocus).toHaveBeenCalledTimes(expected);
+        for (const [el] of view.refocus.mock.calls) {
+          expect(el).toBe(view.focused);
+        }
+        unload(view.view);
+      })
+    );
+  });
+
+  it('reclaims the workspace editor on every announcement for its own tab', async () => {
+    // `setActiveLeaf` clears the workspace's editor without telling this view,
+    // and the editor slot costs nothing to fill again.
+    await fc.assert(
+      fc.asyncProperty(stepsArb, async (steps) => {
+        const view = await openActivationView(1);
+        for (const { activated, own } of steps) {
+          if (activated) view.activate();
+          view.announce(own ? view.leaf : {});
+        }
+
+        expect(view.reclaimEditor).toHaveBeenCalledTimes(
+          steps.filter(({ own }) => own).length
+        );
+        unload(view.view);
+      })
+    );
+  });
+
+  it('refocuses on every announcement for a leaf carrying no activation stamp', async () => {
+    // Without the stamp, an activation can't be told from a re-announcement;
+    // refocusing on both keeps the tab-switch refocus working.
+    await fc.assert(
+      fc.asyncProperty(fc.integer({ min: 1, max: 5 }), async (times) => {
+        const view = await openActivationView();
+        for (let i = 0; i < times; i++) view.announce(view.leaf);
+
+        expect(view.refocus).toHaveBeenCalledTimes(times);
+        unload(view.view);
+      })
     );
   });
 });

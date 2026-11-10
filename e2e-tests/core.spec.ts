@@ -13,6 +13,7 @@ import {
   executeCommandById,
   expectCompactIconBar,
   expectExtractSettled,
+  expectReviewHome,
   expectReviewOn,
   finalizeArticleImport,
   importArticle,
@@ -989,6 +990,130 @@ test.describe('File explorer', () => {
         `.workspace-leaf-content[data-type="incremental-reading-review"]`
       )
     ).toHaveCount(1);
+  });
+
+  test.describe('as review moves between items', () => {
+    const activeRow = () => window.locator('.nav-file-title.is-active');
+    const rowAt = (path: string) =>
+      window.locator(`.nav-file-title[data-path="${path}"]`);
+    const escapeRegExp = (text: string) =>
+      text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    /** The row of the note an item of this title was imported as. */
+    const rowNamePattern = (title: string) =>
+      new RegExp(`(^|/)${escapeRegExp(title)}\\.md$`);
+
+    /**
+     * Review on the first of two due articles, the explorer opened onto its
+     * row, then review moved on to the other with its own skip. Clicking the
+     * review tab's header first gives the tab back the focus the explorer took,
+     * as a reader returning to it would.
+     *
+     * @returns the item review started on and the vault path of its note, and
+     *   the item it moved to
+     */
+    async function moveOnFromFirst() {
+      await importArticle(
+        window,
+        'sources/Memorizing a programming language using spaced repetition'
+      );
+      await importArticle(
+        window,
+        'sources/Curse of dimensionality - Wikipedia'
+      );
+      await executeCommandById(window, 'incremental-reading:learn');
+      await window.locator('css=#begin-review-button').click();
+      const first = await waitForReviewItem(window);
+
+      await executeCommandById(window, 'file-explorer:reveal-active-file');
+      await expect(activeRow()).toHaveAttribute(
+        'data-path',
+        rowNamePattern(first.title)
+      );
+      const firstPath = await activeRow().getAttribute('data-path');
+      if (!firstPath) throw new Error(`No row for ${first.title}`);
+
+      await window
+        .locator(`.workspace-tab-header[data-type="${REVIEW_VIEW_TYPE}"]`)
+        .click();
+      await executeCommandById(window, 'incremental-reading:skip-item');
+      await expect(async () => {
+        const shown = await waitForReviewItem(window);
+        expect(shown.title).not.toBe(first.title);
+      }).toPass();
+      const second = await waitForReviewItem(window);
+      return { first, firstPath, second };
+    }
+
+    test('marks the row of the item review moved to', async () => {
+      const { second } = await moveOnFromFirst();
+
+      await expect(activeRow()).toHaveCount(1);
+      await expect(activeRow()).toHaveAttribute(
+        'data-path',
+        rowNamePattern(second.title)
+      );
+    });
+
+    test('brings review back to the item it left when that row is clicked', async () => {
+      // The row review left used to stay marked active, and Obsidian swallows
+      // a plain click on the active row: going back that way did nothing.
+      const { first, firstPath } = await moveOnFromFirst();
+
+      await rowAt(firstPath).click();
+
+      await expectReviewOn(window, first);
+      await expect(
+        window.locator(
+          `.workspace-leaf-content[data-type="${REVIEW_VIEW_TYPE}"]`
+        )
+      ).toHaveCount(1);
+    });
+
+    test('opens the item review moved to in a new tab when its row is clicked', async () => {
+      const { second } = await moveOnFromFirst();
+      await expect(activeRow()).toHaveAttribute(
+        'data-path',
+        rowNamePattern(second.title)
+      );
+
+      await activeRow().click();
+
+      await expect(
+        window.locator(
+          '.workspace-leaf.mod-active .workspace-leaf-content[data-type="markdown"]'
+        )
+      ).toBeVisible();
+      await expect(
+        window.locator('.workspace-leaf.mod-active .view-header-title')
+      ).toHaveText(second.title);
+      await expect(
+        window.locator(
+          `.workspace-leaf-content[data-type="${REVIEW_VIEW_TYPE}"]`
+        )
+      ).toHaveCount(1);
+    });
+
+    test("marks no row on the home screen, and the shown item's row again after it", async () => {
+      // The home screen shows no item, so it holds no active file either.
+      await moveOnFromFirst();
+
+      // Learn with the review tab focused takes it back to its home screen
+      await executeCommandById(window, 'incremental-reading:learn');
+      await expectReviewHome(window);
+      await expect(activeRow()).toHaveCount(0);
+
+      await window.locator('css=#begin-review-button').click();
+      // Opening an item from the home screen can name the item review held
+      // last for a beat, so the row is checked against what review settles on.
+      await expect(async () => {
+        const shown = await waitForReviewItem(window);
+        await expect(activeRow()).toHaveAttribute(
+          'data-path',
+          rowNamePattern(shown.title),
+          { timeout: 1000 }
+        );
+      }).toPass();
+    });
   });
 });
 
