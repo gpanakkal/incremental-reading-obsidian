@@ -1096,6 +1096,17 @@ export default class IncrementalReadingPlugin extends Plugin {
         this.app.workspace
           .getLeavesOfType(ReviewView.viewType)
           .some((leaf) => leaf.view instanceof ReviewView),
+      // The one the user was in last, of several. `activeTime` is
+      // unofficial Obsidian API: the stamp `getMostRecentLeaf` ranks by
+      reviewContainer: () =>
+        this.app.workspace
+          .getLeavesOfType(ReviewView.viewType)
+          .filter((leaf) => leaf.view instanceof ReviewView)
+          .reduce<WorkspaceLeaf | null>(
+            (latest, leaf) =>
+              latest && latest.activeTime >= leaf.activeTime ? latest : leaf,
+            null
+          )?.view.containerEl ?? null,
     });
   }
 

@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import * as UiWindow from '#/lib/ui-window';
+import { makeUiWindow } from '#/test/fake-window';
 import * as ConfirmModalModule from '#/views/ConfirmModal';
 import fc from 'fast-check';
 import type { App, TFile } from 'obsidian';
@@ -705,5 +706,92 @@ describe('askToImportFresh', () => {
     expect(never).not.toContain(dayOf(row.erasedAt));
     // The line saying when, and on which device, is left out
     expect(linesOf(never)).toBeLessThan(linesOf(here));
+  });
+});
+
+describe('leftover questions asked for from a window', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const file = { path: 'notes/new.md', basename: 'new' } as TFile;
+  const app = {} as App;
+
+  /** Every prompt `wired` was asked, with what it was asked for from. */
+  const originsOf = ({ ask, confirm }: ReturnType<typeof wireChoice>) => [
+    ...ask.mock.calls.map((call) => call[2]),
+    ...confirm.mock.calls.map((call) => call[2]),
+  ];
+
+  it('asks about the row at the path, and the erase after, in the window it was asked for from, whatever the note holds', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        rowAtPathArb,
+        fc.option(fc.constantFrom<NoteClaim>('other-id', 'no-id'), {
+          nil: undefined,
+        }),
+        answersArb,
+        async (row, noteClaims, { choice, sure }) => {
+          const wired = wireChoice(choice, sure);
+          const { element } = makeUiWindow();
+
+          await askToResolveHeld(
+            app,
+            file,
+            row,
+            THIS_DEVICE,
+            noteClaims,
+            element
+          );
+
+          const origins = originsOf(wired);
+          expect(origins).toHaveLength(choice === 'alternative' ? 2 : 1);
+          for (const origin of origins) expect(origin).toBe(element);
+        }
+      )
+    );
+  });
+
+  it("asks about the plan's target in the window it was asked for from, whether or not the plan offers erasing", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        rowAtPathArb,
+        fc.boolean(),
+        answersArb,
+        async (row, erase, { choice, sure }) => {
+          const wired = wireChoice(choice, sure);
+          const { element } = makeUiWindow();
+          const plan: Plan = {
+            target: erase
+              ? { by: 'path', row }
+              : { by: 'id', row: { ...row, reference: 'notes/old.md' } },
+            evicts: null,
+            erase,
+            refused: [],
+            purged: null,
+          };
+
+          await askToResolve(app, file, plan, THIS_DEVICE, element);
+
+          const origins = originsOf(wired);
+          expect(origins.length).toBeGreaterThan(0);
+          for (const origin of origins) expect(origin).toBe(element);
+        }
+      )
+    );
+  });
+
+  it('asks to import fresh in the window it was asked for from', async () => {
+    await fc.assert(
+      fc.asyncProperty(purgedArb, fc.boolean(), async (row, answer) => {
+        const confirm = wirePrompt(answer);
+        const { element } = makeUiWindow();
+
+        await askToImportFresh(app, file, row, 'article', THIS_DEVICE, element);
+
+        expect(confirm).toHaveBeenCalledOnce();
+        expect(confirm.mock.calls[0][2]).toBe(element);
+      })
+    );
   });
 });

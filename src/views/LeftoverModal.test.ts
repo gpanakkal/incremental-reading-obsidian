@@ -12,10 +12,12 @@ import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import * as ReassociatePrompt from '#/lib/reassociate-prompt';
 import type { NoteType } from '#/lib/types';
 import { DropdownComponent, Notice } from '#/test/__mocks__/obsidian';
+import { makeUiWindow } from '#/test/fake-window';
 import { makeItemVault, TestRepository } from '#/test/item-vault';
 import fc from 'fast-check';
 import { type App, Component, MarkdownRenderer, type TFile } from 'obsidian';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ConfirmModal } from './ConfirmModal';
 import {
   type LeftoverChoice,
   LeftoverModal,
@@ -381,7 +383,8 @@ function insertItem(repo: TestRepository) {
 /**
  * A watch over the leftovers among `notes`, with every note's id rowless, and
  * a review tab that can be opened and closed. The modals it opens are kept in
- * `opened` rather than shown.
+ * `opened` rather than shown, and the window each opened in (Obsidian's
+ * `activeWindow` as it opens, see `uiWindow`) in `openedIn`.
  */
 async function wireWatch(
   notes: Record<string, Record<string, unknown>>,
@@ -405,10 +408,12 @@ async function wireWatch(
     });
   }
   const opened: LeftoverModal[] = [];
+  const openedIn: Window[] = [];
   const open = vi
     .spyOn(LeftoverModal.prototype, 'open')
     .mockImplementation(function (this: LeftoverModal) {
       opened.push(this);
+      openedIn.push(activeWindow);
     });
   const error = vi.spyOn(console, 'error').mockReturnValue(undefined);
   const adoptLeftover = vi.fn(async () => undefined);
@@ -423,12 +428,14 @@ async function wireWatch(
   }));
   const onResolved = vi.fn();
   let reviewOpen = false;
+  let reviewEl: HTMLElement | null = null;
   const watch = new LeftoverWatch({
     app: vault.app as never,
     repo,
     managers,
     onResolved,
     isReviewOpen: () => reviewOpen,
+    reviewContainer: () => reviewEl,
   });
   return {
     vault,
@@ -436,6 +443,7 @@ async function wireWatch(
     watch,
     open,
     opened,
+    openedIn,
     error,
     managers,
     onResolved,
@@ -443,13 +451,18 @@ async function wireWatch(
     reassociateNote,
     claimInPlace,
     deleteRow,
-    /** Open a review tab, as its view's `onOpen` tells the watch. */
-    openReview: () => {
+    /**
+     * Open a review tab, its view's container `containerEl`, as its view's
+     * `onOpen` tells the watch.
+     */
+    openReview: (containerEl: HTMLElement = document.createElement('div')) => {
       reviewOpen = true;
+      reviewEl = containerEl;
       watch.reviewOpened();
     },
     closeReview: () => {
       reviewOpen = false;
+      reviewEl = null;
     },
   };
 }
@@ -1895,7 +1908,9 @@ describe('LeftoverWatch', () => {
           `UPDATE snippet SET reference = 'gone', deleted = 1 WHERE id = 'held-1234-abcd'`
         );
       });
-      await wired.watch.manage();
+      // Where Manage was asked for from, which the question opens in too
+      const origin = document.createElement('div');
+      await wired.watch.manage(origin);
       const modal = showModal(wired.opened[0]);
       const file = wired.vault.files.get('notes/a.md')!;
 
@@ -1911,7 +1926,9 @@ describe('LeftoverWatch', () => {
           id: 'held-1234-abcd',
           deleted: true,
         }),
-        getDeviceId(wired.vault.app as never)
+        getDeviceId(wired.vault.app as never),
+        'other-id',
+        origin
       );
       if (choice === 'reassociate') {
         expect(wired.reassociateNote).toHaveBeenCalledExactlyOnceWith(
@@ -2124,7 +2141,8 @@ describe('LeftoverWatch of a note moved away from its row', () => {
       .spyOn(ReassociatePrompt, 'askToResolve')
       .mockResolvedValue('reassociate');
     const held = vi.spyOn(ReassociatePrompt, 'askToResolveHeld');
-    await wired.watch.manage();
+    const origin = document.createElement('div');
+    await wired.watch.manage(origin);
     const modal = showModal(wired.opened[0]);
     const file = wired.vault.files.get('notes/a.md')!;
 
@@ -2145,7 +2163,8 @@ describe('LeftoverWatch of a note moved away from its row', () => {
           }) as unknown,
         },
       }),
-      getDeviceId(wired.vault.app as never)
+      getDeviceId(wired.vault.app as never),
+      origin
     );
     expect(held).not.toHaveBeenCalled();
     expect(wired.reassociateNote).toHaveBeenCalledExactlyOnceWith(
@@ -2348,7 +2367,8 @@ describe('LeftoverWatch of a note whose id belongs to a row deleted for good', (
     const ask = vi
       .spyOn(ReassociatePrompt, 'askToImportFresh')
       .mockResolvedValue(true);
-    await wired.watch.manage();
+    const origin = document.createElement('div');
+    await wired.watch.manage(origin);
     const modal = showModal(wired.opened[0]);
     const file = wired.vault.files.get('notes/a.md')!;
 
@@ -2361,7 +2381,8 @@ describe('LeftoverWatch of a note whose id belongs to a row deleted for good', (
       file,
       expect.objectContaining({ kind: 'snippet', id: 'gone-1234-abcd' }),
       'article',
-      getDeviceId(wired.vault.app as never)
+      getDeviceId(wired.vault.app as never),
+      origin
     );
     const id = wired.vault.frontmatterOf('notes/a.md')?.['ir-id'];
     expect(id).toEqual(expect.any(String));
@@ -2393,5 +2414,105 @@ describe('LeftoverWatch of a note whose id belongs to a row deleted for good', (
     expect(wired.adoptLeftover).not.toHaveBeenCalled();
     expect(wired.onResolved).not.toHaveBeenCalled();
     expect(wired.watch.current.map(({ id }) => id)).toEqual(['gone-1234-abcd']);
+  });
+});
+
+describe('LeftoverWatch windows', () => {
+  /** Settings, behind, as Obsidian's `activeWindow`. */
+  let settings: Window;
+
+  beforeEach(() => {
+    Notice.reset();
+    // Focused, as every window is in the e2e harness: where the leftovers
+    // went with nothing to say where they were asked for from
+    settings = makeUiWindow({ focused: true }).win;
+    vi.stubGlobal('activeWindow', settings);
+    vi.stubGlobal('activeDocument', settings.document);
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('opens the leftovers in the window Manage was asked for from', async () => {
+    const wired = await wireWatch(ONE_LEFTOVER);
+    const popout = makeUiWindow();
+
+    await wired.watch.manage(popout.element);
+
+    expect(wired.openedIn).toEqual([popout.win]);
+  });
+
+  it('opens the leftovers where plugin UI otherwise goes when Manage is asked for from nowhere', async () => {
+    const wired = await wireWatch(ONE_LEFTOVER);
+
+    await wired.watch.manage();
+
+    expect(wired.openedIn).toEqual([settings]);
+  });
+
+  it.each([
+    { review: 'still open', inPopout: true },
+    { review: 'closed since', inPopout: false },
+  ])(
+    "opens the leftovers from the notice's Manage button in the review tab's window, or the main window with the review tab $review",
+    async ({ inPopout }) => {
+      const wired = await wireWatch(ONE_LEFTOVER);
+      const popout = makeUiWindow();
+      await wired.watch.startupScan();
+      wired.openReview(popout.element);
+      if (!inPopout) wired.closeReview();
+
+      noticeButtons(Notice.instances[0])[0].click();
+
+      await vi.waitFor(() => expect(wired.opened).toHaveLength(1));
+      expect(wired.openedIn).toEqual([inPopout ? popout.win : window]);
+    }
+  );
+
+  it("asks about the row at a leftover's path, and the erase after, in the window Manage was asked for from, though Settings is Obsidian's activeWindow again", async () => {
+    const wired = await wireWatch({
+      'notes/a.md': { 'ir-id': 'x', tags: [ARTICLE_TAG] },
+    });
+    wired.repo.mutate(
+      `INSERT INTO snippet (id, reference, due, interval, priority, deleted) VALUES ('held-1234-abcd', 'notes/a.md', 0, 1, 30, 1)`
+    );
+    const prompts: { modal: ConfirmModal; win: Window }[] = [];
+    vi.spyOn(ConfirmModal.prototype, 'open').mockImplementation(function (
+      this: ConfirmModal
+    ) {
+      prompts.push({ modal: this, win: activeWindow });
+      // Closing answers what is left unanswered, as Obsidian's runs `onClose`
+      vi.spyOn(this, 'close').mockImplementation(() => this.onClose());
+      this.onOpen();
+    });
+    /** Press the button at `index` of the last prompt: Cancel, then the rest. */
+    const answer = (index: number) => {
+      const { modalEl } = prompts.at(-1)!.modal;
+      const buttons = modalEl.querySelectorAll<HTMLButtonElement>(
+        '.modal-button-container > button'
+      );
+      buttons[index].click();
+    };
+    const popout = makeUiWindow();
+    await wired.watch.manage(popout.element);
+    const modal = showModal(wired.opened[0]);
+
+    // As the user went to Settings and back with no focus event
+    vi.stubGlobal('activeWindow', settings);
+    choose(modal.contentEl, { action: 'adopt', as: 'article' });
+    confirmOf(modal).click();
+    await vi.waitFor(() => expect(prompts).toHaveLength(1));
+    vi.stubGlobal('activeWindow', settings);
+    // "Erase and import fresh", which is asked once more
+    answer(1);
+    await vi.waitFor(() => expect(prompts).toHaveLength(2));
+    answer(0);
+
+    await vi.waitFor(() => expect(confirmOf(modal).disabled).toBe(false));
+    expect(prompts.map(({ win }) => win)).toEqual([popout.win, popout.win]);
+    expect(wired.deleteRow).not.toHaveBeenCalled();
   });
 });

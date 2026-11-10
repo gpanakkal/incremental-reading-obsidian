@@ -397,7 +397,8 @@ const MAX_SHOWN_LEFTOVERS = 99;
  * holds, so the begin-review button stays on the bar's midpoint.
  */
 function LeftoverAction() {
-  const { leftovers } = useReviewContext().plugin;
+  const { plugin, reviewView } = useReviewContext();
+  const { leftovers } = plugin;
   const current = useSyncExternalStore(
     leftovers?.subscribe ?? subscribeToNothing,
     () => leftovers?.current ?? NO_LEFTOVERS
@@ -410,7 +411,7 @@ function LeftoverAction() {
       tooltip={`Manage ${count} ${count === 1 ? 'note' : 'notes'} not found in the database`}
       id="manage-leftovers-button"
       className="ir-has-count"
-      handleClick={() => leftovers?.manage()}
+      handleClick={() => leftovers?.manage(reviewView.containerEl)}
     >
       <FileQuestionMark />
       <span className="ir-leftover-count" aria-hidden="true">

@@ -1210,14 +1210,23 @@ describe('ActionBar', () => {
       }
     );
 
-    it('asks the plugin to look again and manage them when clicked', async () => {
+    it("asks the plugin to look again and manage them, in the review tab's window, when clicked", async () => {
       const leftovers = makeLeftoverWatch(2);
-      const container = mountBar({ leftovers });
+      // What says which window the leftovers open in (see `uiWindow`)
+      const containerEl = {};
+      const container = mountBar({
+        leftovers,
+        reviewView: {
+          showMoreOptionsMenu: vi.fn(),
+          leaf: makeLeaf(),
+          containerEl,
+        },
+      });
       await settle();
 
       queryLeftoverButton(container)!.click();
 
-      expect(leftovers.manage).toHaveBeenCalledOnce();
+      expect(leftovers.manage).toHaveBeenCalledExactlyOnceWith(containerEl);
     });
 
     it('comes and goes as leftovers are found and resolved, with no other re-render', async () => {

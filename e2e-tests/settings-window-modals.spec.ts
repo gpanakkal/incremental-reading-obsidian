@@ -1,4 +1,6 @@
+import { ARTICLE_TAG } from '#/lib/constants';
 import { expect, type ElectronApplication, type Page } from '@playwright/test';
+import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import {
   executeCommandById,
@@ -115,6 +117,95 @@ async function askBeforeDeleting() {
   });
 }
 
+/**
+ * What the page-side calls below reach on Obsidian and the plugin.
+ * `window.app` and `app.plugins` are unofficial Obsidian API: stable in
+ * practice, but undocumented.
+ */
+type PageApp = {
+  vault: { getFileByPath(path: string): unknown };
+  metadataCache: {
+    getFileCache(file: unknown): { frontmatter?: unknown } | null;
+  };
+  plugins: {
+    plugins: Record<
+      string,
+      {
+        reviewManager: {
+          repo: {
+            mutate(sql: string, params?: unknown[]): Promise<unknown>;
+          };
+        };
+        leftovers?: { startupScan(): Promise<void> };
+      }
+    >;
+  };
+};
+
+/** Run `sql` against the running plugin's database. */
+const mutate = (sql: string, params: unknown[] = []) =>
+  window.evaluate(
+    async ([sql, params]) => {
+      const { app } = window as unknown as { app: PageApp };
+      const { repo } = app.plugins.plugins['incremental-reading'].reviewManager;
+      await repo.mutate(sql, params);
+    },
+    [sql, params] as const
+  );
+
+/**
+ * Write a note into the vault and wait for Obsidian to index its
+ * frontmatter, which the leftover scan reads tags and ids off.
+ */
+async function writeVaultFile(at: string, content: string) {
+  await fs.mkdir(path.dirname(path.join(vaultPath, at)), { recursive: true });
+  await fs.writeFile(path.join(vaultPath, at), content);
+  await expect
+    .poll(() =>
+      window.evaluate((p) => {
+        const { app } = window as unknown as { app: PageApp };
+        const file = app.vault.getFileByPath(p);
+        return (
+          file !== null &&
+          app.metadataCache.getFileCache(file)?.frontmatter !== undefined
+        );
+      }, at)
+    )
+    .toBe(true);
+}
+
+/** A note tagged as an article, holding `id`. */
+const articleNote = (id: string, body: string) =>
+  `---\nir-id: ${id}\ntags: ${ARTICLE_TAG}\n---\n${body}\n`;
+
+/** The leftover note written by {@link writeLeftover}. */
+const LEFTOVER_PATH = 'notes/Leftover.md';
+
+/**
+ * Leave a note in the vault that the database knows nothing of, an article
+ * by its tag, and look for it as a reload's startup scan would: the leftover
+ * button counts what the last look found, and the notice shows what it found
+ * once a review tab opens. Leftovers are asked about only while the database
+ * holds an item, so it is given one.
+ */
+async function writeLeftover() {
+  await writeVaultFile('articles/Held.md', articleNote('held', 'Held'));
+  await mutate(
+    `INSERT INTO article (id, reference, due, interval, priority)
+     VALUES ('held', 'articles/Held.md', $1, 86400000, 25)`,
+    [Date.now() + 1e9]
+  );
+  await writeVaultFile(LEFTOVER_PATH, articleNote('fictitious', 'Left over'));
+  await window.evaluate(async () => {
+    const { app } = window as unknown as { app: PageApp };
+    await app.plugins.plugins['incremental-reading'].leftovers?.startupScan();
+  });
+}
+
+/** The leftover modal open in `page`. */
+const leftoverModalIn = (page: Page) =>
+  modalsIn(page).filter({ has: page.locator('.ir-leftover-modal') });
+
 // #endregion
 
 test('opens the scheduling modal from the action bar in the main window while Settings is open', async () => {
@@ -193,5 +284,45 @@ test('asks to delete the snippet an undo takes back in the main window while Set
   await undo.click();
 
   await expect(modalsIn(window)).toBeVisible();
+  await expect(modalsIn(settings)).toHaveCount(0);
+});
+
+test("opens the leftover modal from the review home's Manage button, and the question it asks, in the main window while Settings is open", async () => {
+  // A row at the leftover's path holding another id, which Confirm asks about
+  await mutate(
+    `INSERT INTO snippet (id, reference, due, interval, priority, deleted)
+     VALUES ('held-snippet', $1, $2, 86400000, 25, 1)`,
+    [LEFTOVER_PATH, Date.now() - 1_000]
+  );
+  await writeLeftover();
+  await executeCommandById(window, 'incremental-reading:learn');
+  const manage = window.locator('#manage-leftovers-button');
+  await expect(manage).toBeVisible();
+  const settings = await openSettingsBehind();
+
+  await manage.click();
+
+  await expect(leftoverModalIn(window)).toBeVisible();
+  await expect(modalsIn(settings)).toHaveCount(0);
+  await leftoverModalIn(window)
+    .locator('.modal-button-container .mod-cta')
+    .click();
+  await expect(
+    window.locator('.modal-container.mod-confirmation')
+  ).toBeVisible();
+  await expect(modalsIn(settings)).toHaveCount(0);
+});
+
+test("opens the leftover modal from the notice's Manage button in the main window while Settings is open", async () => {
+  await writeLeftover();
+  // The notice waits for a review tab, and shows in the window in front then
+  await executeCommandById(window, 'incremental-reading:learn');
+  const manage = window.locator('.notice .ir-notice-action');
+  await expect(manage).toBeVisible();
+  const settings = await openSettingsBehind();
+
+  await manage.click();
+
+  await expect(leftoverModalIn(window)).toBeVisible();
   await expect(modalsIn(settings)).toHaveCount(0);
 });
