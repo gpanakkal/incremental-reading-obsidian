@@ -47,43 +47,66 @@ export interface BackupFile {
   path: string;
   /** The schema version of the database backed up. */
   version: number;
+  /**
+   * The version of the plugin that wrote it (its manifest's), or null for a
+   * backup named before names carried it, or written without one known.
+   */
+  pluginVersion: string | null;
   kind: BackupKind;
   /** When it was written, from its name (milliseconds since the epoch). */
   time: number;
 }
 
 /**
- * `ir-user-data_v<version>[_<merge|stale>]_<ISO time, : and . as ->.sqlite`,
- * as {@link backupFileName} writes it.
+ * What a plugin version in a backup's name may hold: a semantic version's
+ * characters. No `_`, which ends it, and no `/`, which would make a folder.
+ */
+const PLUGIN_VERSION = /^[0-9A-Za-z.+-]+$/;
+
+/**
+ * `ir-user-data_v<version>[_p<plugin version>][_<merge|stale>]_<ISO time, :
+ * and . as ->.sqlite`, as {@link backupFileName} writes it. Names written
+ * before they carried the plugin version lack the `_p` part, and still read.
  */
 const BACKUP_NAME =
-  /^ir-user-data_v(\d+)(?:_(merge|stale))?_(\d{4}-\d{2}-\d{2}T\d{2})-(\d{2})-(\d{2})-(\d{3}Z)\.sqlite$/;
+  /^ir-user-data_v(\d+)(?:_p([0-9A-Za-z.+-]+))?(?:_(merge|stale))?_(\d{4}-\d{2}-\d{2}T\d{2})-(\d{2})-(\d{2})-(\d{3}Z)\.sqlite$/;
 
-/** The name of a backup of a database at `version`, taken at `date`. */
+/**
+ * The name of a backup of a database at `version`, taken at `date` by
+ * `pluginVersion` of the plugin. Without a plugin version, or with one that
+ * a name can't hold (see {@link PLUGIN_VERSION}), the name has none, as names
+ * had before they carried it.
+ */
 export function backupFileName(
   version: number,
   kind: BackupKind,
-  date: Date
+  date: Date,
+  pluginVersion?: string
 ): string {
+  const plugin =
+    pluginVersion !== undefined && PLUGIN_VERSION.test(pluginVersion)
+      ? `_p${pluginVersion}`
+      : '';
   const marker = kind === 'migration' ? '' : `_${kind}`;
   const timestamp = date.toISOString().replace(/[:.]/g, '-');
-  return `ir-user-data_v${version}${marker}_${timestamp}.sqlite`;
+  return `ir-user-data_v${version}${plugin}${marker}_${timestamp}.sqlite`;
 }
 
 /**
- * Read a backup's version, kind and time from its name, or null for a file
- * that is no backup this plugin wrote, or whose time is no real date: such a
- * file is never pruned.
+ * Read a backup's version, plugin version, kind and time from its name, or
+ * null for a file that is no backup this plugin wrote, or whose time is no
+ * real date: such a file is never pruned.
  */
 export function parseBackupName(path: string): BackupFile | null {
   const match = BACKUP_NAME.exec(path.slice(path.lastIndexOf('/') + 1));
   if (!match) return null;
-  const [, version, marker, hour, minute, second, ms] = match;
+  const [, version, pluginVersion, marker, hour, minute, second, ms] = match;
   const time = Date.parse(`${hour}:${minute}:${second}.${ms}`);
   if (Number.isNaN(time)) return null;
   return {
     path,
     version: Number(version),
+    pluginVersion: pluginVersion ?? null,
     kind: (marker as 'merge' | 'stale' | undefined) ?? 'migration',
     time,
   };

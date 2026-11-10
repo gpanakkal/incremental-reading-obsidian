@@ -33,9 +33,17 @@ beforeAll(async () => {
   SQL = await initSqlJs();
 });
 
-/** The path of a backup of `kind` at `version`, `age` ms before {@link NOW}. */
-function backupAt(kind: BackupKind, version: number, age: number): string {
-  return `${BACKUP_DIRECTORY}/${backupFileName(version, kind, new Date(NOW - age))}`;
+/**
+ * The path of a backup of `kind` at `version`, `age` ms before {@link NOW},
+ * by `pluginVersion` of the plugin, or named as before names carried one.
+ */
+function backupAt(
+  kind: BackupKind,
+  version: number,
+  age: number,
+  pluginVersion?: string
+): string {
+  return `${BACKUP_DIRECTORY}/${backupFileName(version, kind, new Date(NOW - age), pluginVersion)}`;
 }
 
 interface Backup {
@@ -44,6 +52,17 @@ interface Backup {
   version: number;
   age: number;
 }
+
+/** Plugin versions a backup's name can hold: a semantic version's characters. */
+const pluginVersionArb = fc.stringMatching(/^[0-9A-Za-z.+-]+$/);
+
+/** Plugin versions a name can't hold: empty, or with a character outside those. */
+const unnameableVersionArb = fc.oneof(
+  fc.constant(''),
+  fc
+    .tuple(fc.string(), fc.constantFrom('_', '/', ' ', ':', '\\'), fc.string())
+    .map((parts) => parts.join(''))
+);
 
 /** Ages that sit on, or a millisecond either side of, the 30-day window. */
 const backupAgeArb = fc.oneof(
@@ -58,8 +77,18 @@ const backupsArb = fc
         kind: fc.constantFrom<BackupKind>('merge', 'stale', 'migration'),
         version: fc.integer({ min: 1, max: 6 }),
         age: backupAgeArb,
+        // Names with a plugin version and names from before they had one
+        // pool alike
+        pluginVersion: fc.option(fc.constantFrom('0.8.2', '0.8.3', '1.0.0'), {
+          nil: undefined,
+        }),
       })
-      .map((b): Backup => ({ ...b, path: backupAt(b.kind, b.version, b.age) })),
+      .map(
+        ({ pluginVersion, ...b }): Backup => ({
+          ...b,
+          path: backupAt(b.kind, b.version, b.age, pluginVersion),
+        })
+      ),
     { selector: (b) => b.path, maxLength: 25 }
   )
   .chain((backups) =>
@@ -79,6 +108,9 @@ const NOT_BACKUPS = [
   `${BACKUP_DIRECTORY}/ir-user-data_v3_MERGE_2020-01-01T00-00-00-000Z.sqlite`,
   `${BACKUP_DIRECTORY}/ir-user-data_vx_2020-01-01T00-00-00-000Z.sqlite`,
   `${BACKUP_DIRECTORY}/ir-user-data_v3_2020-01-01T00-00-00Z.sqlite`,
+  `${BACKUP_DIRECTORY}/ir-user-data_v3_p_2020-01-01T00-00-00-000Z.sqlite`,
+  `${BACKUP_DIRECTORY}/ir-user-data_v3_merge_p0.8.3_2020-01-01T00-00-00-000Z.sqlite`,
+  `${BACKUP_DIRECTORY}/ir-user-data_p0.8.3_v3_2020-01-01T00-00-00-000Z.sqlite`,
 ];
 
 /**
@@ -260,16 +292,39 @@ function tempTables(db: Database): string[] {
 // #endregion
 
 describe('backup names', () => {
-  it('property: reads back the version, kind and time a name was written with, whatever folder it is in', () => {
+  it('property: reads back the version, plugin version, kind and time a name was written with, whatever folder it is in', () => {
     fc.assert(
       fc.property(
         fc.integer({ min: 0, max: 10_000 }),
+        fc.option(pluginVersionArb, { nil: undefined }),
         fc.constantFrom<BackupKind>('merge', 'stale', 'migration'),
         fc.integer({ min: Date.UTC(1971, 0, 1), max: Date.UTC(2999, 0, 1) }),
         fc.constantFrom('', 'a/', 'incremental-reading/.backups/'),
-        (version, kind, time, folder) => {
-          const path = `${folder}${backupFileName(version, kind, new Date(time))}`;
-          expect(parseBackupName(path)).toEqual({ path, version, kind, time });
+        (version, pluginVersion, kind, time, folder) => {
+          const path = `${folder}${backupFileName(version, kind, new Date(time), pluginVersion)}`;
+          expect(parseBackupName(path)).toEqual({
+            path,
+            version,
+            pluginVersion: pluginVersion ?? null,
+            kind,
+            time,
+          });
+        }
+      )
+    );
+  });
+
+  it('property: names a backup as if no plugin version were known when its name could not hold the one given', () => {
+    fc.assert(
+      fc.property(
+        fc.nat({ max: 99 }),
+        unnameableVersionArb,
+        fc.constantFrom<BackupKind>('merge', 'stale', 'migration'),
+        (version, pluginVersion, kind) => {
+          const date = new Date(NOW);
+          const name = backupFileName(version, kind, date, pluginVersion);
+          expect(name).toBe(backupFileName(version, kind, date));
+          expect(parseBackupName(name)?.pluginVersion).toBeNull();
         }
       )
     );
@@ -282,6 +337,16 @@ describe('backup names', () => {
     );
     expect(backupFileName(12, 'stale', date)).toBe(
       'ir-user-data_v12_stale_2026-01-02T03-04-05-006Z.sqlite'
+    );
+  });
+
+  it('writes the plugin version after the schema version, before the kind', () => {
+    const date = new Date(Date.UTC(2026, 0, 2, 3, 4, 5, 6));
+    expect(backupFileName(15, 'merge', date, '0.8.3')).toBe(
+      'ir-user-data_v15_p0.8.3_merge_2026-01-02T03-04-05-006Z.sqlite'
+    );
+    expect(backupFileName(15, 'migration', date, '1.0.0-beta.1+2')).toBe(
+      'ir-user-data_v15_p1.0.0-beta.1+2_2026-01-02T03-04-05-006Z.sqlite'
     );
   });
 

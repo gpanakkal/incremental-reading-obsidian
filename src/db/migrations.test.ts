@@ -31,7 +31,9 @@ const schemaSQL = readFileSync(schemaPath, 'utf-8');
 vi.mock('./schema.sql', () => ({ default: schemaSQL }));
 
 // Import after the mock is registered
-const { migrations } = await import('./migrations');
+const { migrations, PLUGIN_RELEASES, pluginVersionsOfSchema } = await import(
+  './migrations'
+);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1971,4 +1973,101 @@ describe('fresh vs migrated schema parity', () => {
       expect(foreignKeys(migrated)).toEqual(foreignKeys(fresh));
     }
   );
+});
+
+describe('plugin versions of schema versions', () => {
+  const latest = migrations[migrations.length - 1];
+  /** Where a version comes among the releases; past them all if unlisted. */
+  const rank = (version: string) => {
+    const i = PLUGIN_RELEASES.indexOf(version);
+    return i === -1 ? PLUGIN_RELEASES.length : i;
+  };
+  /** A release's numbers, to put releases in order by them. */
+  const numbers = (version: string) => version.split('.').map(Number);
+
+  it('lists each release once, oldest first', () => {
+    for (let i = 1; i < PLUGIN_RELEASES.length; i++) {
+      const [a, b] = [
+        numbers(PLUGIN_RELEASES[i - 1]),
+        numbers(PLUGIN_RELEASES[i]),
+      ];
+      const later = a.findIndex((n, j) => n !== b[j]);
+      expect(later).not.toBe(-1);
+      expect(b[later]).toBeGreaterThan(a[later]);
+    }
+  });
+
+  it('gives every migration the release that brought it, in release order, with only the newest yet unreleased', () => {
+    for (const migration of migrations) {
+      expect(migration.pluginVersion).toMatch(/^\d+\.\d+\.\d+$/);
+    }
+    for (let i = 1; i < migrations.length; i++) {
+      expect(rank(migrations[i].pluginVersion)).toBeGreaterThanOrEqual(
+        rank(migrations[i - 1].pluginVersion)
+      );
+    }
+    // A release left out of the list would read as unreleased: only one
+    // version, the one being built, may be
+    const unreleased = new Set(
+      migrations
+        .map((m) => m.pluginVersion)
+        .filter((v) => !PLUGIN_RELEASES.includes(v))
+    );
+    expect(unreleased.size).toBeLessThanOrEqual(1);
+  });
+
+  it('reads the releases that brought each schema version from history', () => {
+    const spans = [0, 2, 3, 4, 5, 9, 10, 14].map((schema) => {
+      const span = pluginVersionsOfSchema(schema);
+      return span && `${span.first}..${span.last}`;
+    });
+    expect(spans).toStrictEqual([
+      '0.1.0..0.3.1',
+      '0.4.0..0.4.5',
+      '0.5.0..0.5.1',
+      '0.5.2..0.5.5',
+      '0.6.0..0.6.0',
+      '0.6.0..0.6.5',
+      '0.7.0..0.7.2',
+      '0.8.0..0.8.2',
+    ]);
+  });
+
+  it('gives the current schema version only the release that brought it', () => {
+    expect(pluginVersionsOfSchema(latest.version)).toStrictEqual({
+      first: latest.pluginVersion,
+      last: latest.pluginVersion,
+    });
+  });
+
+  it('property: knows no release for a schema version no migration reaches', () => {
+    fc.assert(
+      fc.property(
+        fc.oneof(
+          fc.integer({ min: latest.version + 1 }),
+          fc.integer({ max: -1 })
+        ),
+        (schema) => {
+          expect(pluginVersionsOfSchema(schema)).toBeNull();
+        }
+      )
+    );
+  });
+
+  it('property: spans a schema version from the release that brought it to the last release before the next', () => {
+    fc.assert(
+      fc.property(fc.integer({ min: 1, max: latest.version - 1 }), (schema) => {
+        const span = pluginVersionsOfSchema(schema)!;
+        const brought = migrations.find((m) => m.version === schema)!;
+        const next = migrations.find((m) => m.version === schema + 1)!;
+        expect(span.first).toBe(brought.pluginVersion);
+        if (rank(next.pluginVersion) === rank(brought.pluginVersion)) {
+          // Replaced within the release that brought it
+          expect(span.last).toBe(span.first);
+        } else {
+          expect(rank(span.last)).toBe(rank(next.pluginVersion) - 1);
+        }
+      })
+    );
+  });
 });

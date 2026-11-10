@@ -790,9 +790,11 @@ async function startDatabase(
   let onWriteBlocked: ((error: Error) => void) | undefined;
   let onWritesResumed: (() => void) | undefined;
   let replaySettings: (() => ReplaySettings) | undefined;
+  let pluginVersion: string | undefined;
   const handleFileChange = vi.fn(async () => {});
   vi.spyOn(SQLJSRepository, 'start').mockImplementation((params) => {
     replaySettings = params.replaySettings;
+    pluginVersion = params.pluginVersion;
     onReloadFromDisk = params.onReloadFromDisk;
     onWriteBlocked = params.onWriteBlocked;
     onWritesResumed = params.onWritesResumed;
@@ -807,6 +809,7 @@ async function startDatabase(
   vi.spyOn(queryClient, 'invalidateQueries').mockResolvedValue(undefined);
   const receiver = {
     app: { vault: { on: vi.fn() } },
+    manifest: { version: '1.2.3' },
     register: vi.fn(),
     registerEvent: vi.fn(),
     followMovedNotes: vi.fn(),
@@ -833,6 +836,7 @@ async function startDatabase(
     blockWrites: (error: Error) => onWriteBlocked!(error),
     resumeWrites: () => onWritesResumed!(),
     replaySettings: () => replaySettings!(),
+    pluginVersion: () => pluginVersion,
     fireVault,
     handleFileChange,
   };
@@ -899,6 +903,7 @@ async function startRenames(items: readonly string[] = []) {
       // Runs each op at once, as a job of its own
       fileManager: { runAsyncLinkUpdate: (op: () => Promise<void>) => op() },
     },
+    manifest: { version: '1.2.3' },
     register: vi.fn(),
     registerEvent: vi.fn(),
     followMovedNotes: vi.fn(),
@@ -4855,6 +4860,14 @@ describe('IncrementalReadingPlugin database reload', () => {
     expect(replaySettings()).toEqual(settings);
   });
 
+  it('names backups with the version in its manifest', async () => {
+    const { pluginVersion } = await startDatabase(undefined, {
+      manifest: { version: '0.9.1' },
+    });
+
+    expect(pluginVersion()).toBe('0.9.1');
+  });
+
   it('reloads without error before the action bars are registered', async () => {
     const { reload } = await startDatabase(undefined);
 
@@ -4974,6 +4987,7 @@ describe('IncrementalReadingPlugin database reload: the item under review', () =
       }
     ).initReviewManager.call({
       app: { vault: { on: vi.fn() } },
+      manifest: { version: '1.2.3' },
       register: vi.fn(),
       registerEvent: vi.fn(),
       followMovedNotes: vi.fn(),
@@ -5147,6 +5161,7 @@ describe('IncrementalReadingPlugin database startup and Sync', () => {
     });
     const receiver = {
       app,
+      manifest: { version: '1.2.3' },
       register: vi.fn((run: () => void) => unloaders.push(run)),
       registerEvent: vi.fn(),
       followMovedNotes: vi.fn(),
