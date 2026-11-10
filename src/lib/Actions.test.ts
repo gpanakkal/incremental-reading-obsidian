@@ -2341,7 +2341,20 @@ describe('Actions.goToSource', () => {
             wired.plugin.app,
             itemFile
           );
+          const find = vi.mocked(itemSource.findItemSource);
+          expect(actions.itemSource(itemFile)).toBe(source);
+          expect(find).toHaveBeenCalledExactlyOnceWith(
+            wired.repo,
+            wired.plugin.app,
+            itemFile
+          );
+          find.mockClear();
           expect(actions.sourceRoute(itemFile)).toBe(source && route);
+          expect(find).toHaveBeenCalledExactlyOnceWith(
+            wired.repo,
+            wired.plugin.app,
+            itemFile
+          );
           if (source) {
             expect(routeOf).toHaveBeenCalledExactlyOnceWith(
               wired.plugin.app,

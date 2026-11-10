@@ -5,7 +5,11 @@ import fc from 'fast-check';
 import { Keymap, Menu, type MenuItem } from '#/test/__mocks__/obsidian';
 import type { TFile } from 'obsidian';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { addSourceMenuItems } from './source-menu';
+import {
+  addSourceMenuItems,
+  GO_TO_CONTEXT,
+  goToSourceControl,
+} from './source-menu';
 
 // #region HELPERS
 /** Every way Go to source can open a source. */
@@ -138,5 +142,44 @@ describe('addSourceMenuItems', () => {
     expect(entryRunning(menu, actions, 'goToContext')?.icon).toBe(
       'lucide-locate'
     );
+  });
+});
+
+describe('goToSourceControl', () => {
+  it('property: names and draws Go to source as its menu entry does, leaving the app exactly when it opens the system browser', () => {
+    fc.assert(
+      fc.property(routeArb, (route) => {
+        const { menu, actions } = raise(false, route);
+        const entry = entryRunning(menu, actions, 'goToSource');
+
+        const control = goToSourceControl(route);
+
+        expect(control).toEqual({ label: entry?.title, icon: entry?.icon });
+        expect(control.label).toMatch(
+          route.kind === 'browser' ? /in system browser$/ : /^(?!.*browser)/
+        );
+      })
+    );
+  });
+
+  it('draws each way of opening a source with an icon of its own', () => {
+    const routes: SourceRoute[] = [
+      { kind: 'file', file: { path: 'sources/Book.pdf' } as TFile },
+      { kind: 'web-viewer', url: 'https://a.example/', viewer: {} as never },
+      { kind: 'browser', url: 'https://a.example/' },
+    ];
+
+    const icons = routes.map((route) => goToSourceControl(route).icon);
+
+    expect(new Set(icons).size).toBe(routes.length);
+  });
+});
+
+describe('GO_TO_CONTEXT', () => {
+  it('names and draws Go to context as its menu entry does', () => {
+    const { menu, actions } = raise(true, null);
+    const entry = entryRunning(menu, actions, 'goToContext');
+
+    expect(GO_TO_CONTEXT).toEqual({ label: entry?.title, icon: entry?.icon });
   });
 });
