@@ -48,6 +48,7 @@ function makeHighlight(
     deleted: false,
     priority: 50,
     parent: FILE_PATH,
+    context: FILE_PATH,
     start_offset: start,
     end_offset: end,
     scroll_top: 0,

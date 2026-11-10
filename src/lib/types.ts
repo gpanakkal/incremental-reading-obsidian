@@ -44,7 +44,14 @@ export interface ISnippetBase {
   dismissed: boolean;
   deleted: boolean;
   priority: number;
+  /** The item this one sits under in the tree of items: see `context` */
   parent: string | null;
+  /**
+   * The item whose note holds this one's highlight, or, for a card, the link
+   * to it: what it was taken from, its parent as made. Unlike `parent`, which
+   * moves up a level when its item is dropped, it is erased then
+   */
+  context: string | null;
   start_offset: number | null;
   end_offset: number | null;
   scroll_top: number;
@@ -72,7 +79,10 @@ export interface ISRSCard extends Card {
   created_at: Date;
   dismissed: boolean;
   deleted: boolean;
+  /** The item this one sits under in the tree of items: see `context` */
   parent: string | null;
+  /** As a snippet's (see `ISnippetBase.context`) */
+  context: string | null;
 }
 
 export interface ISRSCardDisplay extends SafeOmit<ISRSCard, 'state'> {

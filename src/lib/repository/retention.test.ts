@@ -229,9 +229,9 @@ function addSnippet(
   parent: string | null = null
 ) {
   db.run(
-    `INSERT INTO snippet (id, reference, parent, due, interval, priority, deleted, updated_at, updated_by)
-     VALUES (?, ?, ?, 0, 1, 30, ?, ?, 'x')`,
-    [id, `s/${id}.md`, parent, deleted ? 1 : 0, NOW - age]
+    `INSERT INTO snippet (id, reference, parent, context, due, interval, priority, deleted, updated_at, updated_by)
+     VALUES (?, ?, ?, ?, 0, 1, 30, ?, ?, 'x')`,
+    [id, `s/${id}.md`, parent, parent, deleted ? 1 : 0, NOW - age]
   );
 }
 

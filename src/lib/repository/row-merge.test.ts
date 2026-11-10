@@ -1,5 +1,6 @@
 import { migrations } from '#/db/migrations';
 import IRScheduler from '#/lib/IRScheduler';
+import { deleteRowStatements } from '#/lib/items/row-delete';
 import { evictedSpot } from '#/lib/moved-note-scan';
 import fc from 'fast-check';
 import { readFileSync } from 'fs';
@@ -1572,6 +1573,110 @@ describe('attaching the copy', () => {
     expect(() => copyIntoAttached(db, copy)).toThrow();
     expect(attached(db)).toEqual(['main', 'temp']);
     expect(INCOMING_SCHEMA).not.toBe('main');
+  });
+});
+
+describe('mergeInto, a row dropped on another device', () => {
+  /** The rows of a tree of items, with the links that place each in it. */
+  const TREE = [
+    { table: 'article', id: 'a', parent: null },
+    { table: 'snippet', id: 's0', parent: 'a' },
+    { table: 'snippet', id: 's1', parent: 's0' },
+    { table: 'srs_card', id: 'c0', parent: 's1' },
+    { table: 'srs_card', id: 'c1', parent: 's0' },
+    { table: 'snippet', id: 's2', parent: null },
+  ] as const;
+
+  /** A database holding {@link TREE}, each row taken from its parent. */
+  function plant(): Database {
+    const db = new SQL.Database();
+    open.push(db);
+    db.exec(SCHEMA);
+    for (const { table, id, parent } of TREE) {
+      if (table === 'article') {
+        db.run(
+          `INSERT INTO article (id, reference, due, interval, priority, updated_at, updated_by)
+           VALUES (?, ?, 1, 1, 30, 1, 'base')`,
+          [id, `${id}.md`]
+        );
+      } else if (table === 'snippet') {
+        db.run(
+          `INSERT INTO snippet (id, reference, parent, context, due, interval, priority, updated_at, updated_by)
+           VALUES (?, ?, ?, ?, 1, 1, 30, 1, 'base')`,
+          [id, `${id}.md`, parent, parent]
+        );
+      } else {
+        db.run(
+          `INSERT INTO srs_card (id, reference, parent, context, created_at, due, stability,
+             difficulty, elapsed_days, scheduled_days, state, updated_at, updated_by)
+           VALUES (?, ?, ?, ?, 0, 1, 0, 0, 0, 0, 0, 1, 'base')`,
+          [id, `${id}.md`, parent, parent]
+        );
+      }
+    }
+    return db;
+  }
+
+  /** Each snippet's and card's place in the tree, and whether it is gone. */
+  function tree(db: Database) {
+    return ['snippet', 'srs_card'].flatMap((table) =>
+      rowsOf(db, table, 'id').map(
+        ({ id, parent, context, deleted, reference }) => ({
+          id,
+          parent,
+          context,
+          deleted,
+          reference,
+        })
+      )
+    );
+  }
+
+  it('property: gives this device the tree the other device left, dropping the same row', () => {
+    fc.assert(
+      fc.property(fc.constantFrom(...TREE), ({ table, id }) => {
+        const there = plant();
+        armRowStamps(there, { deviceId: () => 'there', now: () => 2e12 });
+        const here = plant();
+        armRowStamps(here, THIS_DEVICE);
+        for (const { query, params } of deleteRowStatements(table, id)) {
+          there.run(query, params as SqlValue[]);
+        }
+        const theirs = openIncoming(SQL, there.export(), migrations);
+        open.push(theirs);
+
+        mergeInto(here, theirs, THIS_DEVICE);
+
+        expect(tree(here)).toEqual(tree(theirs));
+      })
+    );
+  });
+
+  it('takes in a file an older version wrote, before rows had a context, as rows taken from their parents', () => {
+    const old = plant();
+    old.exec(`
+      ALTER TABLE snippet DROP COLUMN context;
+      ALTER TABLE srs_card DROP COLUMN context;
+      PRAGMA user_version = 15;
+    `);
+    const here = new SQL.Database();
+    open.push(here);
+    here.exec(SCHEMA);
+    armRowStamps(here, THIS_DEVICE);
+    const theirs = openIncoming(SQL, old.export(), migrations);
+    open.push(theirs);
+
+    mergeInto(here, theirs, THIS_DEVICE);
+
+    expect(
+      tree(here).map(({ id, parent, context }) => [id, parent, context])
+    ).toEqual([
+      ['s0', 'a', 'a'],
+      ['s1', 's0', 's0'],
+      ['s2', null, null],
+      ['c0', 's1', 's1'],
+      ['c1', 's0', 's0'],
+    ]);
   });
 });
 

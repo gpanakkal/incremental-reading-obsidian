@@ -121,8 +121,8 @@ async function seedLostItem(
 async function seedChild(parent: string) {
   await writeVaultFile('snippets/child.md', 'A snippet\n');
   await mutate(
-    `INSERT INTO snippet (id, reference, parent, due, interval, priority)
-     VALUES ('child', 'snippets/child.md', $1, $2, 86400000, 30)`,
+    `INSERT INTO snippet (id, reference, parent, context, due, interval, priority)
+     VALUES ('child', 'snippets/child.md', $1, $1, $2, 86400000, 30)`,
     [parent, Date.now() + 1e9]
   );
 }

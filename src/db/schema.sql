@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS snippet (
   id TEXT NOT NULL PRIMARY KEY, -- UUID
   reference TEXT NOT NULL UNIQUE, -- pointer to the file's location in the vault
   parent TEXT DEFAULT NULL, -- UUID; null if it wasn't created from an article or snippet
+  context TEXT DEFAULT NULL, -- UUID of the item whose note holds its highlight; null once that is dropped
   due INTEGER, -- unix timestamp
   due_fuzz INTEGER DEFAULT NULL, -- milliseconds to offset due time for intra-day review ordering
   interval INTEGER NOT NULL, -- the interval that was used to calculate `due`
@@ -80,6 +81,7 @@ CREATE TABLE IF NOT EXISTS srs_card (
   -- source TEXT NOT NULL, -- use source property in the card instead so Obsidian updates it properly
   reference TEXT NOT NULL UNIQUE, -- pointer to the file's location in the vault
   parent TEXT DEFAULT NULL, -- UUID; null if it wasn't created from an article or snippet
+  context TEXT DEFAULT NULL, -- UUID of the item whose note holds its embed or highlight; null once that is dropped
   created_at INTEGER NOT NULL, -- unix timestamp
   due INTEGER NOT NULL,
   dismissed INTEGER NOT NULL DEFAULT FALSE,
@@ -160,4 +162,4 @@ CREATE TABLE IF NOT EXISTS restore_epoch (
   restored_at INTEGER
 );
 
-PRAGMA user_version = 15;
+PRAGMA user_version = 16;

@@ -268,7 +268,9 @@ export function trackChangeListeners() {
 
 /**
  * Put a row of item `table` in `repo`, with id `id`, naming `reference`, live
- * or a tombstone, its other columns whatever the schema takes.
+ * (unless said otherwise) or a tombstone, a snippet or card under `parent`
+ * and taken from `context` (its parent unless said otherwise), its other
+ * columns whatever the schema takes.
  */
 export function insertItemAt(
   repo: TestRepository,
@@ -276,18 +278,33 @@ export function insertItemAt(
   {
     id,
     reference,
-    deleted,
-  }: { id: string; reference: string; deleted: boolean }
+    deleted = false,
+    parent = null,
+    context = parent,
+  }: {
+    id: string;
+    reference: string;
+    deleted?: boolean;
+    parent?: string | null;
+    context?: string | null;
+  }
 ) {
   if (table === 'srs_card') {
     repo.mutate(
-      `INSERT INTO srs_card (id, reference, deleted, created_at, due, stability, difficulty, elapsed_days, scheduled_days, state) VALUES ($1, $2, $3, 0, 0, 0, 0, 0, 0, 0)`,
-      [id, reference, deleted]
+      `INSERT INTO srs_card (id, reference, deleted, parent, context, created_at, due, stability, difficulty, elapsed_days, scheduled_days, state) VALUES ($1, $2, $3, $4, $5, 0, 0, 0, 0, 0, 0, 0)`,
+      [id, reference, deleted, parent, context]
+    );
+    return;
+  }
+  if (table === 'snippet') {
+    repo.mutate(
+      `INSERT INTO snippet (id, reference, deleted, parent, context, due, interval, priority) VALUES ($1, $2, $3, $4, $5, 0, 86400000, 30)`,
+      [id, reference, deleted, parent, context]
     );
     return;
   }
   repo.mutate(
-    `INSERT INTO ${table} (id, reference, deleted, due, interval, priority) VALUES ($1, $2, $3, 0, 86400000, 30)`,
+    `INSERT INTO article (id, reference, deleted, due, interval, priority) VALUES ($1, $2, $3, 0, 86400000, 30)`,
     [id, reference, deleted]
   );
 }

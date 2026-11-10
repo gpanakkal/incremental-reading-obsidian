@@ -101,7 +101,7 @@ function makeHighlight(
     interval: 1,
     priority: 20,
     dismissed: false,
-    parent: 'pdf-article',
+    context: 'pdf-article',
     start_offset: encodeAnchor({ page: 1, idx: 0, char: from }),
     end_offset: encodeAnchor({ page: 1, idx: 0, char: to }),
   } as unknown as SnippetHighlight;

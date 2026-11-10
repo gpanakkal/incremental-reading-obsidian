@@ -45,7 +45,8 @@ export interface SnippetHighlight extends ISnippetBase {
   // These are guaranteed to be non-null for highlights
   start_offset: number;
   end_offset: number;
-  parent: string;
+  /** The item on whose note it is painted (see `ISnippetBase.context`) */
+  context: string;
 }
 
 export class SnippetOffsetTracker {

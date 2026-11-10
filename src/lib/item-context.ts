@@ -86,18 +86,22 @@ export function findNoteSource(app: App, note: TFile): NoteSource | null {
 }
 
 /**
- * The note an item was taken from: its parent item's note, or failing that
- * the note its `source` property links to. Null when it has neither — no
- * parent, and a source that is missing, external, or resolves nowhere.
+ * The note an item was taken from: its context item's note (see
+ * `ISnippetBase.context`), or failing that the note its `source` property
+ * links to. Null when it has neither — no context, and a source that is
+ * missing, external, or resolves nowhere.
  *
- * A parent whose row or note is gone counts as no parent.
+ * A context whose row or note is gone counts as none.
+ * @param link `parent` for the note of the item it sits under in the tree
+ *   instead, which a row moved up a level by a drop was not taken from
  */
 export async function findContextFile(
   app: App,
   reviewManager: ReviewManager,
-  item: ReviewSnippet | ReviewCard
+  item: ReviewSnippet | ReviewCard,
+  link: 'context' | 'parent' = 'context'
 ): Promise<TFile | null> {
-  const { parent } = item.data;
+  const parent = item.data[link];
   if (parent) {
     const parentItem = await reviewManager.getReviewItemFromId(parent);
     if (parentItem) return parentItem.file;

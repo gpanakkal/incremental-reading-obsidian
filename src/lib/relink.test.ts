@@ -78,23 +78,39 @@ interface StoredRow {
   reference: string;
   deleted: boolean;
   parent?: string | null;
+  /** What it was taken from: its parent unless said otherwise */
+  context?: string | null;
 }
 
 function insertItem(repo: TestRepository, row: StoredRow) {
   if (row.table === 'srs_card') {
     repo.mutate(
-      `INSERT INTO srs_card (id, reference, parent, deleted, created_at, due,
+      `INSERT INTO srs_card (id, reference, parent, context, deleted, created_at, due,
          stability, difficulty, elapsed_days, scheduled_days, reps, lapses, state)
-       VALUES ($1, $2, $3, $4, $5, $5, 0, 0, 0, 0, 0, 0, 0)`,
-      [row.id, row.reference, row.parent ?? null, row.deleted, FIXED_DUE]
+       VALUES ($1, $2, $3, $4, $5, $6, $6, 0, 0, 0, 0, 0, 0, 0)`,
+      [
+        row.id,
+        row.reference,
+        row.parent ?? null,
+        row.context === undefined ? (row.parent ?? null) : row.context,
+        row.deleted,
+        FIXED_DUE,
+      ]
     );
     return;
   }
   if (row.table === 'snippet') {
     repo.mutate(
-      `INSERT INTO snippet (id, reference, parent, deleted, due, interval, priority)
-       VALUES ($1, $2, $3, $4, $5, 86400000, 30)`,
-      [row.id, row.reference, row.parent ?? null, row.deleted, FIXED_DUE]
+      `INSERT INTO snippet (id, reference, parent, context, deleted, due, interval, priority)
+       VALUES ($1, $2, $3, $4, $5, $6, 86400000, 30)`,
+      [
+        row.id,
+        row.reference,
+        row.parent ?? null,
+        row.context === undefined ? (row.parent ?? null) : row.context,
+        row.deleted,
+        FIXED_DUE,
+      ]
     );
     return;
   }
@@ -1153,8 +1169,11 @@ describe('relinkItem', () => {
   });
 
   describe('a snippet’s highlight in its parent', () => {
-    /** A parent article at `parent.md` and its missing snippet `i`. */
-    function wireSnippet(parentFileThere = true) {
+    /**
+     * A parent article at `parent.md` and its missing snippet `i`, taken
+     * from it unless `takenFrom` says it was moved up under it by a drop.
+     */
+    function wireSnippet(parentFileThere = true, takenFrom = true) {
       const repo = TestRepository.create();
       insertItem(repo, {
         table: 'article',
@@ -1168,6 +1187,7 @@ describe('relinkItem', () => {
         reference: 'gone.md',
         deleted: false,
         parent: 'p',
+        context: takenFrom ? 'p' : null,
       });
       const { plugin } = makePlugin(
         repo,
@@ -1200,6 +1220,15 @@ describe('relinkItem', () => {
         'ir-highlights-changed',
         'parent.md'
       );
+    });
+
+    it('reloads nothing for a parent the snippet was not taken from, which shows no highlight of it', async () => {
+      const { plugin, relink } = wireSnippet(true, false);
+
+      await expect(relink()).resolves.toEqual({ ok: true, from: 'gone.md' });
+      expect(
+        plugin.reviewManager.snippets.getHighlights
+      ).not.toHaveBeenCalled();
     });
 
     it('reloads nothing for a parent with no file', async () => {

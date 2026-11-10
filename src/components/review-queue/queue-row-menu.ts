@@ -194,7 +194,8 @@ async function findItemOrigin(
     const source = findNoteSource(app, item.file);
     return source && 'file' in source ? source.file : null;
   }
-  return findContextFile(app, reviewManager, item);
+  // The parent its row shows, which a drop may have moved it up to
+  return findContextFile(app, reviewManager, item, 'parent');
 }
 
 /**

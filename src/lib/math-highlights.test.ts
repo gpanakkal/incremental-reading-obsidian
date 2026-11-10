@@ -29,6 +29,7 @@ function makeHighlight(
     deleted: false,
     priority: 50,
     parent: 'articles/parent.md',
+    context: 'articles/parent.md',
     start_offset: 0,
     end_offset: 10,
     scroll_top: 0,

@@ -114,8 +114,23 @@ export function findItemSource(
 }
 
 /**
+ * The id of the item a snippet or card was taken from (see
+ * `ISnippetBase.context`), which is not its parent once a drop has moved it
+ * up a level; null when it has none or the database can't answer at once.
+ */
+function contextOf(repo: SQLiteRepository, node: ItemNode): string | null {
+  const table = node.type === 'card' ? 'srs_card' : 'snippet';
+  const rows = repo.query(`SELECT context FROM ${table} WHERE id = $1`, [
+    node.id,
+  ]);
+  if (!Array.isArray(rows)) return null;
+  const row = rows[0] as { context: string | null } | undefined;
+  return row?.context ?? null;
+}
+
+/**
  * Whether the item at `file` has a context for Go to context to open, as
- * `findContextFile` finds it: it is a snippet or card whose parent's row and
+ * `findContextFile` finds it: it is a snippet or card whose context's row and
  * note are there, or whose `source` property links to a note in the vault —
  * one taken from a note that is no item, say.
  */
@@ -126,9 +141,10 @@ export function hasContext(
 ): boolean {
   const node = itemNodeAt(repo, app, file);
   if (!node || node.type === 'article') return false;
-  const parent = node.parent === null ? null : itemNodeById(repo, node.parent);
+  const contextId = contextOf(repo, node);
+  const context = contextId === null ? null : itemNodeById(repo, contextId);
   return (
-    (parent !== null && app.vault.getFileByPath(parent.reference) !== null) ||
+    (context !== null && app.vault.getFileByPath(context.reference) !== null) ||
     Obsidian.getSourceFile(file, app) !== null
   );
 }

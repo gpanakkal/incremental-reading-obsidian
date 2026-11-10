@@ -742,6 +742,8 @@ export class CardManager extends ItemManager {
     const params = [
       card.id,
       card.reference,
+      // Taken from its parent, whose note holds its embed or highlight
+      parent,
       parent,
       card.created_at.getTime(),
       card.due.getTime() + MS_PER_DAY, // new cards due the next day
@@ -757,9 +759,9 @@ export class CardManager extends ItemManager {
       noteFingerprint(file),
     ];
     await this.repo.mutate(
-      `INSERT INTO srs_card (id, reference, parent, created_at, due, last_review, ` +
+      `INSERT INTO srs_card (id, reference, parent, context, created_at, due, last_review, ` +
         `stability, difficulty, elapsed_days, scheduled_days, learning_steps, reps, lapses, state, note_mtime) ` +
-        `VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+        `VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
       params
     );
   }
@@ -793,7 +795,7 @@ export class CardManager extends ItemManager {
   /**
    * The highlights of the cards made from the PDF `pdf`, as their notes'
    * `source` links name their selections (see `parseSelectionSubpath`): of
-   * the live cards whose parent is `pdf`'s article, wherever their links now
+   * the live cards taken from `pdf`'s article (their `context`), wherever their links now
    * resolve, or for a PDF that is no article, of the live parentless cards
    * whose links resolve to it (see `findParentlessFrom`). A dismissed card
    * keeps its highlight, as a dismissed snippet does.
@@ -806,7 +808,7 @@ export class CardManager extends ItemManager {
     const article = await this.findArticle(pdf);
     if (article) {
       const rows = (await this.repo.query(
-        'SELECT * FROM srs_card WHERE parent = $1 AND deleted = FALSE',
+        'SELECT * FROM srs_card WHERE context = $1 AND deleted = FALSE',
         [article.id]
       )) as SRSCardRow[];
       return rows.flatMap((row) => this.pdfHighlight(row) ?? []);

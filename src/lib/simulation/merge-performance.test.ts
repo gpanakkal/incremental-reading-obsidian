@@ -71,9 +71,9 @@ async function populate(device: FakeDevice) {
     }
     for (let i = 0; i < SNIPPETS; i++) {
       repo.mutate(
-        `INSERT INTO snippet (id, reference, parent, due, interval, priority,
+        `INSERT INTO snippet (id, reference, parent, context, due, interval, priority,
            start_offset, end_offset)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+         VALUES ($1, $2, $3, $3, $4, $5, $6, $7, $8)`,
         [
           `s${i}`,
           `snippets/s${i}.md`,
@@ -113,10 +113,10 @@ async function populate(device: FakeDevice) {
       const createdAt = T - 400 * DAY + i * 1000;
       const schedule = replayCard(logs[i], PARAMS, initialCard(createdAt));
       repo.mutate(
-        `INSERT INTO srs_card (id, reference, parent, created_at, due,
+        `INSERT INTO srs_card (id, reference, parent, context, created_at, due,
            last_review, stability, difficulty, elapsed_days, scheduled_days,
            learning_steps, reps, lapses, state)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+         VALUES ($1, $2, $3, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
         [
           `c${i}`,
           `cards/c${i}.md`,

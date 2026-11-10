@@ -1651,8 +1651,8 @@ describe('IncrementalReadingPlugin.addIRMenuItems', () => {
             const parent = rowAt.table === 'snippet' ? 'p' : null;
             repo.mutate(
               rowAt.table === 'snippet'
-                ? `INSERT INTO snippet (id, reference, due, interval, priority, deleted, parent)
-                   VALUES ($1, $2, 0, 86400000, 30, $3, $4)`
+                ? `INSERT INTO snippet (id, reference, due, interval, priority, deleted, parent, context)
+                   VALUES ($1, $2, 0, 86400000, 30, $3, $4, $4)`
                 : `INSERT INTO article (id, reference, due, interval, priority, deleted)
                    VALUES ($1, $2, 0, 86400000, 30, $3)`,
               rowAt.table === 'snippet'

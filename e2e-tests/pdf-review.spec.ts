@@ -1579,9 +1579,9 @@ test.describe('Snippets and cards from a PDF article', () => {
         const { repo } =
           app.plugins.plugins['incremental-reading'].reviewManager;
         await repo.mutate(
-          `INSERT INTO srs_card (id, reference, parent, created_at, due,
+          `INSERT INTO srs_card (id, reference, parent, context, created_at, due,
              stability, difficulty, elapsed_days, scheduled_days, state)
-           VALUES ('old-card', $1, $2, 0, $3, 0, 0, 0, 0, 0)`,
+           VALUES ('old-card', $1, $2, $2, 0, $3, 0, 0, 0, 0, 0)`,
           [reference, id, Date.now() + 86_400_000]
         );
       },

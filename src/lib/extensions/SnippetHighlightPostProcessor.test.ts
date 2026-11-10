@@ -49,6 +49,7 @@ function makeHighlight(
     deleted: false,
     priority: 50,
     parent: 'articles/parent.md',
+    context: 'articles/parent.md',
     start_offset: 0,
     end_offset: 10,
     scroll_top: 0,
@@ -115,7 +116,7 @@ async function wireRowNote(spec: {
     });
   }
   repo.mutate(
-    `INSERT INTO snippet (id, reference, due, interval, priority, parent, start_offset, end_offset) VALUES ('snip-1', 's/1.md', 0, 1, 30, $1, 0, 4)`,
+    `INSERT INTO snippet (id, reference, due, interval, priority, parent, context, start_offset, end_offset) VALUES ('snip-1', 's/1.md', 0, 1, 30, $1, $1, 0, 4)`,
     [spec.row === 'absent' ? null : 'note-id']
   );
   const query = vi.spyOn(repo, 'query');

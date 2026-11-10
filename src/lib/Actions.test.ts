@@ -17,6 +17,7 @@ import * as pdfSelection from '#/lib/pdf/pdf-selection';
 import {
   fetchCurrentItem,
   invalidateCurrentItemQuery,
+  invalidateItemQuery,
 } from '#/lib/query-client';
 import { ActionRefusedError, refusalReason } from '#/lib/readiness';
 import * as reviewPosition from '#/lib/review-position';
@@ -77,6 +78,8 @@ vi.mock('#/lib/query-client', () => ({
   invalidateItemQuery: vi.fn().mockResolvedValue(undefined),
   invalidateCurrentItemQuery: vi.fn().mockResolvedValue(undefined),
   fetchCurrentItem: vi.fn().mockResolvedValue(null),
+  // Looked into around a card's undone making, whose note's text is refreshed
+  queryClient: { getQueryCache: () => ({ find: () => undefined }) },
 }));
 
 // #region HELPERS
@@ -709,6 +712,8 @@ function makeNoteEditor(initial: string) {
  *   another note (`left`), or the tab turned to reading view (`reading`)
  * @param options.typed text typed at the start of the note in the editor
  *   holding it since that editor last saved it, embed and all
+ * @param options.links the card's `parent` and `context` by the time of the
+ *   undo: none by default
  */
 async function makeCardThenUndo(
   { before, after, line, embed }: CardNote,
@@ -722,6 +727,7 @@ async function makeCardThenUndo(
     lineNumber = 0,
     saved,
     typed,
+    links = { parent: null, context: null },
   }: {
     held?: CardSourceHeld;
     cache?: 'current' | 'stale';
@@ -729,6 +735,7 @@ async function makeCardThenUndo(
     lineNumber?: number;
     saved?: 'left' | 'reading';
     typed?: string;
+    links?: { parent: string | null; context: string | null };
   } = {}
 ) {
   const plugin = makePlugin();
@@ -772,7 +779,7 @@ async function makeCardThenUndo(
         } as never);
   });
   vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
-  const reviewCard = { data: { id: 'card-1', parent: null }, file: cardFile };
+  const reviewCard = { data: { id: 'card-1', ...links }, file: cardFile };
   const deleteCard = vi.fn(async () => {
     live.set(meanwhile(live.get()));
     return deleted ? ('deleted' as const) : ('declined' as const);
@@ -3354,6 +3361,7 @@ describe('Actions.createPdfSnippet', () => {
     noViewer = false,
     deleted = true,
     adoptedBy = null,
+    takenFrom = true,
   }: {
     read?: pdfSelection.PdfSelection | null | Error;
     selection?: Range | null;
@@ -3365,6 +3373,11 @@ describe('Actions.createPdfSnippet', () => {
     deleted?: boolean;
     /** The note or PDF of the item that took the snippet over meanwhile. */
     adoptedBy?: TFile | null;
+    /**
+     * Whether that item is its context, or only its parent: one it was
+     * moved up under by a drop, which erased its context.
+     */
+    takenFrom?: boolean;
   }) {
     const file = pdfFile('pdf', 'paper');
     const article =
@@ -3381,7 +3394,15 @@ describe('Actions.createPdfSnippet', () => {
     const getReviewItemFromFile = vi.fn().mockResolvedValue(article);
     const fetchSnippet = vi.fn((id: string) =>
       Promise.resolve(
-        adoptedBy ? { data: { id, parent: 'adopter' } } : { data: { id } }
+        adoptedBy
+          ? {
+              data: {
+                id,
+                parent: 'adopter',
+                context: takenFrom ? 'adopter' : null,
+              },
+            }
+          : { data: { id } }
       )
     );
     const getReviewItemFromId = vi.fn((id: string) =>
@@ -3664,6 +3685,32 @@ describe('Actions.createPdfSnippet', () => {
     ]);
   });
 
+  it('takes no highlight off the note of an item the snippet only sits under, when it is undone', async () => {
+    const snippet = { data: { id: 'snippet-1' }, file: { basename: 'A' } };
+    const above = pdfFile('pdf', 'above');
+    const wired = wirePdfSnippet({
+      read: { start: 1e10, end: 1e10 + 1, text: 'a', subpath: '#page=1' },
+      snippet,
+      item: null,
+      adoptedBy: above,
+      takenFrom: false,
+    });
+    await wired.actions.createPdfSnippet({
+      pdfViewer: wired.reviewView.pdfViewer,
+      currentItemFile: () => wired.file,
+      takesAnyPdf: true,
+    });
+
+    await wired.actions.undo();
+
+    expect(wired.removeHighlight.mock.calls).toEqual([
+      [wired.file.path, 'snippet-1'],
+    ]);
+    expect(wired.trigger.mock.calls).toEqual([
+      ['ir-highlights-changed', wired.file.path],
+    ]);
+  });
+
   it('takes the highlight off the PDF where it is now, renamed since the snippet was made', async () => {
     const snippet = { data: { id: 'snippet-1' }, file: { basename: 'A' } };
     const wired = wirePdfSnippet({
@@ -3768,7 +3815,9 @@ describe('Actions.createPdfCard', () => {
     const getReviewItemFromFile = vi.fn().mockResolvedValue(article);
     const fetchCard = vi.fn((id: string) =>
       Promise.resolve(
-        adoptedBy ? { data: { id, parent: 'adopter' } } : { data: { id } }
+        adoptedBy
+          ? { data: { id, parent: 'adopter', context: 'adopter' } }
+          : { data: { id } }
       )
     );
     const getReviewItemFromId = vi.fn((id: string) =>
@@ -4591,6 +4640,34 @@ describe('Actions.undo while writes are refused', () => {
 describe('Actions — undo of a card made from a note', () => {
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it('refreshes the text of the item the card was taken from, whose note had its embed, and of no item it only sits under', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        cardNoteArb,
+        fc.constantFrom(null, 'taken-from', 'above'),
+        fc.boolean(),
+        async (note, parent, takenFrom) => {
+          vi.restoreAllMocks();
+          vi.mocked(invalidateItemQuery).mockClear();
+          // Its context is its parent as made, or erased by a drop that
+          // moved it up under `above`
+          const context = takenFrom && parent === 'taken-from' ? parent : null;
+
+          await makeCardThenUndo(note, true, undefined, undefined, {
+            links: { parent, context },
+          });
+
+          const refreshed = vi
+            .mocked(invalidateItemQuery)
+            .mock.calls.map(([id]) => id);
+          expect(refreshed.includes('taken-from')).toBe(context !== null);
+          expect(refreshed).not.toContain('above');
+        }
+      ),
+      { numRuns: 30 }
+    );
   });
 
   /**

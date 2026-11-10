@@ -1780,6 +1780,103 @@ describe('migration v15 — mark a restored database with a restore epoch', () =
   });
 });
 
+describe('migration v16 — keep where each item was taken from apart from its parent', () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = makeDb(SCHEMA_V0);
+    applyMigrations(
+      db,
+      migrations.filter((m) => m.version <= 15)
+    );
+  });
+
+  /** Ids a snippet or card may name as its parent: none, an item, or a row no table has. */
+  const parentArb = fc.constantFrom(null, 'a1', 's0', 's1', 'gone');
+
+  it('property: gives each snippet and card the parent it had as its context, leaving every other column as it was', () => {
+    fc.assert(
+      fc.property(
+        fc.array(parentArb, { maxLength: 4 }),
+        fc.array(parentArb, { maxLength: 4 }),
+        (snippetParents, cardParents) => {
+          const at15 = makeDb(SCHEMA_V0);
+          applyMigrations(
+            at15,
+            migrations.filter((m) => m.version <= 15)
+          );
+          insertArticle(at15, 'a1', 'notes/a1.md');
+          snippetParents.forEach((parent, i) =>
+            at15.run(
+              `INSERT INTO snippet (id, reference, parent, due, interval, priority)
+               VALUES (?, ?, ?, 1000, 86400000, 30)`,
+              [`s${i}`, `notes/s${i}.md`, parent]
+            )
+          );
+          cardParents.forEach((parent, i) =>
+            at15.run(
+              `INSERT INTO srs_card (id, reference, parent, created_at, due,
+                 stability, difficulty, elapsed_days, scheduled_days, state)
+               VALUES (?, ?, ?, 0, 0, 0, 0, 0, 0, 0)`,
+              [`c${i}`, `notes/c${i}.md`, parent]
+            )
+          );
+          const before = ['article', 'snippet', 'srs_card'].map((t) =>
+            selectAll(at15, t)
+          );
+
+          applyMigrations(
+            at15,
+            migrations.filter((m) => m.version <= 16)
+          );
+
+          expect(getSchemaVersion(at15)).toBe(16);
+          expect(selectAll(at15, 'article')).toEqual(before[0]);
+          expect(selectAll(at15, 'snippet')).toEqual(
+            before[1].map((row) => ({ ...row, context: row.parent }))
+          );
+          expect(selectAll(at15, 'srs_card')).toEqual(
+            before[2].map((row) => ({ ...row, context: row.parent }))
+          );
+          at15.close();
+        }
+      ),
+      { numRuns: 30 }
+    );
+  });
+
+  it('gives no other table a context', () => {
+    applyMigrations(db, migrations);
+
+    for (const table of [
+      'article',
+      'article_review',
+      'snippet_review',
+      'srs_card_review',
+      'rebind',
+    ]) {
+      expect(columnNames(db, table)).not.toContain('context');
+    }
+  });
+
+  it('leaves a context unset on a row written later without one', () => {
+    applyMigrations(db, migrations);
+    db.exec(
+      `INSERT INTO snippet (id, reference, parent, due, interval, priority)
+       VALUES ('s9', 'notes/s9.md', 'a1', 1000, 86400000, 30)`
+    );
+
+    expect(selectAll(db, 'snippet')).toEqual([
+      expect.objectContaining({ id: 's9', parent: 'a1', context: null }),
+    ]);
+  });
+
+  it('reports no work to do when run a second time', () => {
+    applyMigrations(db, migrations);
+    expect(applyMigrations(db, migrations)).toBe(false);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Schema version consistency
 

@@ -64,6 +64,7 @@ function makeHighlight(
     deleted: false,
     priority: 50,
     parent: 'articles/parent.md',
+    context: 'articles/parent.md',
     start_offset: 0,
     end_offset: 10,
     scroll_top: 0,
@@ -3502,7 +3503,7 @@ describe('highlights in a note typed by the item layer', () => {
       });
     }
     repo.mutate(
-      `INSERT INTO snippet (id, reference, due, interval, priority, parent, start_offset, end_offset) VALUES ('snip-1', 's/1.md', 0, 1, 30, $1, 0, 5)`,
+      `INSERT INTO snippet (id, reference, due, interval, priority, parent, context, start_offset, end_offset) VALUES ('snip-1', 's/1.md', 0, 1, 30, $1, $1, 0, 5)`,
       [spec.row === 'absent' ? null : 'note-id']
     );
     const query = vi.spyOn(repo, 'query');
@@ -3843,7 +3844,7 @@ describe('two panes of a note, over the real item layer and database', () => {
     });
     marked(doc).forEach(([start, end], i) => {
       repo.mutate(
-        `INSERT INTO snippet (id, reference, due, interval, priority, parent, start_offset, end_offset) VALUES ($1, $2, 0, 1, 30, 'note-id', $3, $4)`,
+        `INSERT INTO snippet (id, reference, due, interval, priority, parent, context, start_offset, end_offset) VALUES ($1, $2, 0, 1, 30, 'note-id', 'note-id', $3, $4)`,
         [IDS[i], `s/${i}.md`, start, end]
       );
     });

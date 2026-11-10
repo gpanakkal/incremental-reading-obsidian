@@ -644,10 +644,11 @@ export class Actions {
    */
   private _pdfsHighlighting = async (
     pdf: TFile,
-    item: { data: { parent?: string | null } } | null
+    item: { data: { context?: string | null } } | null
   ): Promise<Set<string>> => {
-    const parent = item?.data.parent
-      ? await this.plugin.reviewManager.getReviewItemFromId(item.data.parent)
+    // The item it was taken from, whose note shows its highlight
+    const parent = item?.data.context
+      ? await this.plugin.reviewManager.getReviewItemFromId(item.data.context)
       : null;
     const paths = new Set([pdf.path]);
     if (parent?.file) paths.add(parent.file.path);
@@ -888,7 +889,8 @@ export class Actions {
             return undoMiss(outcome);
           }
 
-          const { parent } = reviewCard.data;
+          // The note its embed was put back in
+          const { context: parent } = reviewCard.data;
           if (parent) {
             const key = ['item', parent, 'file-text'];
             queryClient.getQueryCache().find({ queryKey: key });

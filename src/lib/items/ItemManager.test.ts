@@ -304,12 +304,34 @@ const itemRowArb = fc.record({
   due: fc.integer({ min: 0, max: 2 ** 42 }),
   dismissed: fc.boolean(),
   reviews: fc.uniqueArray(fc.uuid(), { maxLength: 3 }),
+  /** Whether it sits under an article, which it was taken from */
+  above: fc.boolean(),
+  /** The snippets and cards under it, each taken from it or from nothing */
+  children: fc.array(
+    fc.record({
+      table: fc.constantFrom('snippet' as const, 'srs_card' as const),
+      takenFrom: fc.boolean(),
+    }),
+    { maxLength: 3 }
+  ),
 });
 type ItemRowCase = typeof itemRowArb extends fc.Arbitrary<infer T> ? T : never;
 
+/** Each child's links up (see `ISnippetBase.context`), by id. */
+function childLinks(
+  repo: TestRepository
+): Record<string, { parent: unknown; context: unknown }> {
+  return Object.fromEntries(
+    [...repo.rows('snippet'), ...repo.rows('srs_card')]
+      .filter(({ id }) => String(id).startsWith('child-'))
+      .map(({ id, parent, context }) => [String(id), { parent, context }])
+  );
+}
+
 /**
- * The item `row` with its note at {@link ITEM_NOTE} and its reviews, a
- * manager over them, and Obsidian's prompt answering `confirm`.
+ * The item `row` with its note at {@link ITEM_NOTE}, its reviews, the
+ * article above it and the items under it, a manager over them, and
+ * Obsidian's prompt answering `confirm`.
  */
 async function wireDelete(row: ItemRowCase, confirm = true) {
   const vault = makeItemVault({
@@ -323,10 +345,12 @@ async function wireDelete(row: ItemRowCase, confirm = true) {
   Object.assign(vault.app.fileManager, { promptForFileDeletion });
   const repo = await TestRepository.create();
   const dismissed = Number(row.dismissed);
+  const above = row.above ? 'above' : null;
+  if (above) insertItemAt(repo, 'article', { id: above, reference: 'a.md' });
   if (row.table === 'snippet') {
     repo.mutate(
-      `INSERT INTO snippet (id, reference, due, interval, priority, dismissed) VALUES ($1, $2, $3, 1, 30, $4)`,
-      [row.id, ITEM_NOTE, row.due, dismissed]
+      `INSERT INTO snippet (id, reference, parent, context, due, interval, priority, dismissed) VALUES ($1, $2, $3, $4, $5, 1, 30, $6)`,
+      [row.id, ITEM_NOTE, above, above, row.due, dismissed]
     );
     for (const review of row.reviews) {
       repo.mutate(
@@ -336,8 +360,8 @@ async function wireDelete(row: ItemRowCase, confirm = true) {
     }
   } else {
     repo.mutate(
-      `INSERT INTO srs_card (id, reference, created_at, due, stability, difficulty, elapsed_days, scheduled_days, learning_steps, reps, lapses, state, dismissed) VALUES ($1, $2, 0, $3, 0, 0, 0, 0, 0, 0, 0, 0, $4)`,
-      [row.id, ITEM_NOTE, row.due, dismissed]
+      `INSERT INTO srs_card (id, reference, parent, context, created_at, due, stability, difficulty, elapsed_days, scheduled_days, learning_steps, reps, lapses, state, dismissed) VALUES ($1, $2, $3, $4, 0, $5, 0, 0, 0, 0, 0, 0, 0, 0, $6)`,
+      [row.id, ITEM_NOTE, above, above, row.due, dismissed]
     );
     for (const review of row.reviews) {
       repo.mutate(
@@ -346,6 +370,14 @@ async function wireDelete(row: ItemRowCase, confirm = true) {
       );
     }
   }
+  row.children.forEach(({ table, takenFrom }, i) =>
+    insertItemAt(repo, table, {
+      id: `child-${i}`,
+      reference: `children/${i}.md`,
+      parent: row.id,
+      context: takenFrom ? row.id : null,
+    })
+  );
   const log = row.table === 'snippet' ? 'snippet_review' : 'srs_card_review';
   // What is live, as readers see it: a tombstone is no row to them, and a
   // stamp is no content, which a write that puts a row back renews
@@ -354,8 +386,9 @@ async function wireDelete(row: ItemRowCase, confirm = true) {
       .filter(({ deleted }) => deleted === 0)
       .map(({ updated_at: _at, updated_by: _by, ...content }) => content);
   const stored = () => ({
-    rows: live(repo.rows(row.table)),
+    rows: live(repo.rows(row.table)).filter(({ id }) => id === row.id),
     reviews: live(repo.rows(log)),
+    children: childLinks(repo),
   });
   const before = stored();
   vi.spyOn(console, 'error').mockReturnValue(undefined);
@@ -1524,6 +1557,15 @@ describe('deleteWithNote', () => {
         expect(wired.vault.trashed).toEqual([ITEM_NOTE]);
         expect(wired.promptForFileDeletion).toHaveBeenCalledTimes(
           prompt ? 1 : 0
+        );
+        // As every drop leaves them (see `deleteRowStatements`)
+        expect(wired.stored().children).toEqual(
+          Object.fromEntries(
+            row.children.map((_, i) => [
+              `child-${i}`,
+              { parent: row.above ? 'above' : null, context: null },
+            ])
+          )
         );
       }),
       { numRuns: 20 }

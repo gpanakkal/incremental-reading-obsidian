@@ -95,7 +95,7 @@ async function makeLine({ rootType, below, end }: Line, source: SourceKind) {
 
 /**
  * A live (or, with `deleted`, deleted) row of `type` at `reference`,
- * `ir/<id>.md` unless given.
+ * `ir/<id>.md` unless given, taken from `context` (its parent unless given).
  */
 function insert(
   repo: TestRepository,
@@ -103,7 +103,8 @@ function insert(
   type: NoteType,
   parent: string | null,
   deleted = 0,
-  reference = `ir/${id}.md`
+  reference = `ir/${id}.md`,
+  context = parent
 ) {
   if (type === 'article') {
     void repo.mutate(
@@ -113,16 +114,17 @@ function insert(
     );
   } else if (type === 'snippet') {
     void repo.mutate(
-      `INSERT INTO snippet (id, reference, parent, due, interval, priority, deleted)
-       VALUES ($1, $2, $3, 0, 86400000, 30, $4)`,
-      [id, reference, parent, deleted]
+      `INSERT INTO snippet (id, reference, parent, context, due, interval,
+         priority, deleted)
+       VALUES ($1, $2, $3, $4, 0, 86400000, 30, $5)`,
+      [id, reference, parent, context, deleted]
     );
   } else {
     void repo.mutate(
-      `INSERT INTO srs_card (id, reference, parent, created_at, due,
+      `INSERT INTO srs_card (id, reference, parent, context, created_at, due,
          stability, difficulty, elapsed_days, scheduled_days, state, deleted)
-       VALUES ($1, $2, $3, 0, 0, 0, 0, 0, 0, 0, $4)`,
-      [id, reference, parent, deleted]
+       VALUES ($1, $2, $3, $4, 0, 0, 0, 0, 0, 0, 0, $5)`,
+      [id, reference, parent, context, deleted]
     );
   }
 }
@@ -316,16 +318,28 @@ describe('itemNodeAt', () => {
 });
 
 describe('hasContext', () => {
-  it('property: is true of a snippet or card whose parent is there, or with a source note in the vault, and never of an article', async () => {
+  it('property: is true of a snippet or card whose context is there, or with a source note in the vault, and never of an article', async () => {
     await fc.assert(
       fc.asyncProperty(
         fc.constantFrom<NoteType>('article', 'snippet', 'card'),
         fc.constantFrom('none', 'there', 'dangling', 'deleted', 'noteless'),
         fc.constantFrom<SourceKind>('none', 'vault', 'gone', 'web'),
-        async (type, parentKind, source) => {
+        // Which of its links name that row: a row moved up a level by a drop
+        // sits under one it was not taken from, and the other way round
+        fc.constantFrom('both', 'context', 'parent'),
+        async (type, parentKind, source, links) => {
           const repo = await TestRepository.create();
           const withParent = type !== 'article' && parentKind !== 'none';
-          insert(repo, 'item-0', type, withParent ? 'parent' : null);
+          const linked = withParent ? 'parent' : null;
+          insert(
+            repo,
+            'item-0',
+            type,
+            links === 'context' ? null : linked,
+            0,
+            'ir/item-0.md',
+            links === 'parent' ? null : linked
+          );
           if (withParent && parentKind !== 'dangling') {
             insert(
               repo,
@@ -347,7 +361,8 @@ describe('hasContext', () => {
 
           expect(hasContext(repo, vault.app as unknown as App, file)).toBe(
             type !== 'article' &&
-              ((withParent && parentKind === 'there') || source === 'vault')
+              ((withParent && parentKind === 'there' && links !== 'parent') ||
+                source === 'vault')
           );
         }
       )

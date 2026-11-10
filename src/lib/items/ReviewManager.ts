@@ -886,25 +886,28 @@ export default class ReviewManager {
    * Remove the `table` row `id` for good, leaving its note, if any, alone.
    *
    * Its review history and any startup rebind of it go with it. All are
-   * tombstoned rather than deleted (see `tombstoneRowStatements`), so the
-   * delete reaches the other devices. The snippets and cards taken from
-   * it stay, with no parent, as if taken from nothing: `parent` has no foreign
-   * key to clear it, and one left naming a row that no longer exists would be
-   * a parent no lookup can find. All in one transaction, so a failed delete
-   * leaves everything as it was.
+   * tombstoned rather than deleted (see `deleteRowStatements`), so the
+   * delete reaches the other devices. The snippets and cards under it stay,
+   * moved up to the item it was under, or to the top, and lose it as their
+   * context: neither link has a foreign key to clear it, and one left naming
+   * a row that no longer exists would name what no lookup can find. All in
+   * one transaction, so a failed delete leaves everything as it was.
    *
    * Whatever shows the row should still be refreshed by the caller. An id no
    * row of `table` holds changes nothing.
    * @throws whatever the delete throws, after rolling it back
    */
   async deleteRow(table: ItemTable, id: string): Promise<void> {
-    // An article's row has no `parent`, and reads as having none
+    // An article's row has no `context`, and reads as having none
     const [row] = (await this.#repo.query(
       `SELECT * FROM ${table} WHERE id = $1 AND ${NOT_PURGED}`,
       [id]
-    )) as { parent?: string | null }[];
+    )) as { context?: string | null }[];
     if (!row) return;
-    const parent = row.parent ? await this.articles.findById(row.parent) : null;
+    // The item whose note shows its highlight
+    const parent = row.context
+      ? await this.articles.findById(row.context)
+      : null;
 
     try {
       await this.#repo.transaction(async () => {
@@ -1354,12 +1357,12 @@ export default class ReviewManager {
 
     const { row, table } = match;
     if (table === 'snippet') {
-      const parent = (row as SnippetRow).parent;
-      if (parent) {
-        const parentRow = await this.articles.findById(parent);
-        if (!parentRow) {
-          return;
-        }
+      // The item whose note shows its highlight
+      const parent = (row as SnippetRow).context;
+      // One whose row is gone has no note to paint on; the snippet is
+      // trashed all the same
+      const parentRow = parent ? await this.articles.findById(parent) : null;
+      if (parentRow) {
         const parentPath = parentRow.row.reference;
         this.snippets.offsetTracker.removeHighlight(parentPath, row.id);
         // trigger a re-paint so the highlight disappears

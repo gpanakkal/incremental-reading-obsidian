@@ -242,8 +242,9 @@ export async function reloadParentHighlights(
   const { snippets } = reviewManager;
   try {
     const snippet = await snippets.findById(snippetId);
-    const parentId = (snippet?.row as { parent?: string | null } | undefined)
-      ?.parent;
+    // The item whose note shows its highlight
+    const parentId = (snippet?.row as { context?: string | null } | undefined)
+      ?.context;
     if (!parentId) return;
     const parent = await snippets.findById(parentId);
     const parentFile = parent && Obsidian.getNote(parent.row.reference, app);
