@@ -1,19 +1,22 @@
 import { useAppSelector, useAppStore } from '#/hooks/useAppSelector';
 import {
+  type ReviewCallbacks,
   isExternalSync,
   isReviewInterfaceFacet,
   setReviewCallbacks,
   setReviewModeEffect,
   setShowAnswerEffect,
-  type ReviewCallbacks,
 } from '#/lib/extensions';
-import { type ExtractedMarkdownEditor,
+import { computeMinimalChange } from '#/lib/minimal-change';
+import {
+  type ExtractedMarkdownEditor,
   type ExtractedMobileToolbar,
   getBaseMarkdownExtensions,
   getMarkdownController,
   retireEditor,
-  setInsertMode } from '#/lib/obsidian-editor';
-import { computeMinimalChange } from '#/lib/minimal-change';
+  setInsertMode,
+  startEditor,
+} from '#/lib/obsidian-editor';
 import { positionOnArrival, subpathResolver } from '#/lib/review-position';
 import { historyCommandForInput } from '#/lib/review-undo-keys';
 import { createSaveCoalescer } from '#/lib/save-coalescer';
@@ -35,19 +38,21 @@ import {
   EditorState,
   Prec,
 } from '@codemirror/state';
-import { type ViewUpdate,
+import {
+  type ViewUpdate,
   EditorView,
   keymap,
   placeholder as placeholderExt,
-  scrollPastEnd } from '@codemirror/view';
+  scrollPastEnd,
+} from '@codemirror/view';
 import { Platform } from 'obsidian';
 import {
+  type MutableRefObject,
   createPortal,
   useEffect,
   useLayoutEffect,
   useRef,
   useState,
-  type MutableRefObject,
 } from 'react';
 import { useDispatch } from 'react-redux';
 import type { Grade } from 'ts-fsrs';
@@ -456,6 +461,9 @@ export function IREditor({
       );
       try {
         editor = new CustomEditor(app, elRef.current, controller);
+        // Loaded before `set` renders anything, as a note tab's editor is, so
+        // every embed in the note follows its note from the start.
+        startEditor(editor);
         cm = editor.cm;
         cm.scrollDOM.classList.add('ir-review-scroller');
         internalRef.current = cm;

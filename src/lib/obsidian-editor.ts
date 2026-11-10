@@ -90,6 +90,18 @@ export class ExtractedMarkdownEditor {
    * since nothing promises a later version keeps it.
    */
   saveHistory?(): void;
+  /**
+   * The editor is an Obsidian `Component`, and the embeds live preview renders
+   * in it are its children: the embed widget hands each one to the editor's
+   * `addChild`, which only loads it once the editor itself is loaded. See
+   * {@link startEditor}.
+   *
+   * Undocumented: read from obsidian.asar 1.14.5 (the embed widget's
+   * `addChild`, and the edit mode a note tab's embed host adds as a child).
+   */
+  load(): void {}
+  /** Unloads the embeds still rendered in it, then stops its own listeners. */
+  unload(): void {}
   owner: MarkdownView | null;
   app: ExtractedApp;
   editor: Editor;
@@ -98,12 +110,32 @@ export class ExtractedMarkdownEditor {
 }
 
 /**
+ * Bring an editor up the way Obsidian brings up a note's: as a loaded
+ * component. Obsidian adds its own editors as children of a loaded view, and
+ * the embeds they render rely on it. An embed only listens for its note from
+ * its `onload`: a markdown embed re-reads its note on `metadataCache`
+ * `changed`, and an embed of a note that doesn't exist yet becomes the note
+ * on `vault` `create`. In an editor nobody loads, an embed whose note arrives
+ * or fills in after it was drawn (through Sync, say) stays as it was drawn:
+ * blank, or "not created yet", until the editor is rebuilt.
+ *
+ * Undocumented: read from obsidian.asar 1.14.5. Loading also registers the
+ * editor's own `config-changed` listener, as it does in a note tab.
+ */
+export function startEditor(editor: Pick<ExtractedMarkdownEditor, 'load'>) {
+  editor.load();
+}
+
+/**
  * Tear an editor down the way a note tab unloads a note: its undo history goes
  * to Obsidian's per-note store first, so the next editor on the same note,
- * here or in a note tab, picks it up. One failing step doesn't stop the other.
+ * here or in a note tab, picks it up. Then the view goes, and then the
+ * component, in the order Obsidian drops an embed's editor (`destroy`, then
+ * `removeChild`), which takes the embeds' listeners with it. One failing step
+ * doesn't stop the others.
  */
 export function retireEditor(
-  editor: Pick<ExtractedMarkdownEditor, 'saveHistory' | 'destroy'>
+  editor: Pick<ExtractedMarkdownEditor, 'saveHistory' | 'destroy' | 'unload'>
 ): void {
   try {
     editor.saveHistory?.();
@@ -117,6 +149,11 @@ export function retireEditor(
     editor.destroy();
   } catch (error) {
     console.warn('Incremental Reading - Error destroying the editor:', error);
+  }
+  try {
+    editor.unload();
+  } catch (error) {
+    console.warn('Incremental Reading - Error unloading the editor:', error);
   }
 }
 

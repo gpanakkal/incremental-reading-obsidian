@@ -5,6 +5,7 @@ import {
   getBaseMarkdownExtensions,
   getMarkdownController,
   retireEditor,
+  startEditor,
   type ExtractedEditMode,
   type ExtractedMarkdownEditor,
 } from '#/lib/obsidian-editor';
@@ -136,6 +137,7 @@ function makeRetiringEditor(doc: string) {
       cm.setState(EditorState.create({}));
       cm.destroy();
     }),
+    unload: vi.fn(),
   };
   return { editor, filed };
 }
@@ -194,6 +196,74 @@ function type(cm: EditorView, typing: Keystrokes[]): void {
       annotations: newGroup ? isolateHistory.of('before') : [],
     });
   }
+}
+
+/**
+ * Obsidian's `Component` as far as an editor and its embeds use it: a child
+ * added to a loaded component is loaded with it, one added before it loads is
+ * loaded when it does, and unloading takes the children down first, then the
+ * registered listeners, then `onunload`. Loading or unloading twice does
+ * nothing the second time. Read from obsidian.asar 1.14.5
+ * (`Component.prototype.load`/`addChild`/`unload`/`register`).
+ */
+class FakeComponent {
+  _loaded = false;
+  _children: FakeComponent[] = [];
+  _events: Array<() => void> = [];
+  onload = vi.fn();
+  onunload = vi.fn();
+  load() {
+    if (this._loaded) return;
+    this._loaded = true;
+    this.onload();
+    for (const child of this._children.slice()) child.load();
+  }
+  unload() {
+    if (!this._loaded) return;
+    this._loaded = false;
+    while (this._children.length > 0) this._children.pop()!.unload();
+    while (this._events.length > 0) this._events.pop()!();
+    this.onunload();
+  }
+  addChild<T extends FakeComponent>(child: T): T {
+    this._children.push(child);
+    if (this._loaded) child.load();
+    return child;
+  }
+  register(cleanup: () => void) {
+    this._events.push(cleanup);
+  }
+}
+
+/**
+ * An app-wide event source (`metadataCache`, `vault`) that counts who still
+ * listens to it.
+ */
+function makeEventSource() {
+  const listeners = new Set<() => void>();
+  return {
+    listeners,
+    /** Subscribe `component` from its `onload`, as Obsidian's embeds do. */
+    subscribeOnLoad(component: FakeComponent) {
+      component.onload.mockImplementation(() => {
+        const listener = () => {};
+        listeners.add(listener);
+        component.register(() => listeners.delete(listener));
+      });
+    },
+  };
+}
+
+/**
+ * An editor as a component, with the teardown steps `retireEditor` calls.
+ * Embeds live preview renders are children of the editor itself: the widget
+ * hands each one to `editor.addChild` (obsidian.asar 1.14.5, the embed
+ * widget's `addChild`), and the embed only listens for its note being created
+ * or changed from its `onload`.
+ */
+class FakeEditor extends FakeComponent {
+  saveHistory = vi.fn();
+  destroy = vi.fn();
 }
 
 // #endregion
@@ -496,32 +566,109 @@ describe('retireEditor', () => {
 
   it('still tears the editor down when Obsidian has no history to file it with', () => {
     const destroy = vi.fn();
+    const unload = vi.fn();
 
-    retireEditor({ destroy });
+    retireEditor({ destroy, unload });
 
     expect(destroy).toHaveBeenCalledTimes(1);
+    expect(unload).toHaveBeenCalledTimes(1);
+  });
+
+  it('unloads the editor after destroying it, as an embed host drops its editor', () => {
+    const editor = new FakeEditor();
+    const unload = vi.spyOn(editor, 'unload');
+    startEditor(editor);
+
+    retireEditor(editor);
+
+    expect(editor._loaded).toBe(false);
+    expect(editor.onunload).toHaveBeenCalledTimes(1);
+    expect(editor.destroy.mock.invocationCallOrder[0]).toBeLessThan(
+      unload.mock.invocationCallOrder[0]
+    );
+  });
+
+  it('leaves nothing listening to the app once an editor and its embeds are retired, however many editors came and went', () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.nat({ max: 5 }), { minLength: 1, maxLength: 4 }),
+        (embedsPerEditor) => {
+          // One app for every editor review builds, item after item
+          const app = makeEventSource();
+          for (const count of embedsPerEditor) {
+            const editor = new FakeEditor();
+            app.subscribeOnLoad(editor);
+            startEditor(editor);
+            const embeds = Array.from({ length: count }, () => {
+              const embed = new FakeComponent();
+              app.subscribeOnLoad(embed);
+              return editor.addChild(embed);
+            });
+            expect(app.listeners.size).toBe(count + 1);
+
+            retireEditor(editor);
+
+            expect(app.listeners.size).toBe(0);
+            for (const embed of embeds) {
+              expect(embed.onunload).toHaveBeenCalledTimes(1);
+            }
+          }
+        }
+      )
+    );
   });
 
   it('goes on to each step when the one before it throws, and throws nothing itself', () => {
     fc.assert(
-      fc.property(fc.boolean(), fc.boolean(), (saveThrows, destroyThrows) => {
-        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-        const failure = (fails: boolean) =>
-          vi.fn(() => {
-            if (fails) throw new Error('teardown failed');
-          });
-        const editor = {
-          saveHistory: failure(saveThrows),
-          destroy: failure(destroyThrows),
-        };
+      fc.property(
+        fc.boolean(),
+        fc.boolean(),
+        fc.boolean(),
+        (saveThrows, destroyThrows, unloadThrows) => {
+          const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+          const failure = (fails: boolean) =>
+            vi.fn(() => {
+              if (fails) throw new Error('teardown failed');
+            });
+          const editor = {
+            saveHistory: failure(saveThrows),
+            destroy: failure(destroyThrows),
+            unload: failure(unloadThrows),
+          };
 
-        expect(() => retireEditor(editor)).not.toThrow();
+          expect(() => retireEditor(editor)).not.toThrow();
 
-        expect(editor.destroy).toHaveBeenCalledTimes(1);
-        expect(warn).toHaveBeenCalledTimes(
-          Number(saveThrows) + Number(destroyThrows)
+          expect(editor.destroy).toHaveBeenCalledTimes(1);
+          expect(editor.unload).toHaveBeenCalledTimes(1);
+          expect(warn).toHaveBeenCalledTimes(
+            Number(saveThrows) + Number(destroyThrows) + Number(unloadThrows)
+          );
+          warn.mockRestore();
+        }
+      )
+    );
+  });
+});
+
+describe('startEditor', () => {
+  it('loads the embeds live preview rendered before and after it, once each, so they follow their notes', () => {
+    fc.assert(
+      fc.property(fc.nat({ max: 5 }), fc.nat({ max: 5 }), (before, after) => {
+        const editor = new FakeEditor();
+        const early = Array.from({ length: before }, () =>
+          editor.addChild(new FakeComponent())
         );
-        warn.mockRestore();
+
+        startEditor(editor);
+        const late = Array.from({ length: after }, () =>
+          editor.addChild(new FakeComponent())
+        );
+
+        expect(editor._loaded).toBe(true);
+        for (const embed of [...early, ...late]) {
+          expect(embed._loaded).toBe(true);
+          expect(embed.onload).toHaveBeenCalledTimes(1);
+        }
       })
     );
   });
