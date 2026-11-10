@@ -1,12 +1,12 @@
 import {
-  type Leftover,
-  type LeftoverDeps,
-  type LeftoverFailure,
   actionsFor,
   failureDetail,
   failureOf,
   findLeftovers,
   holdsItems,
+  type Leftover,
+  type LeftoverDeps,
+  type LeftoverFailure,
   leftoversMessage,
   resolveLeftover,
 } from '#/lib/crash-leftovers';
@@ -19,7 +19,7 @@ import {
   askToResolveHeld,
 } from '#/lib/reassociate-prompt';
 import type { NoteType, SQLiteRepository } from '#/lib/types';
-import { openModal } from '#/lib/ui-window';
+import { openModal, type UiOrigin } from '#/lib/ui-window';
 import {
   type App,
   ButtonComponent,
@@ -624,6 +624,11 @@ export interface LeftoverWatchDeps {
   onResolved: () => unknown;
   /** Whether a review tab is open, its view loaded. */
   isReviewOpen: () => boolean;
+  /**
+   * The container of the view of the review tab last in use of those with
+   * their views loaded, if one is open.
+   */
+  reviewContainer: () => HTMLElement | null;
 }
 
 /**
@@ -684,15 +689,17 @@ export class LeftoverWatch {
    * Look again, and open what is found to choose from; if nothing is, or
    * the look fails, say so instead. Asked again before the look ends, it
    * waits on that one, so a double tap opens one modal.
+   * @param origin what it was asked for from (see `uiWindow`), the window
+   *   the modal and each question it asks open in
    */
-  manage(): Promise<void> {
-    this.#managing ??= this.#manage().finally(() => {
+  manage(origin?: UiOrigin): Promise<void> {
+    this.#managing ??= this.#manage(origin).finally(() => {
       this.#managing = null;
     });
     return this.#managing;
   }
 
-  async #manage(): Promise<void> {
+  async #manage(origin: UiOrigin): Promise<void> {
     if (!(await this.#look())) {
       notify(
         "Incremental reading: couldn't look for notes missing from the database.",
@@ -718,10 +725,17 @@ export class LeftoverWatch {
         const conflicts: LeftoverDeps['conflicts'] = {
           ask: (file, holder, plan) =>
             plan
-              ? askToResolve(app, file, plan, getDeviceId(app))
-              : askToResolveHeld(app, file, holder, getDeviceId(app)),
+              ? askToResolve(app, file, plan, getDeviceId(app), origin)
+              : askToResolveHeld(
+                  app,
+                  file,
+                  holder,
+                  getDeviceId(app),
+                  'other-id',
+                  origin
+                ),
           askFresh: (file, row, as) =>
-            askToImportFresh(app, file, row, as, getDeviceId(app)),
+            askToImportFresh(app, file, row, as, getDeviceId(app), origin),
           purge: async (table, id) => {
             await reviewManager.deleteRow(table, id);
             erased = true;
@@ -745,7 +759,7 @@ export class LeftoverWatch {
         return true;
       }
     );
-    openModal(modal);
+    openModal(modal, origin);
   }
 
   /**
@@ -789,7 +803,16 @@ export class LeftoverWatch {
     if (this.#current.length === 0) return;
     notify(leftoversMessage(this.#current), {
       persist: true,
-      action: { label: 'Manage', onClick: () => void this.manage() },
+      action: {
+        label: 'Manage',
+        // In the window of the review tab last in use, read at the click as
+        // the tab the notice was shown for may have closed since; failing
+        // one, the main window (this module's `window`), Obsidian's own
+        // fallback. Not the notice's window: Obsidian shows it on
+        // `activeWindow`, which can be Settings
+        onClick: () =>
+          void this.manage(this.deps.reviewContainer() ?? window.document.body),
+      },
     });
   }
 }

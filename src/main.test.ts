@@ -5705,6 +5705,17 @@ describe('IncrementalReadingPlugin.createLeftoverWatch', () => {
     vi.restoreAllMocks();
   });
 
+  /**
+   * A review tab last active at `activeTime`, its view loaded or not: a
+   * deferred tab's placeholder view has a container of its own too.
+   */
+  const reviewLeaf = (loaded: boolean, activeTime: number) => ({
+    activeTime,
+    view: Object.assign(loaded ? Object.create(ReviewView.prototype) : {}, {
+      containerEl: {},
+    }) as { containerEl: object },
+  });
+
   /** Build the watch on a bare receiver whose workspace holds `leaves`. */
   function createWatch(leaves: { view: unknown }[] = []) {
     const getLeavesOfType = vi.fn(() => leaves);
@@ -5778,4 +5789,47 @@ describe('IncrementalReadingPlugin.createLeftoverWatch', () => {
       expect(getLeavesOfType).toHaveBeenCalledWith(ReviewView.viewType);
     }
   );
+
+  it.each([
+    { tabs: [], shown: null },
+    { tabs: ['deferred'], shown: null },
+    { tabs: ['loaded'], shown: 0 },
+    { tabs: ['deferred', 'loaded'], shown: 1 },
+  ] as const)(
+    'gives the notice the container of a review tab with its view loaded to open the leftovers in the window of, with review tabs $tabs',
+    ({ tabs, shown }) => {
+      const leaves = tabs.map((tab, activeTime) =>
+        reviewLeaf(tab === 'loaded', activeTime)
+      );
+      const { watch, getLeavesOfType } = createWatch(leaves);
+
+      expect(watch.deps.reviewContainer()).toBe(
+        shown === null ? null : leaves[shown].view.containerEl
+      );
+      expect(getLeavesOfType).toHaveBeenCalledWith(ReviewView.viewType);
+    }
+  );
+
+  it('gives the notice the container of the review tab last active of those with their views loaded, the first of them on a tie', () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.record({ loaded: fc.boolean(), activeTime: fc.nat(5) }), {
+          maxLength: 6,
+        }),
+        (tabs) => {
+          const leaves = tabs.map(({ loaded, activeTime }) =>
+            reviewLeaf(loaded, activeTime)
+          );
+          const { watch } = createWatch(leaves);
+
+          const loaded = leaves.filter((_, i) => tabs[i].loaded);
+          const latest = Math.max(...loaded.map((leaf) => leaf.activeTime));
+          const expected =
+            loaded.find((leaf) => leaf.activeTime === latest)?.view
+              .containerEl ?? null;
+          expect(watch.deps.reviewContainer()).toBe(expected);
+        }
+      )
+    );
+  });
 });

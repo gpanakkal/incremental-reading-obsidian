@@ -8,6 +8,7 @@ import type {
   PathHolder as RowAtPath,
 } from './crash-leftovers';
 import type { NoteType } from './types';
+import type { UiOrigin } from './ui-window';
 
 /**
  * A snippet or card row whose path a note is at, though the note doesn't
@@ -128,6 +129,8 @@ export const heldOpenings: Record<
  *   row was last changed here
  * @param noteClaims what the note holds as its id, which the question opens
  *   by (see {@link heldOpenings})
+ * @param origin what it was asked for from (see `uiWindow`), which the
+ *   confirmation of an erase opens over too
  * @returns what the user chose, `null` for neither
  */
 export async function askToResolveHeld(
@@ -135,33 +138,42 @@ export async function askToResolveHeld(
   file: TFile,
   holder: RowAtPath,
   thisDevice: string,
-  noteClaims: NoteClaim = 'other-id'
+  noteClaims: NoteClaim = 'other-id',
+  origin?: UiOrigin
 ): Promise<HeldChoice> {
   const { kind, id, deleted } = holder;
-  const choice = await promptForChoice(app, {
-    title: `Re-associate "${file.basename}" with ${kind}?`,
-    paragraphs: [
-      heldOpenings[noteClaims](holder, file.path),
-      detailsOf(holder, thisDevice),
-      `"Re-associate" points the ${kind} to this note, keeping its schedule and review history${deleted ? ', and restores it to the review queue' : ''}.`,
-      `"Erase and import fresh" erases the ${kind} and its review history, then saves this note as a new item.`,
-    ],
-    confirmText: 'Re-associate',
-    alternative: { text: 'Erase and import fresh', destructive: true },
-  });
+  const choice = await promptForChoice(
+    app,
+    {
+      title: `Re-associate "${file.basename}" with ${kind}?`,
+      paragraphs: [
+        heldOpenings[noteClaims](holder, file.path),
+        detailsOf(holder, thisDevice),
+        `"Re-associate" points the ${kind} to this note, keeping its schedule and review history${deleted ? ', and restores it to the review queue' : ''}.`,
+        `"Erase and import fresh" erases the ${kind} and its review history, then saves this note as a new item.`,
+      ],
+      confirmText: 'Re-associate',
+      alternative: { text: 'Erase and import fresh', destructive: true },
+    },
+    origin
+  );
   if (choice === 'confirm') return 'reassociate';
   if (choice === 'cancel') return null;
-  const sure = await promptForConfirmation(app, {
-    title: `Erase the ${kind}?`,
-    paragraphs: [
-      `Erase the ${kind} ${id} and its review history for good, then save "${file.basename}" as a new item? This can't be undone.`,
-      ...(kind === 'card'
-        ? []
-        : ['Snippets and cards made from it will be kept.']),
-    ],
-    confirmText: 'Erase',
-    destructive: true,
-  });
+  const sure = await promptForConfirmation(
+    app,
+    {
+      title: `Erase the ${kind}?`,
+      paragraphs: [
+        `Erase the ${kind} ${id} and its review history for good, then save "${file.basename}" as a new item? This can't be undone.`,
+        ...(kind === 'card'
+          ? []
+          : ['Snippets and cards made from it will be kept.']),
+      ],
+      confirmText: 'Erase',
+      destructive: true,
+    },
+    origin
+  );
   return sure ? 'erase' : null;
 }
 
@@ -180,6 +192,7 @@ const withArticle = (kind: string) =>
  * id) is asked about as {@link askToResolveHeld} asks.
  * @param thisDevice this device's id (see `getDeviceId`), to say whether the
  *   row was last changed here
+ * @param origin what it was asked for from (see `uiWindow`)
  * @returns `reassociate` if the user confirmed; else, or with no target,
  *   `null`
  */
@@ -187,11 +200,21 @@ export async function askToResolve(
   app: App,
   file: TFile,
   plan: Plan,
-  thisDevice: string
+  thisDevice: string,
+  origin?: UiOrigin
 ): Promise<HeldChoice> {
   const { target, evicts, refused } = plan;
   if (!target) return null;
-  if (plan.erase) return askToResolveHeld(app, file, target.row, thisDevice);
+  if (plan.erase) {
+    return askToResolveHeld(
+      app,
+      file,
+      target.row,
+      thisDevice,
+      'other-id',
+      origin
+    );
+  }
   const { kind, deleted } = target.row;
   const state = deleted
     ? `a deleted ${kind}`
@@ -223,11 +246,15 @@ export async function askToResolve(
   paragraphs.push(
     `Re-associate makes this note the ${kind}'s note, keeping its schedule and review history${deleted ? ', and brings it back to review' : ''}.`
   );
-  const confirmed = await promptForConfirmation(app, {
-    title: `Re-associate "${file.basename}" with ${kind}?`,
-    paragraphs,
-    confirmText: 'Re-associate',
-  });
+  const confirmed = await promptForConfirmation(
+    app,
+    {
+      title: `Re-associate "${file.basename}" with ${kind}?`,
+      paragraphs,
+      confirmText: 'Re-associate',
+    },
+    origin
+  );
   return confirmed ? 'reassociate' : null;
 }
 
@@ -239,6 +266,7 @@ export async function askToResolve(
  * device it was erased, when known.
  * @param thisDevice this device's id (see `getDeviceId`), to say whether the
  *   row was erased here
+ * @param origin what it was asked for from (see `uiWindow`)
  * @returns whether the user confirmed
  */
 export function askToImportFresh(
@@ -246,7 +274,8 @@ export function askToImportFresh(
   file: TFile,
   row: PurgedRow,
   as: NoteType,
-  thisDevice: string
+  thisDevice: string,
+  origin?: UiOrigin
 ): Promise<boolean> {
   const { kind, id, erasedAt, erasedBy } = row;
   const details = [`ID: ${id}`];
@@ -254,13 +283,17 @@ export function askToImportFresh(
     details.push(`Erased: ${dayOf(erasedAt)}${deviceOf(erasedBy, thisDevice)}`);
   }
   const state = kind === 'article' ? 'An article' : `A ${kind}`;
-  return promptForConfirmation(app, {
-    title: `Import "${file.basename}" fresh?`,
-    paragraphs: [
-      `${state} that was erased for good had this note's ID. It can't be restored, and this note can't be saved under its ID.`,
-      details,
-      `"Import fresh" gives this note a new ID and saves it as a new ${as}.`,
-    ],
-    confirmText: 'Import fresh',
-  });
+  return promptForConfirmation(
+    app,
+    {
+      title: `Import "${file.basename}" fresh?`,
+      paragraphs: [
+        `${state} that was erased for good had this note's ID. It can't be restored, and this note can't be saved under its ID.`,
+        details,
+        `"Import fresh" gives this note a new ID and saves it as a new ${as}.`,
+      ],
+      confirmText: 'Import fresh',
+    },
+    origin
+  );
 }

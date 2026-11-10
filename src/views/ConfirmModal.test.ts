@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import * as UiWindow from '#/lib/ui-window';
 import { Modal, Platform } from '#/test/__mocks__/obsidian';
+import { makeUiWindow } from '#/test/fake-window';
 import fc from 'fast-check';
 import type { App } from 'obsidian';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -92,6 +93,52 @@ const contentOf = (contentEl: HTMLElement) =>
       ? [...el.children].map((item) => [item.tagName, item.textContent])
       : [el.tagName, el.textContent, el.className]
   );
+
+/**
+ * The window a prompt asked for by `ask` opens in: Obsidian's `activeWindow`
+ * as the modal opens, which it appends the modal to (see `uiWindow`). Asked
+ * while Settings, focused, is `activeWindow`, as in the e2e harness, where
+ * every window reports focus: the state plugin modals once went to Settings
+ * in.
+ */
+function promptWindow(ask: () => unknown): {
+  opened: Window[];
+  settings: Window;
+} {
+  const settings = makeUiWindow({ focused: true }).win;
+  vi.stubGlobal('activeWindow', settings);
+  vi.stubGlobal('activeDocument', settings.document);
+  const opened: Window[] = [];
+  vi.spyOn(Modal.prototype, 'open').mockImplementation(() => {
+    opened.push(activeWindow);
+  });
+  ask();
+  return { opened, settings };
+}
+
+const NO_ALTERNATIVE: ConfirmOptions = {
+  title: 'Delete?',
+  paragraphs: [],
+  confirmText: 'Delete',
+};
+
+/** Each prompt, asked from `origin`. */
+const PROMPTS = [
+  [
+    'promptForConfirmation',
+    (origin?: UiWindow.UiOrigin) =>
+      void promptForConfirmation(APP, NO_ALTERNATIVE, origin),
+  ],
+  [
+    'promptForChoice',
+    (origin?: UiWindow.UiOrigin) =>
+      void promptForChoice(
+        APP,
+        { ...NO_ALTERNATIVE, alternative: { text: 'Erase' } },
+        origin
+      ),
+  ],
+] as const;
 
 // #endregion
 
@@ -384,5 +431,26 @@ describe('promptForChoice', () => {
     (onOpen.mock.contexts[0] as ConfirmModal).close();
 
     await expect(answered).resolves.toBe('cancel');
+  });
+});
+
+describe.each(PROMPTS)('%s asked for from a window', (_, ask) => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('opens once, in the window it was asked for from, over a focused window behind it', () => {
+    const popout = makeUiWindow();
+
+    const { opened } = promptWindow(() => ask(popout.element));
+
+    expect(opened).toEqual([popout.win]);
+  });
+
+  it('opens once where plugin UI otherwise goes when asked for from nowhere', () => {
+    const { opened, settings } = promptWindow(() => ask());
+
+    expect(opened).toEqual([settings]);
   });
 });

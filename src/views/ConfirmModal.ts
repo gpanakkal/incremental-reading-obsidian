@@ -1,4 +1,4 @@
-import { openModal } from '#/lib/ui-window';
+import { openModal, type UiOrigin } from '#/lib/ui-window';
 import { type App, ButtonComponent, Modal, Platform } from 'obsidian';
 
 export interface ConfirmOptions {
@@ -34,22 +34,25 @@ export type ConfirmChoice = 'confirm' | 'alternative' | 'cancel';
 
 /**
  * Ask the user to confirm an action.
+ * @param origin what it was asked for from (see `uiWindow`)
  * @returns whether they confirmed; closing the modal any way but the confirm
  * button answers no
  */
 export function promptForConfirmation(
   app: App,
   // An alternative answers only through `promptForChoice`
-  options: Omit<ConfirmOptions, 'alternative'>
+  options: Omit<ConfirmOptions, 'alternative'>,
+  origin?: UiOrigin
 ): Promise<boolean> {
   return new Promise((resolve) => {
-    openModal(new ConfirmModal(app, options, resolve));
+    openModal(new ConfirmModal(app, options, resolve), origin);
   });
 }
 
 /**
  * Ask the user to choose between two ways to go ahead, or neither: the
  * confirm button, the default, or the alternative beside it.
+ * @param origin what it was asked for from (see `uiWindow`)
  * @returns what they chose; closing the modal any way but those buttons
  * answers `cancel`
  */
@@ -57,7 +60,8 @@ export function promptForChoice(
   app: App,
   options: ConfirmOptions & {
     alternative: NonNullable<ConfirmOptions['alternative']>;
-  }
+  },
+  origin?: UiOrigin
 ): Promise<ConfirmChoice> {
   return new Promise((resolve) => {
     openModal(
@@ -66,7 +70,8 @@ export function promptForChoice(
         options,
         (confirmed) => resolve(confirmed ? 'confirm' : 'cancel'),
         () => resolve('alternative')
-      )
+      ),
+      origin
     );
   });
 }
