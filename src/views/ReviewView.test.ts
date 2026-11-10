@@ -41,6 +41,8 @@ import {
   type SelectionKind,
 } from '#/lib/store';
 import { NOTE_TYPES, type NoteType, type ReviewItem } from '#/lib/types';
+import * as uiWindow from '#/lib/ui-window';
+import * as unimportModule from '#/lib/unimport-article';
 import {
   refreshAfterImportUndo,
   refreshAfterUnimport,
@@ -268,19 +270,29 @@ function makeMenuReceiver({
   editor = null,
   sourceMode = false,
   anyArticle = true,
+  pluginStore = { getState: () => ({ page }) },
+  reviewManager = {},
+  frontmatter = { 'ir-id': 'item' },
 }: {
   page?: ReviewPage;
   file?: TFile | null;
-  /** The type of the item `file` belongs to. */
-  type?: NoteType;
+  /** The type of the item `file` belongs to, or `null` when it holds none. */
+  type?: NoteType | null;
   /** The mounted review editor, or `null` for a page that has none. */
   editor?: ReturnType<typeof makeMountedEditor> | null;
   /** The mode the tab is already in, as the constructor would have left it. */
   sourceMode?: boolean;
   /** Whether any live article row is there to un-import. */
   anyArticle?: boolean;
+  /** The store the view reads its page from, in place of one fixed on `page`. */
+  pluginStore?: { getState: () => { page: ReviewPage } };
+  /** Further `plugin.reviewManager` methods, for an un-import that runs. */
+  reviewManager?: Partial<Record<keyof ReviewManager, unknown>>;
+  /** The note's frontmatter as the metadata cache holds it, or `null` for none. */
+  frontmatter?: Record<string, unknown> | null;
 } = {}) {
   const openFile = vi.fn();
+  const containerEl = document.createElement('div');
   const revealInFolder = vi.fn();
   const openBulkUnimport = vi.fn();
   const leaf = { id: 'review-leaf' };
@@ -288,12 +300,14 @@ function makeMenuReceiver({
     file,
     fileType: type,
     leaf,
+    containerEl,
     activeEditor: editor,
     sourceMode,
     plugin: {
-      store: { getState: () => ({ page }) },
+      store: pluginStore,
       reviewManager: {
         hasArticleUnder: (folder: string) => folder === '/' && anyArticle,
+        ...reviewManager,
       },
       openBulkUnimport,
       // What `addSourceMenuItems` asks: neither entry
@@ -316,6 +330,9 @@ function makeMenuReceiver({
       internalPlugins: {
         getEnabledPluginById: vi.fn(() => ({ revealInFolder })),
       },
+      metadataCache: {
+        getFileCache: vi.fn(() => (frontmatter ? { frontmatter } : null)),
+      },
     },
   };
   Object.setPrototypeOf(receiver, ReviewView.prototype);
@@ -324,6 +341,7 @@ function makeMenuReceiver({
     app: receiver.app,
     leaf,
     file,
+    containerEl,
     editor,
     openFile,
     revealInFolder,
@@ -2354,7 +2372,11 @@ describe('ReviewView.onPaneMenu', () => {
 
           const menu = paneMenu(view, source);
 
-          const entry = menu.items.find(({ icon }) => icon === 'lucide-file-x');
+          // Not the review item's own un-import, which sits under Delete
+          const entry = menu.items.find(
+            ({ icon, section }) =>
+              icon === 'lucide-file-x' && section !== 'danger'
+          );
           if (page !== 'home' || !anyArticle) {
             expect(entry).toBeUndefined();
             return;
@@ -2520,6 +2542,133 @@ describe('ReviewView.onPaneMenu', () => {
     });
 
     expect(revealInFolder).toHaveBeenCalledWith(file);
+  });
+
+  it('offers the un-import of an article under review, right under Delete, while its note holds it, and of nothing else', () => {
+    // Snippets and cards are not imported, and a file whose note claims no
+    // item (type `null`) holds no article to un-import. Review takes a note
+    // claiming no id at its article's path for that article, but the note
+    // holds none there, as the plugin's own menus have it: a PDF, with no
+    // frontmatter to claim one in, holds the article at its path.
+    fc.assert(
+      fc.property(
+        pageArb,
+        fc.option(fc.tuple(fc.string(), fc.constantFrom('md', 'pdf')), {
+          nil: null,
+        }),
+        fc.constantFrom<NoteType | null>(...NOTE_TYPES, null),
+        fc.constantFrom<Record<string, unknown> | null>(
+          null,
+          {},
+          { 'ir-id': '' },
+          { 'ir-id': 'item' },
+          { 'ir-id': ['item'] }
+        ),
+        menuSourceArb,
+        (page, named, type, noteFrontmatter, source) => {
+          const file = named && makeFile(...named);
+          // A PDF has no frontmatter for the metadata cache to hold
+          const isPdf = file?.extension === 'pdf';
+          const frontmatter = isPdf ? null : noteFrontmatter;
+          const { view } = makeMenuReceiver({ page, file, type, frontmatter });
+
+          const danger = paneMenu(view, source).items.filter(
+            ({ section }) => section === 'danger'
+          );
+
+          const onItem = page === 'review' && !!file?.basename;
+          const holdsArticle =
+            onItem &&
+            type === 'article' &&
+            (isPdf || frontmatter?.['ir-id'] === 'item');
+          expect(danger.map(({ icon }) => icon)).toEqual(
+            holdsArticle
+              ? ['lucide-trash-2', 'lucide-file-x']
+              : onItem
+                ? ['lucide-trash-2']
+                : []
+          );
+          // Painted red, as Delete is
+          if (holdsArticle) expect(danger[1].warning).toBe(true);
+        }
+      )
+    );
+  });
+
+  it('un-imports the article on screen through the shared flow, from the window the menu was opened in', () => {
+    const adopt = vi.spyOn(uiWindow, 'adoptWindow');
+    const unimport = vi
+      .spyOn(unimportModule, 'unimportArticle')
+      .mockResolvedValue(true);
+    const { view, file, containerEl } = makeMenuReceiver();
+    const entry = paneMenu(view).items.find(
+      ({ section, icon }) => section === 'danger' && icon === 'lucide-file-x'
+    );
+    expect(unimport).not.toHaveBeenCalled();
+
+    click(entry);
+
+    expect(unimport).toHaveBeenCalledExactlyOnceWith(view.plugin, file);
+    expect(adopt).toHaveBeenCalledWith(view.app, containerEl);
+    // The confirmation it opens belongs in that window
+    expect(adopt.mock.invocationCallOrder[0]).toBeLessThan(
+      unimport.mock.invocationCallOrder[0]
+    );
+  });
+
+  describe('once the un-import is answered', () => {
+    beforeEach(() => {
+      store.dispatch(resetSession());
+      Notice.reset();
+      vi.spyOn(queryClient, 'invalidateQueries').mockResolvedValue();
+    });
+
+    afterEach(() => {
+      store.dispatch(resetSession());
+    });
+
+    it('moves review off the article once it is gone, and stays on it otherwise', async () => {
+      await fc.assert(
+        fc.asyncProperty(fc.boolean(), fc.string(), async (confirmed, id) => {
+          store.dispatch(resetSession());
+          store.dispatch(setPage('review'));
+          store.dispatch(setCurrentItemId(id));
+          vi.spyOn(
+            ConfirmModalModule,
+            'promptForConfirmation'
+          ).mockResolvedValue(confirmed);
+          let rowGone = false;
+          const unimportArticles = vi.fn(async () => {
+            rowGone = true;
+            return [{ status: 'unimported' }];
+          });
+          const { view } = makeMenuReceiver({
+            pluginStore: store,
+            reviewManager: {
+              unimportArticles,
+              hasItemRow: vi.fn(async () => !rowGone),
+            },
+          });
+          const entry = paneMenu(view).items.find(
+            ({ section, icon }) =>
+              section === 'danger' && icon === 'lucide-file-x'
+          );
+
+          const unimport = vi.spyOn(unimportModule, 'unimportArticle');
+          unimport.mockClear();
+
+          click(entry);
+          await unimport.mock.results[0]?.value;
+
+          // Between items, which asks the queue for the next one due (or the
+          // home screen, should there be none); on the article if cancelled
+          expect(placeOf(store.getState())).toEqual({
+            page: 'review',
+            itemId: confirmed ? null : id,
+          });
+        })
+      );
+    });
   });
 
   it("offers Go to context and Go to source for the tab's item, as they decide, among the tab's own entries", () => {

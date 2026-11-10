@@ -20,6 +20,7 @@ import {
   pluginMenuEntries,
   setNativeMenus,
   setPluginSetting,
+  waitForReviewItem,
 } from './helpers';
 import { test } from './setup/fixtures';
 import {
@@ -753,6 +754,126 @@ test('keeps the queue row when the un-import from it is turned down', async () =
   await expect(queueRow()).toHaveCount(1);
   expect(await noteText()).toMatch(/^ir-id: /m);
   expect(await articleCount()).toBe(before + 1);
+});
+
+test.describe("The review tab's own menu", () => {
+  /** The text a snippet is taken from the note with. */
+  const SNIPPET = 'Some text';
+
+  /** The queue's row for the note's article, not the snippet taken from it. */
+  const articleRow = () => queueRow().filter({ hasNotText: SNIPPET });
+
+  /** The queue's row for the snippet. */
+  const snippetRow = () =>
+    window.locator('.ir-queue-row').filter({ hasText: SNIPPET });
+
+  /** The item review is on, by id, or `null` between items. */
+  const currentItemId = () =>
+    window.evaluate(() => {
+      const { app } = window as unknown as {
+        app: {
+          plugins: {
+            plugins: Record<
+              string,
+              { store: { getState(): { currentItemId: string | null } } }
+            >;
+          };
+        };
+      };
+      return app.plugins.plugins['incremental-reading'].store.getState()
+        .currentItemId;
+    });
+
+  /** Take `SNIPPET` from the note, opened in the active tab. */
+  async function extractSnippet() {
+    // Its import was chosen in Files, which left Files the active leaf
+    await openNote(window, NOTE);
+    await window.evaluate((text) => {
+      const { editor } = (
+        window as unknown as {
+          app: {
+            workspace: {
+              activeEditor: {
+                editor: {
+                  getValue(): string;
+                  offsetToPos(offset: number): unknown;
+                  setSelection(from: unknown, to: unknown): void;
+                };
+              };
+            };
+          };
+        }
+      ).app.workspace.activeEditor;
+      const at = editor.getValue().indexOf(text);
+      editor.setSelection(
+        editor.offsetToPos(at),
+        editor.offsetToPos(at + text.length)
+      );
+    }, SNIPPET);
+    await executeCommandById(window, 'incremental-reading:extract-selection');
+    await expectExtractSettled(window, NOTE, 1);
+  }
+
+  /**
+   * Open the active review tab's ⋮ menu once it offers Delete, the entry
+   * every item gets. Obsidian's menus animate in: the first click can land
+   * before the button takes it.
+   */
+  async function openReviewTabMenu() {
+    const menu = window.locator('.menu');
+    await expect(async () => {
+      if ((await menu.count()) > 0) await closeMenu(window);
+      await window
+        .locator('.workspace-leaf.mod-active .view-header')
+        .getByLabel('More options')
+        .click();
+      await expect(
+        menu.locator('.menu-item.is-warning:has(.lucide-trash-2)')
+      ).toBeVisible({ timeout: 2_000 });
+    }).toPass();
+    return menu;
+  }
+
+  test('un-imports the article under review, which moves review on, and offers no un-import for a snippet', async () => {
+    const before = await articleCount();
+    await importFromFiles();
+    await extractSnippet();
+    await executeCommandById(window, 'incremental-reading:learn');
+    await expect(articleRow()).toHaveCount(1);
+    await expect(snippetRow()).toHaveCount(1);
+
+    // A snippet was never imported, so there is nothing to un-import
+    await snippetRow().click();
+    // A snippet's pane shows no title of its own to wait on, as an article's does
+    await expect.poll(currentItemId).not.toBeNull();
+    let menu = await openReviewTabMenu();
+    await expect(menu.locator('.menu-item:has(.lucide-file-x)')).toHaveCount(0);
+    await closeMenu(window);
+
+    await executeCommandById(window, 'incremental-reading:learn');
+    await articleRow().click();
+    const article = await waitForReviewItem(window);
+    expect(article.title).toBe('Unimport me');
+    menu = await openReviewTabMenu();
+    await menu.locator('.menu-item.is-warning:has(.lucide-file-x)').click();
+    await expect(menu).toHaveCount(0);
+    await expect(confirmation()).toContainText('"Unimport me"');
+    await answer('Un-import');
+
+    // Bounded well inside `CURRENT_ITEM_REFETCH_TIME`: the five-second poll
+    // would move review off a gone item on its own, late
+    await expect.poll(currentItemId, { timeout: 1_500 }).not.toBe(article.id);
+    await expect(
+      window.locator('.workspace-leaf.mod-active .ir-title', {
+        hasText: 'Unimport me',
+      })
+    ).toHaveCount(0);
+    await expect.poll(noteText).not.toMatch(/ir-id/);
+    expect(await articleCount()).toBe(before);
+    await executeCommandById(window, 'incremental-reading:learn');
+    await expect(snippetRow()).toHaveCount(1);
+    await expect(articleRow()).toHaveCount(0);
+  });
 });
 
 test.describe('Un-importing from a folder', () => {
