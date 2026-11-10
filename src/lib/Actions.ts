@@ -31,6 +31,7 @@ import { createEmitter } from './emitter';
 import IRScheduler from './IRScheduler';
 import {
   type ItemContext,
+  type NoteSource,
   resolveItemContext,
   revealPdfContext,
 } from './item-context';
@@ -1243,10 +1244,18 @@ export class Actions {
    * `goToSourceTitle`). Never waits, for a menu being built.
    */
   sourceRoute = (file: TFile): SourceRoute | null => {
-    const { app, reviewManager } = this.plugin;
-    const source = findItemSource(reviewManager.repo, app, file);
-    return source && routeSource(app, source);
+    const source = this.itemSource(file);
+    return source && routeSource(this.plugin.app, source);
   };
+
+  /**
+   * What the item at `file` came from at first, before {@link sourceRoute}
+   * says how to open it: the half of that answer that reads the database,
+   * for a caller that keeps it while the web viewer's settings, which pick
+   * the route, may change. Never waits.
+   */
+  itemSource = (file: TFile): NoteSource | null =>
+    findItemSource(this.plugin.reviewManager.repo, this.plugin.app, file);
 
   /**
    * Open where the item at `file` came from at first: its article's source,

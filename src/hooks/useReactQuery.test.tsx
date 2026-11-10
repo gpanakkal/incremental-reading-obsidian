@@ -24,8 +24,10 @@ import {
   useCardsDueLaterToday,
   useCurrentItem,
   useCurrentItemFileText,
+  useItemNavigation,
   useQueue,
   useReviewItems,
+  type ItemNavigation,
 } from './useReactQuery';
 
 // #region HELPERS
@@ -1016,5 +1018,207 @@ describe('useCardsDueLaterToday', () => {
     // A kept count is served the instant the next summary mounts, before the
     // recount settles: a card graduated since would still show as coming due
     expect(options.gcTime).toBe(0);
+  });
+});
+
+describe('useItemNavigation', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+    optionsSeen = [];
+    vi.restoreAllMocks();
+  });
+
+  /** What the resolvers could find for an item's note. */
+  const navigationArb: fc.Arbitrary<ItemNavigation> = fc.record({
+    hasContext: fc.boolean(),
+    source: fc.oneof(
+      fc.constant(null),
+      fc.constant({ file: { path: 'sources/Book.md' } as TFile }),
+      fc.webUrl().map((url) => ({ url }))
+    ),
+  });
+
+  /** An item of any type, under any id. */
+  const itemArb = fc
+    .record({ id: fc.string(), type: fc.constantFrom(...NOTE_TYPES) })
+    .map(({ id, type }) => {
+      const item = makeItem(id);
+      return { ...item, data: { ...item.data, type } } as ReviewItem;
+    });
+
+  /**
+   * Render the hook for `item`, the resolvers finding `found` and react-query
+   * holding `cached` for it; hand back what it returned and the query built.
+   */
+  function buildQuery(
+    item: ReviewItem,
+    found: ItemNavigation,
+    cached?: ItemNavigation
+  ) {
+    vi.restoreAllMocks();
+    document.body.innerHTML = '';
+    optionsSeen = [];
+    cache = new Map();
+    if (cached) {
+      cache.set(keyOf(['item', item.data.id, 'navigation']), {
+        data: cached,
+        isLoading: false,
+      });
+    }
+    const actions = {
+      hasContext: vi.fn((_file: TFile) => found.hasContext),
+      itemSource: vi.fn((_file: TFile) => found.source),
+    };
+    // Where a change could move what the resolvers find: a note's metadata,
+    // a row of the database
+    const metadataListeners = new Set<(file: TFile) => void>();
+    const dataListeners = new Set<() => void>();
+    const metadataCache = {
+      on: (name: string, listener: (file: TFile) => void) => {
+        if (name === 'changed') metadataListeners.add(listener);
+        return listener;
+      },
+      offref: (ref: (file: TFile) => void) => metadataListeners.delete(ref),
+    };
+    const repo = {
+      onDataChange: (listener: () => void) => {
+        dataListeners.add(listener);
+        return () => dataListeners.delete(listener);
+      },
+    };
+    vi.spyOn(ReviewContext, 'useReviewContext').mockReturnValue({
+      actions,
+      plugin: { app: { metadataCache } },
+      reviewManager: { repo },
+    } as never);
+    const change = {
+      metadata: (file: TFile) => metadataListeners.forEach((l) => l(file)),
+      data: () => dataListeners.forEach((l) => l()),
+    };
+
+    let returned: ItemNavigation | undefined;
+    function Probe({ of }: { of: ReviewItem }) {
+      /* eslint-disable-next-line react-hooks/globals --
+         A probe, not a component: the assignment is how the hook's return
+         value leaves the render it has to happen inside. */
+      returned = useItemNavigation(of);
+      return null;
+    }
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    // Under `act`, which flushes a synchronous callback's effects before it
+    // returns, so the hook's have run once each of these does
+    void act(() => render(<Probe of={item} />, container));
+    const unmount = () => void act(() => render(null, container));
+    /** Render the same hook again, now for `next`, as the bar moving on. */
+    const rerender = (next: ReviewItem) =>
+      void act(() => render(<Probe of={next} />, container));
+
+    const options = queryOptions('item');
+    const run = options.queryFn as () => ItemNavigation;
+    return { options, run, actions, returned, change, unmount, rerender };
+  }
+
+  it("property: keeps what it finds under the item's own id, among the entries review drops and refreshes for the item, until those refresh it", () => {
+    fc.assert(
+      fc.property(itemArb, navigationArb, (item, found) => {
+        const { options } = buildQuery(item, found);
+
+        expect(options.queryKey).toEqual(['item', item.data.id, 'navigation']);
+        // Nothing but the item's own invalidations moves it
+        expect(options.staleTime).toBe(Infinity);
+      })
+    );
+  });
+
+  it("property: finds the context and the source as the menus do, of the item's note", () => {
+    fc.assert(
+      fc.property(itemArb, navigationArb, (item, found) => {
+        const { run, actions } = buildQuery(item, found);
+
+        expect(run()).toEqual(found);
+        expect(actions.hasContext).toHaveBeenCalledExactlyOnceWith(item.file);
+        expect(actions.itemSource).toHaveBeenCalledExactlyOnceWith(item.file);
+      })
+    );
+  });
+
+  it('property: answers what react-query holds for the item, and nothing until it holds something', () => {
+    fc.assert(
+      fc.property(
+        itemArb,
+        navigationArb,
+        fc.option(navigationArb, { nil: undefined }),
+        (item, found, cached) => {
+          const { returned } = buildQuery(item, found, cached);
+
+          expect(returned).toBe(cached);
+        }
+      )
+    );
+  });
+
+  /** A change the resolvers' answer could follow, to any note or row. */
+  const changeArb = fc.oneof(
+    fc
+      .string()
+      .map((path) => ({ kind: 'metadata' as const, file: { path } as TFile })),
+    fc.constant({ kind: 'data' as const })
+  );
+
+  it("property: asks again on every change to a note's metadata or to the database, the item's own or not, until the hook is gone", () => {
+    fc.assert(
+      fc.property(
+        itemArb,
+        navigationArb,
+        fc.array(changeArb, { maxLength: 4 }),
+        (item, found, changes) => {
+          const { change, unmount } = buildQuery(item, found);
+          const invalidate = vi
+            .spyOn(queryClient, 'invalidateQueries')
+            .mockResolvedValue();
+          const fire = (c: (typeof changes)[number]) =>
+            c.kind === 'metadata' ? change.metadata(c.file) : change.data();
+
+          changes.forEach(fire);
+
+          expect(invalidate.mock.calls).toEqual(
+            changes.map(() => [
+              { queryKey: ['item', item.data.id, 'navigation'] },
+            ])
+          );
+          unmount();
+          change.metadata(item.file);
+          change.data();
+          expect(invalidate).toHaveBeenCalledTimes(changes.length);
+        }
+      )
+    );
+  });
+
+  it('property: asks again about the item it is now rendered for, not one it was before', () => {
+    fc.assert(
+      fc.property(
+        itemArb,
+        itemArb,
+        navigationArb,
+        changeArb,
+        (first, next, found, c) => {
+          fc.pre(first.data.id !== next.data.id);
+          const { change, rerender } = buildQuery(first, found);
+          rerender(next);
+          const invalidate = vi
+            .spyOn(queryClient, 'invalidateQueries')
+            .mockResolvedValue();
+
+          if (c.kind === 'metadata') change.metadata(c.file);
+          else change.data();
+
+          expect(invalidate).toHaveBeenCalledExactlyOnceWith({
+            queryKey: ['item', next.data.id, 'navigation'],
+          });
+        }
+      )
+    );
   });
 });

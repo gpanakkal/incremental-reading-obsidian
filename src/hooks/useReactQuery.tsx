@@ -1,6 +1,7 @@
 import { useReviewContext } from '#/components/ReviewContext';
 import type { QueueSubset } from '#/components/types';
 import { CURRENT_ITEM_REFETCH_TIME } from '#/lib/constants';
+import type { NoteSource } from '#/lib/item-context';
 import { isEditableText } from '#/lib/mime';
 import {
   currentItemQueryFn,
@@ -218,4 +219,58 @@ export function useCurrentItemFileText(): {
     isLoading: itemLoading || textLoading,
     isError,
   };
+}
+
+/** What Go to context and Go to source have to open for an item. */
+export type ItemNavigation = {
+  /** Whether Go to context has a place to open (see `Actions.hasContext`). */
+  hasContext: boolean;
+  /** What Go to source opens, if anything (see `Actions.itemSource`). */
+  source: NoteSource | null;
+};
+
+/**
+ * What Go to context and Go to source have to open for `item`, the way the
+ * menus offering them find it, or undefined until that is known.
+ *
+ * Kept per item under its `['item', id]` key, so it is read once rather than
+ * on every render of the review bar, and dropped once review leaves it (see
+ * `startItemCacheEviction`). Read again whenever the item's queries are
+ * invalidated, and on every change to a note's metadata or to the database,
+ * which is where what it finds lives: a `source` property in the item's note
+ * or its article's, a parent's row. The item's invalidations alone miss
+ * those: review's own saves skip them, a change to the article's note never
+ * reaches the snippet's, and a `modify` comes before the metadata it changes.
+ * The lookups are cheap, and an unchanged answer is shared structurally, so
+ * the bar does not re-render for it. The route Go to source takes is left
+ * out, for the caller to work out as it shows the button: it follows the web
+ * viewer's settings, which change with nothing to invalidate this.
+ */
+export function useItemNavigation(
+  item: ReviewItem
+): ItemNavigation | undefined {
+  const { actions, plugin, reviewManager } = useReviewContext();
+  const id = item.data.id;
+  const { data } = useQuery({
+    queryKey: ['item', id, 'navigation'],
+    queryFn: (): ItemNavigation => ({
+      hasContext: actions.hasContext(item.file),
+      source: actions.itemSource(item.file),
+    }),
+    staleTime: Infinity,
+  });
+  useEffect(() => {
+    const refresh = () =>
+      void queryClient.invalidateQueries({
+        queryKey: ['item', id, 'navigation'],
+      });
+    const { metadataCache } = plugin.app;
+    const ref = metadataCache.on('changed', refresh);
+    const unsubscribe = reviewManager.repo.onDataChange(refresh);
+    return () => {
+      metadataCache.offref(ref);
+      unsubscribe();
+    };
+  }, [plugin, reviewManager, id]);
+  return data;
 }

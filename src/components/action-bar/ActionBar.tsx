@@ -8,14 +8,21 @@ import {
 } from '#/hooks/useGradePlacement';
 import { useLeafHistory } from '#/hooks/useLeafHistory';
 import { usePacked } from '#/hooks/usePacked';
-import { useCurrentItem, useQueue } from '#/hooks/useReactQuery';
+import {
+  useCurrentItem,
+  useItemNavigation,
+  useQueue,
+} from '#/hooks/useReactQuery';
 import { actionCooldownFor } from '#/lib/action-cooldown';
 import type { ActionStackEntry } from '#/lib/Actions';
 import {
   DISMISS_ICON_STROKE,
   QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE,
 } from '#/lib/constants';
+import type { NoteSource } from '#/lib/item-context';
+import { routeSource } from '#/lib/item-source';
 import { goToReviewPlace } from '#/lib/review-history';
+import { GO_TO_CONTEXT, goToSourceControl } from '#/lib/source-menu';
 import {
   type IRPluginState,
   type SelectionKind,
@@ -31,6 +38,7 @@ import {
   type MissingItem,
   type ReviewArticle,
   type ReviewCard,
+  type ReviewItem,
   type ReviewSnippet,
   type ReviewText,
 } from '#/lib/types';
@@ -51,8 +59,8 @@ import {
   Undo2,
   X,
 } from 'lucide-react';
-import { Platform } from 'obsidian';
-import { useLayoutEffect, useRef, useSyncExternalStore } from 'react';
+import { Keymap, Platform, type TFile } from 'obsidian';
+import { useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { useDispatch, useStore } from 'react-redux';
 import { useReviewContext } from '../ReviewContext';
 import { ButtonWithIcon, Separator, TextButton } from './BarButtons';
@@ -537,6 +545,7 @@ function ArticleActions({ article }: { article: ReviewArticle }) {
       <TextScheduler text={article} />
       <Separator />
       <DismissAction item={article} />
+      <SourceActions item={article} />
     </>
   );
 }
@@ -552,6 +561,7 @@ function SnippetActions({ snippet }: { snippet: ReviewSnippet }) {
       <TextScheduler text={snippet} />
       <Separator />
       <DismissAction item={snippet} />
+      <SourceActions item={snippet} />
     </>
   );
 }
@@ -586,6 +596,7 @@ function CardActions({
       <CreateCardAction />
       <Separator />
       <DismissAction item={card} />
+      <SourceActions item={card} />
     </>
   );
 }
@@ -675,6 +686,91 @@ function CreateCardAction() {
     >
       <CardCogPlus />
     </ButtonWithIcon>
+  );
+}
+
+/** Class of the button that runs Go to context. */
+export const GO_TO_CONTEXT_CLASS = 'ir-go-to-context-button';
+/** Class of the button that runs Go to source. */
+export const GO_TO_SOURCE_CLASS = 'ir-go-to-source-button';
+
+/**
+ * Go to context and Go to source, each only where its menu entry is offered
+ * (see `addSourceMenuItems`), and doing what that entry does. They close the
+ * item's buttons, parted from dismiss by a separator, on every platform: they
+ * take the user away from the item rather than act on it, and at the end of
+ * the bar they are what a phone too narrow for everything scrolls to, while
+ * the controls reviewing needs stay where they were.
+ *
+ * Nothing until it is known what they would open (see
+ * {@link useItemNavigation}), which is a moment at most, rather than a button
+ * that shows up and is taken away again.
+ */
+function SourceActions({ item }: { item: ReviewItem }) {
+  const navigation = useItemNavigation(item);
+  if (!navigation || (!navigation.hasContext && !navigation.source)) {
+    return null;
+  }
+  return (
+    <>
+      <Separator />
+      {navigation.hasContext && <GoToContextAction file={item.file} />}
+      {navigation.source && (
+        <GoToSourceAction file={item.file} source={navigation.source} />
+      )}
+    </>
+  );
+}
+
+function GoToContextAction({ file }: { file: TFile }) {
+  const { actions } = useReviewContext();
+  return (
+    <ButtonWithIcon
+      tooltip={GO_TO_CONTEXT.label}
+      icon={GO_TO_CONTEXT.icon}
+      className={GO_TO_CONTEXT_CLASS}
+      handleClick={async (e) => {
+        await actions.goToContext(file, Keymap.isModEvent(e));
+      }}
+    />
+  );
+}
+
+/**
+ * Named and drawn for where it goes, as the menu entry is (see
+ * `goToSourceControl`). That follows the web viewer's settings, which can
+ * change while the button is up with nothing to tell the bar, so it is worked
+ * out again as the pointer comes over the button: written straight onto the
+ * button, because Obsidian reads the tooltip off `aria-label` in its own
+ * `pointerover` listener on the body (obsidian.asar, undocumented), which runs
+ * after this one and before any re-render. The click works the route out
+ * afresh in any case.
+ */
+function GoToSourceAction({
+  file,
+  source,
+}: {
+  file: TFile;
+  source: NoteSource;
+}) {
+  const { actions, plugin } = useReviewContext();
+  // eslint-disable-next-line @eslint-react/use-state -- only the re-render is wanted: the control is worked out on every render
+  const [, redraw] = useState({});
+  const control = goToSourceControl(routeSource(plugin.app, source));
+  return (
+    <ButtonWithIcon
+      tooltip={control.label}
+      icon={control.icon}
+      className={GO_TO_SOURCE_CLASS}
+      onPointerOver={(e) => {
+        const now = goToSourceControl(routeSource(plugin.app, source));
+        (e.currentTarget as Element).setAttribute('aria-label', now.label);
+        redraw({});
+      }}
+      handleClick={async (e) => {
+        await actions.goToSource(file, Keymap.isModEvent(e));
+      }}
+    />
   );
 }
 

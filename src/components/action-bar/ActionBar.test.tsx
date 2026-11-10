@@ -5,7 +5,9 @@ import * as ReactQuery from '#/hooks/useReactQuery';
 import { actionCooldownFor } from '#/lib/action-cooldown';
 import type { ActionStackEntry } from '#/lib/Actions';
 import { QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE } from '#/lib/constants';
+import type { NoteSource } from '#/lib/item-context';
 import { currentItemQueryFn } from '#/lib/query-client';
+import { GO_TO_CONTEXT, goToSourceControl } from '#/lib/source-menu';
 import {
   resetSession,
   type SelectionKind,
@@ -22,12 +24,16 @@ import {
 } from '#/lib/types';
 import { SchedulingModal } from '#/views/SchedulingModal';
 import fc from 'fast-check';
-import { Platform, Scope } from 'obsidian';
+import { Keymap, Platform, Scope, type TFile } from 'obsidian';
 import { type ComponentChild, render } from 'preact';
 import { act } from 'preact/test-utils';
 import { Rating } from 'ts-fsrs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ActionBar } from './ActionBar';
+import {
+  ActionBar,
+  GO_TO_CONTEXT_CLASS,
+  GO_TO_SOURCE_CLASS,
+} from './ActionBar';
 import { SCHEDULING_BUTTON_CLASS } from './TextScheduler';
 
 // #region HELPERS
@@ -112,6 +118,7 @@ function mountBar({
   leftovers,
   openBulkImport = vi.fn(),
   openBackupRestore = vi.fn(),
+  app = {},
 }: {
   showMoreOptionsMenu?: () => void;
   actions?: ReturnType<typeof makeActions>;
@@ -123,13 +130,16 @@ function mountBar({
   openBulkImport?: () => void;
   /** Opens the picker of backups to restore. */
   openBackupRestore?: (origin?: unknown) => void;
+  /** The Obsidian app, as far as the bar reads it. */
+  app?: object;
 } = {}): HTMLElement {
+  keepNavigationUnknown();
   return mount(
     <ReviewContextProvider
       plugin={
         {
           actions,
-          app: {},
+          app,
           leftovers,
           openBulkImport,
           openBackupRestore,
@@ -285,6 +295,8 @@ function makeActions() {
     gradeCard: vi.fn(),
     reprioritize: vi.fn(),
     manageFixedInterval: vi.fn(),
+    goToContext: vi.fn(async () => {}),
+    goToSource: vi.fn(async () => {}),
     undo: vi.fn(() => {
       undoStack.pop();
       emit();
@@ -429,12 +441,14 @@ function mountItemBar(
     hasSelection = false,
     actions = makeActions(),
     reviewView = makeReviewView(),
+    app,
   }: {
     showAnswer?: boolean;
     selectionMode?: SelectionKind | null;
     hasSelection?: boolean;
     actions?: ReturnType<typeof makeActions>;
     reviewView?: ReturnType<typeof makeReviewView>;
+    app?: object;
   } = {}
 ): HTMLElement {
   reduxState.page = 'review';
@@ -444,7 +458,7 @@ function mountItemBar(
   vi.spyOn(ReactQuery, 'useCurrentItem').mockReturnValue({
     data: item,
   } as never);
-  return mountBar({ actions, reviewView });
+  return mountBar({ actions, reviewView, app });
 }
 
 /**
@@ -661,6 +675,7 @@ function mountGuardedBar(
     </ReviewContextProvider>
   );
   setNow(mountedAt);
+  keepNavigationUnknown();
   const container = mount(tree());
   const show = (next: MaybeMissingItem) => {
     currentItem.mockReturnValue({ data: next } as never);
@@ -671,6 +686,89 @@ function mountGuardedBar(
     container.remove();
   };
   return { container, actions, reviewView, show, unmount };
+}
+
+/** What Go to context and Go to source could have to open for an item. */
+const navigationArb: fc.Arbitrary<ReactQuery.ItemNavigation> = fc.record({
+  hasContext: fc.boolean(),
+  source: fc.oneof(
+    fc.constant(null),
+    fc.constant({ file: { path: 'sources/Book.md' } as TFile }),
+    fc.webUrl().map((url) => ({ url }))
+  ),
+});
+
+/**
+ * Answer the bar's question of what Go to context and Go to source would open
+ * with `navigation` (undefined: not known yet), and hand back the spy.
+ */
+function wireNavigation(navigation: ReactQuery.ItemNavigation | undefined) {
+  return vi.spyOn(ReactQuery, 'useItemNavigation').mockReturnValue(navigation);
+}
+
+/**
+ * How the web viewer stands, as far as Go to source's route reads it: off,
+ * or on with its "Open external links in web viewer" option on, off, or not
+ * loaded yet.
+ */
+type WebViewerState = 'off' | 'opens-links' | 'keeps-links' | 'loading';
+const WEB_VIEWER_STATES: WebViewerState[] = [
+  'off',
+  'opens-links',
+  'keeps-links',
+  'loading',
+];
+
+/**
+ * An app whose web viewer stands as `state`; `set` changes it later, as the
+ * user changing its settings would. Undocumented: `app.internalPlugins`.
+ */
+function makeWebViewerApp(state: WebViewerState) {
+  let current = state;
+  const viewer = () => {
+    if (current === 'off') return null;
+    return {
+      openUrl: vi.fn(),
+      ...(current === 'loading'
+        ? {}
+        : { options: { openExternalURLs: current === 'opens-links' } }),
+    };
+  };
+  return {
+    internalPlugins: {
+      getEnabledPluginById: (id: string) =>
+        id === 'webviewer' ? viewer() : null,
+    },
+    set(next: WebViewerState) {
+      current = next;
+    },
+  };
+}
+
+/**
+ * Unless a test has said what Go to context and Go to source would open, leave
+ * it unknown: the hook asking reads react-query, which these mounts have no
+ * client for.
+ */
+function keepNavigationUnknown() {
+  if (!vi.isMockFunction(ReactQuery.useItemNavigation)) {
+    wireNavigation(undefined);
+  }
+}
+
+/** The button with class `className`, or null when there is none. */
+function queryByClass(
+  container: HTMLElement,
+  className: string
+): HTMLButtonElement | null {
+  return container.querySelector<HTMLButtonElement>(`button.${className}`);
+}
+
+/** The Obsidian icon drawn in `button`, by its id. */
+function iconOf(button: HTMLElement): string | undefined {
+  return Array.from(button.querySelector('svg')?.classList ?? []).find(
+    (c) => c !== 'svg-icon'
+  );
 }
 
 // #endregion
@@ -2900,5 +2998,250 @@ describe('ActionBar double-click guard', () => {
         { numRuns: 30 }
       );
     });
+  });
+});
+
+describe('ActionBar Go to context and Go to source buttons', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+    dispatch.mockClear();
+    Object.assign(reduxState, defaultReduxState);
+    store.dispatch(resetSession());
+    vi.restoreAllMocks();
+  });
+
+  /** Every item screen: each type, with a card's answer up or not. */
+  const screenArb = fc.record({
+    type: fc.constantFrom(...ITEM_TYPES),
+    showAnswer: fc.boolean(),
+  });
+
+  it('property: shows Go to context exactly where the item has a context and Go to source exactly where it has a source, once that is known, asking about the item on screen', () => {
+    fc.assert(
+      fc.property(
+        screenArb,
+        fc.option(navigationArb, { nil: undefined }),
+        (screen, navigation) => {
+          try {
+            const asked = wireNavigation(navigation);
+            const item = makeItem(screen.type);
+            const container = mountItemBar(item, screen);
+
+            expect(asked).toHaveBeenCalledWith(item);
+            expect(queryByClass(container, GO_TO_CONTEXT_CLASS) !== null).toBe(
+              navigation?.hasContext ?? false
+            );
+            expect(queryByClass(container, GO_TO_SOURCE_CLASS) !== null).toBe(
+              !!navigation?.source
+            );
+          } finally {
+            document.body.innerHTML = '';
+            vi.restoreAllMocks();
+          }
+        }
+      )
+    );
+  });
+
+  it('property: shows neither on a missing item, on home or while text is being selected', () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom(...ITEM_TYPES),
+        fc.constantFrom('missing', 'home', 'snippet', 'card'),
+        (type, screen) => {
+          try {
+            wireNavigation({
+              hasContext: true,
+              source: { url: 'https://a.example/' },
+            });
+            let container: HTMLElement;
+            if (screen === 'missing') {
+              container = mountItemBar(makeMissing(type));
+            } else if (screen === 'home') {
+              wireQueue();
+              container = mountBar();
+            } else {
+              container = mountItemBar(makeItem(type), {
+                selectionMode: screen,
+              });
+            }
+
+            expect(queryByClass(container, GO_TO_CONTEXT_CLASS)).toBeNull();
+            expect(queryByClass(container, GO_TO_SOURCE_CLASS)).toBeNull();
+          } finally {
+            document.body.innerHTML = '';
+            vi.restoreAllMocks();
+          }
+        }
+      )
+    );
+  });
+
+  it("property: puts them last of the item's buttons, after dismiss and a separator, context first, and with neither leaves dismiss last", () => {
+    fc.assert(
+      fc.property(screenArb, navigationArb, (screen, navigation) => {
+        try {
+          wireNavigation(navigation);
+          const actions = makeActions();
+          const item = makeItem(screen.type);
+          const container = mountItemBar(item, { ...screen, actions });
+          const center = zoneChildren(container, 'center');
+
+          const shown = [
+            navigation.hasContext && GO_TO_CONTEXT_CLASS,
+            navigation.source && GO_TO_SOURCE_CLASS,
+          ].filter((c): c is string => typeof c === 'string');
+          const tail = center.slice(center.length - shown.length);
+          tail.forEach((el, i) => expect(el.classList).toContain(shown[i]));
+          const beforeTail = center.slice(0, center.length - shown.length);
+          if (shown.length > 0) {
+            expect(beforeTail.pop()?.classList).toContain('ir-bar-separator');
+          }
+          // Dismiss, found by what a click on it does
+          (beforeTail.at(-1) as HTMLElement).click();
+          expect(actions.dismissItem).toHaveBeenCalledExactlyOnceWith(item);
+        } finally {
+          document.body.innerHTML = '';
+          vi.restoreAllMocks();
+        }
+      })
+    );
+  });
+
+  it('property: names and draws Go to source as its menu entry does, leaving the app exactly when the web viewer will not open the page', () => {
+    fc.assert(
+      fc.property(
+        screenArb,
+        fc.oneof(
+          fc.constant<NoteSource>({
+            file: { path: 'sources/Book.md' } as TFile,
+          }),
+          fc.webUrl().map((url): NoteSource => ({ url }))
+        ),
+        fc.constantFrom(...WEB_VIEWER_STATES),
+        fc.boolean(),
+        (screen, source, webViewer, mobileApp) => {
+          const previous = Platform.isMobileApp;
+          Platform.isMobileApp = mobileApp;
+          try {
+            wireNavigation({ hasContext: false, source });
+            const container = mountItemBar(makeItem(screen.type), {
+              ...screen,
+              app: makeWebViewerApp(webViewer),
+            });
+            const button = queryByClass(container, GO_TO_SOURCE_CLASS)!;
+
+            const kind =
+              'file' in source
+                ? 'file'
+                : !mobileApp && webViewer === 'opens-links'
+                  ? 'web-viewer'
+                  : 'browser';
+            expect(button.getAttribute('aria-label')).toMatch(
+              kind === 'browser' ? /in system browser$/ : /^(?!.*browser)/
+            );
+            const control = goToSourceControl({ kind } as never);
+            expect(button.getAttribute('aria-label')).toBe(control.label);
+            expect(iconOf(button)).toBe(control.icon);
+          } finally {
+            Platform.isMobileApp = previous;
+            document.body.innerHTML = '';
+            vi.restoreAllMocks();
+          }
+        }
+      )
+    );
+  });
+
+  it('names and draws Go to context as its menu entry does', () => {
+    wireNavigation({ hasContext: true, source: null });
+    const container = mountItemBar(makeItem('snippet'));
+    const button = queryByClass(container, GO_TO_CONTEXT_CLASS)!;
+
+    expect(button.getAttribute('aria-label')).toBe(GO_TO_CONTEXT.label);
+    expect(iconOf(button)).toBe(GO_TO_CONTEXT.icon);
+  });
+
+  it('property: as the pointer comes over Go to source, names and draws it for where it goes now, the web viewer having changed or not', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.webUrl(),
+        fc.constantFrom(...WEB_VIEWER_STATES),
+        fc.constantFrom(...WEB_VIEWER_STATES),
+        async (url, before, after) => {
+          try {
+            wireNavigation({ hasContext: false, source: { url } });
+            const app = makeWebViewerApp(before);
+            const container = mountItemBar(makeItem('article'), { app });
+            const button = queryByClass(container, GO_TO_SOURCE_CLASS)!;
+            app.set(after);
+
+            const control = goToSourceControl({
+              kind: after === 'opens-links' ? 'web-viewer' : 'browser',
+            } as never);
+            // Obsidian's tooltip reads the label as the event reaches the
+            // body, so it has to be there before anything re-renders
+            button.dispatchEvent(new Event('pointerover', { bubbles: true }));
+            expect(button.getAttribute('aria-label')).toBe(control.label);
+
+            // Redrawn once preact gets round to it
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            const shown = queryByClass(container, GO_TO_SOURCE_CLASS)!;
+            expect(shown.getAttribute('aria-label')).toBe(control.label);
+            expect(iconOf(shown)).toBe(control.icon);
+          } finally {
+            document.body.innerHTML = '';
+            vi.restoreAllMocks();
+          }
+        }
+      )
+    );
+  });
+
+  /** A click on a button: any keys held. */
+  const clickArb = fc.record({
+    ctrlKey: fc.boolean(),
+    metaKey: fc.boolean(),
+    altKey: fc.boolean(),
+    shiftKey: fc.boolean(),
+  });
+
+  it("property: runs Go to context and Go to source on the item's note, in place or where a modified click asks", () => {
+    fc.assert(
+      fc.property(
+        screenArb,
+        clickArb,
+        fc.constantFrom(
+          [GO_TO_CONTEXT_CLASS, 'goToContext'] as const,
+          [GO_TO_SOURCE_CLASS, 'goToSource'] as const
+        ),
+        (screen, init, [className, action]) => {
+          try {
+            wireNavigation({
+              hasContext: true,
+              source: { url: 'https://a.example/' },
+            });
+            const actions = makeActions();
+            const item = makeItem(screen.type);
+            const container = mountItemBar(item, { ...screen, actions });
+
+            queryByClass(container, className)!.dispatchEvent(
+              new MouseEvent('click', { bubbles: true, ...init })
+            );
+
+            const other =
+              action === 'goToContext' ? 'goToSource' : 'goToContext';
+            expect(actions[action]).toHaveBeenCalledExactlyOnceWith(
+              item.file,
+              Keymap.isModEvent(new MouseEvent('click', init))
+            );
+            expect(actions[other]).not.toHaveBeenCalled();
+          } finally {
+            document.body.innerHTML = '';
+            vi.restoreAllMocks();
+          }
+        }
+      )
+    );
   });
 });
