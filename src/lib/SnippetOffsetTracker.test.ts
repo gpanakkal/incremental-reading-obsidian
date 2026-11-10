@@ -20,7 +20,7 @@ function createHighlight(
     reference: `test-ref-${id}`,
     start_offset: start,
     end_offset: end,
-    parent: 'parent-article',
+    context: 'parent-article',
   } as SnippetHighlight;
 }
 

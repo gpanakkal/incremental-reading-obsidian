@@ -56,11 +56,19 @@ import {
   type UndoPlan,
 } from './review-undo';
 import {
+  deleteRowStatements,
   NOT_PURGED,
   purgedReference,
   REVIEW_LOG_OF,
-  tombstoneRowStatements,
 } from './row-delete';
+
+/** A snippet's or card's links up, as `deleteWithNote` may put them back. */
+interface ChildLinks {
+  tbl: 'snippet' | 'srs_card';
+  id: string;
+  parent: string | null;
+  context: string | null;
+}
 
 /** How deleting an item with its note went: see `deleteWithNote`. */
 export type DeleteOutcome = 'deleted' | 'declined' | 'refused' | 'failed';
@@ -491,7 +499,8 @@ export class ItemManager {
   }
 
   /**
-   * Give the rows `orphans` of `table` the parent `parentId`.
+   * Give the rows `orphans` of `table` the parent `parentId`, which they are
+   * taken from (see {@link adoptStatements}).
    * @returns the rows, carrying their new parent
    */
   protected async adoptRows<R extends SnippetRow | SRSCardRow>(
@@ -507,12 +516,19 @@ export class ItemManager {
       await this.repo.mutate(query, params);
     }
 
-    return orphans.map((row) => ({ ...row, parent: parentId }));
+    return orphans.map((row) => ({
+      ...row,
+      parent: parentId,
+      context: parentId,
+    }));
   }
 
   /**
    * The writes that give the rows `orphans` of `table` the parent `parentId`
    * (see {@link adoptRows}), for a caller that runs them along with others.
+   * It is their context as well: an orphan is adopted by the item behind the
+   * file its `source` links to, which is the file it was taken from, and
+   * whose note shows its highlight from then on.
    */
   protected adoptStatements(
     table: 'snippet' | 'srs_card',
@@ -527,7 +543,7 @@ export class ItemManager {
       const chunk = orphans.slice(i, i + chunkSize);
       const placeholders = chunk.map((_, j) => `$${j + 2}`).join(', ');
       statements.push({
-        query: `UPDATE ${table} SET parent = $1 WHERE id IN (${placeholders})`,
+        query: `UPDATE ${table} SET parent = $1, context = $1 WHERE id IN (${placeholders})`,
         params: [parentId, ...chunk.map((row) => row.id)],
       });
     }
@@ -721,11 +737,13 @@ export class ItemManager {
 
   /**
    * Drop the `table` row `id` and delete its note, as one: a note left with
-   * no row, or a row whose note is gone, is half a deletion. The row and its
-   * review history are tombstoned (see `tombstoneRowStatements`), not deleted.
+   * no row, or a row whose note is gone, is half a deletion. The row is
+   * dropped as every row deleted for good is (see `deleteRowStatements`): the
+   * snippets and cards under it move up a level, and lose it as their
+   * context; it and its review history are tombstoned, not deleted.
    *
-   * The row goes first, and is put back as it was when the note is not
-   * deleted after all — the user turns down Obsidian's prompt, or the trash
+   * The row goes first, and is put back as it was, with what was under it,
+   * when the note is not deleted after all — the user turns down Obsidian's prompt, or the trash
    * fails. A note can't be fetched back from the trash, so its deletion is
    * the last step, after which nothing is undone.
    *
@@ -765,16 +783,24 @@ export class ItemManager {
         [id],
         { throwOnError: true }
       )) as unknown as { id: string }[];
+      // The links the delete moves off the row, which a turned-down delete
+      // puts back as they were
+      const children = (await this.repo.query(
+        `SELECT 'snippet' AS tbl, id, parent, context FROM snippet
+           WHERE parent = $1 OR context = $1
+         UNION ALL
+         SELECT 'srs_card' AS tbl, id, parent, context FROM srs_card
+           WHERE parent = $1 OR context = $1`,
+        [id],
+        { throwOnError: true }
+      )) as unknown as ChildLinks[];
 
       const file = Obsidian.getNote(row.reference, this.app);
       await withCompensation(async (step) => {
         await step(
           () =>
             this.repo.transaction(async () => {
-              for (const { query, params } of tombstoneRowStatements(
-                table,
-                id
-              )) {
+              for (const { query, params } of deleteRowStatements(table, id)) {
                 await this.repo.mutate(query, params);
               }
             }),
@@ -785,6 +811,12 @@ export class ItemManager {
                 await this.repo.mutate(
                   `UPDATE ${log} SET deleted = FALSE WHERE id = $1`,
                   [review.id]
+                );
+              }
+              for (const child of children) {
+                await this.repo.mutate(
+                  `UPDATE ${child.tbl} SET parent = $1, context = $2 WHERE id = $3`,
+                  [child.parent, child.context, child.id]
                 );
               }
             })

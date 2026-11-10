@@ -36,7 +36,8 @@ export const NOT_PURGED = `reference != ('${PURGED_REFERENCE_PREFIX}' || id)`;
 
 /**
  * The writes that tombstone the `table` row `id` for good, with its review
- * history and any startup rebind of it: each is flagged `deleted`, with a
+ * history and any startup rebind of it, as the last of
+ * {@link deleteRowStatements}, which every drop runs instead: each is flagged `deleted`, with a
  * fresh stamp, rather than deleted, and the row lets go of its path (see
  * {@link PURGED_REFERENCE_PREFIX}). The row itself goes last, so a run
  * stopping short leaves it live, for deleting again to finish.
@@ -64,25 +65,53 @@ export function tombstoneRowStatements(
 }
 
 /**
- * The writes that remove the `table` row `id` for good, as
- * `ReviewManager.deleteRow` runs them: its snippets and cards freed, then the
- * row tombstoned with its history (see {@link tombstoneRowStatements}). Run
- * in chunks that can stop between any two (`bulkMutate`), a run stopping
- * short of the last leaves the row there, which deleting again finishes.
+ * The tables whose rows sit under another item (`parent`) and are taken from
+ * one (`context`). Neither is a foreign key: an article, snippet or card is
+ * never deleted outright, only tombstoned, so nothing would clear them.
+ */
+const CHILD_TABLES = ['snippet', 'srs_card'] as const;
+
+/**
+ * SQL for the item the `table` row `$1` sits under, while that is one a row
+ * can sit under: an article or snippet not deleted for good. An article sits
+ * under nothing; nor does a row whose parent names a row dropped before its
+ * children moved up, or none at all.
+ */
+function itemAbove(table: ItemTable): string {
+  if (table === 'article') return 'NULL';
+  return (
+    `(SELECT up.parent FROM ${table} AS up WHERE up.id = $1 AND up.parent IN ` +
+    `(SELECT id FROM article WHERE ${NOT_PURGED} ` +
+    `UNION ALL SELECT id FROM snippet WHERE ${NOT_PURGED}))`
+  );
+}
+
+/**
+ * The writes that drop the `table` row `id` for good, which every way a row
+ * is deleted for good runs (`ReviewManager.deleteRow`, `deleteWithNote`, an
+ * un-import), so that each leaves the tree of items whole: what was taken
+ * from it loses its context, the note it has gone with (see
+ * `ISnippetBase.context`); what sat under it moves up to the item it sat
+ * under, or, with none, to the top. Then the row is tombstoned with its
+ * history (see {@link tombstoneRowStatements}), keeping its own links.
+ *
+ * Run in chunks that can stop between any two (`bulkMutate`), a run stopping
+ * short of the last leaves the row there, which deleting again finishes:
+ * each write changes nothing run a second time.
  */
 export function deleteRowStatements(
   table: ItemTable,
   id: string
 ): MutationStatement[] {
   return [
-    {
-      query: 'UPDATE snippet SET parent = NULL WHERE parent = $1',
+    ...CHILD_TABLES.map((child) => ({
+      query: `UPDATE ${child} SET context = NULL WHERE context = $1`,
       params: [id],
-    },
-    {
-      query: 'UPDATE srs_card SET parent = NULL WHERE parent = $1',
+    })),
+    ...CHILD_TABLES.map((child) => ({
+      query: `UPDATE ${child} SET parent = ${itemAbove(table)} WHERE parent = $1`,
       params: [id],
-    },
+    })),
     ...tombstoneRowStatements(table, id),
   ];
 }

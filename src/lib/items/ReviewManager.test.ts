@@ -146,6 +146,7 @@ function makeSnippetBase(overrides: Partial<ISnippetBase> = {}): ISnippetBase {
     deleted: false,
     priority: 30,
     parent: null,
+    context: null,
     start_offset: null,
     end_offset: null,
     scroll_top: 0,
@@ -182,6 +183,7 @@ function makeSnippetRow(overrides: Partial<SnippetRow> = {}): SnippetRow {
     deleted: false,
     priority: base.priority,
     parent: base.parent,
+    context: base.context,
     start_offset: base.start_offset,
     end_offset: base.end_offset,
     scroll_top: base.scroll_top,
@@ -194,6 +196,7 @@ function makeCardRow(overrides: Partial<SRSCardRow> = {}): SRSCardRow {
     id: 'card-1',
     reference: 'cards/test.md',
     parent: null,
+    context: null,
     due: Date.now() + 86_400_000,
     created_at: Date.now(),
     last_review: null,
@@ -275,6 +278,7 @@ function makeReviewSnippet(due: number): ReviewSnippet {
       deleted: false,
       priority: 30,
       parent: null,
+      context: null,
       start_offset: null,
       end_offset: null,
       scroll_top: 0,
@@ -295,6 +299,7 @@ function makeReviewCard(due: number): ReviewCard {
       dismissed: false,
       deleted: false,
       parent: null,
+      context: null,
       stability: 1,
       difficulty: 5,
       elapsed_days: 0,
@@ -585,14 +590,14 @@ function wirePaths(paths: readonly string[]) {
     );
   const insertChildren = (parent: string) => {
     repo.mutate(
-      `INSERT INTO snippet (id, reference, parent, due, interval, priority)
-       VALUES ($1, $2, $3, $4, 86400000, 30)`,
+      `INSERT INTO snippet (id, reference, parent, context, due, interval, priority)
+       VALUES ($1, $2, $3, $3, $4, 86400000, 30)`,
       [`snippet-of-${parent}`, `snippets/${parent}.md`, parent, YEAR_2000_MS]
     );
     repo.mutate(
-      `INSERT INTO srs_card (id, reference, parent, created_at, due, stability,
+      `INSERT INTO srs_card (id, reference, parent, context, created_at, due, stability,
          difficulty, elapsed_days, scheduled_days, state)
-       VALUES ($1, $2, $3, $4, $4, 0, 0, 0, 0, 0)`,
+       VALUES ($1, $2, $3, $3, $4, $4, 0, 0, 0, 0, 0)`,
       [`card-of-${parent}`, `cards/${parent}.md`, parent, YEAR_2000_MS]
     );
   };
@@ -684,15 +689,15 @@ function wireRenames(notes: Record<string, Record<string, unknown> | null>) {
       );
     } else if (table === 'snippet') {
       repo.mutate(
-        `INSERT INTO snippet (id, reference, parent, due, interval, priority)
-         VALUES ($1, $2, $3, $4, 86400000, 30)`,
+        `INSERT INTO snippet (id, reference, parent, context, due, interval, priority)
+         VALUES ($1, $2, $3, $3, $4, 86400000, 30)`,
         [id, reference, parent, YEAR_2000_MS]
       );
     } else {
       repo.mutate(
-        `INSERT INTO srs_card (id, reference, parent, created_at, due,
+        `INSERT INTO srs_card (id, reference, parent, context, created_at, due,
            stability, difficulty, elapsed_days, scheduled_days, state)
-         VALUES ($1, $2, $3, $4, $4, 0, 0, 0, 0, 0)`,
+         VALUES ($1, $2, $3, $3, $4, $4, 0, 0, 0, 0, 0)`,
         [id, reference, parent, YEAR_2000_MS]
       );
     }
@@ -6337,16 +6342,17 @@ describe('ReviewManager.deleteRow', () => {
           [id, `${table}/${id}.md`, YEAR_2000_MS]
         );
       } else if (table === 'snippet') {
+        // Taken from its parent, as a snippet or card is made
         repo.mutate(
-          `INSERT INTO snippet (id, reference, parent, due, interval, priority)
-           VALUES ($1, $2, $3, $4, 86400000, 30)`,
+          `INSERT INTO snippet (id, reference, parent, context, due, interval, priority)
+           VALUES ($1, $2, $3, $3, $4, 86400000, 30)`,
           [id, `${table}/${id}.md`, parent, YEAR_2000_MS]
         );
       } else {
         repo.mutate(
-          `INSERT INTO srs_card (id, reference, parent, created_at, due,
+          `INSERT INTO srs_card (id, reference, parent, context, created_at, due,
              stability, difficulty, elapsed_days, scheduled_days, state)
-           VALUES ($1, $2, $3, $4, $4, 0, 0, 0, 0, 0)`,
+           VALUES ($1, $2, $3, $3, $4, $4, 0, 0, 0, 0, 0)`,
           [id, `${table}/${id}.md`, parent, YEAR_2000_MS]
         );
       }
@@ -6384,8 +6390,8 @@ describe('ReviewManager.deleteRow', () => {
       Object.fromEntries(
         [
           ['article', 'SELECT id, NULL FROM article'],
-          ['snippet', 'SELECT id, parent FROM snippet'],
-          ['srs_card', 'SELECT id, parent FROM srs_card'],
+          ['snippet', 'SELECT id, parent, context FROM snippet'],
+          ['srs_card', 'SELECT id, parent, context FROM srs_card'],
           ['article_review', 'SELECT id, article_id FROM article_review'],
           ['snippet_review', 'SELECT id, snippet_id FROM snippet_review'],
           ['srs_card_review', 'SELECT id, card_id FROM srs_card_review'],
@@ -6395,7 +6401,7 @@ describe('ReviewManager.deleteRow', () => {
           (
             repo.db!.exec(`${sql} WHERE deleted = FALSE ORDER BY 1`)[0]
               ?.values ?? []
-          ).map(([id, other]) => [id, other]),
+          ).map((row) => [...row]),
         ])
       );
 
@@ -6414,6 +6420,8 @@ describe('ReviewManager.deleteRow', () => {
     table: tableArb,
     logs: fc.nat({ max: 3 }),
     rebound: fc.boolean(),
+    /** Whether the item, unless an article, sits under another */
+    above: fc.boolean(),
     others: fc.array(
       fc.record({
         table: fc.oneof(tableArb, childTableArb),
@@ -6424,12 +6432,14 @@ describe('ReviewManager.deleteRow', () => {
     ),
   });
 
-  it('removes the row and its review history, and leaves what was taken from it with no parent', async () => {
+  it('removes the row and its review history, moving what was under it up a level and erasing what was taken from it', async () => {
     await fc.assert(
       fc.asyncProperty(scenarioArb, async (scenario) => {
         const wired = wireDeletion(scenario);
         wired.insert('article', 'elsewhere', null);
-        wired.insert(scenario.table, 'target', null);
+        const above =
+          scenario.above && scenario.table !== 'article' ? 'elsewhere' : null;
+        wired.insert(scenario.table, 'target', above);
         for (let n = 0; n < scenario.logs; n++)
           wired.log(scenario.table, 'target', n);
         if (scenario.rebound && scenario.table === 'article')
@@ -6444,6 +6454,12 @@ describe('ReviewManager.deleteRow', () => {
           for (let n = 0; n < logs; n++) wired.log(table, `other-${i}`, n);
         });
         const before = wired.dump();
+        // As every drop leaves them (see `deleteRowStatements`)
+        const moved = ([id, parent, context]: unknown[]) => [
+          id,
+          parent === 'target' ? above : parent,
+          context === 'target' ? null : context,
+        ];
 
         await wired.manager.deleteRow(scenario.table, 'target');
 
@@ -6457,10 +6473,10 @@ describe('ReviewManager.deleteRow', () => {
           rebind: before.rebind.filter(([id]) => id !== 'target'),
           snippet: before.snippet
             .filter(([id]) => scenario.table !== 'snippet' || id !== 'target')
-            .map(([id, parent]) => [id, parent === 'target' ? null : parent]),
+            .map(moved),
           srs_card: before.srs_card
             .filter(([id]) => scenario.table !== 'srs_card' || id !== 'target')
-            .map(([id, parent]) => [id, parent === 'target' ? null : parent]),
+            .map(moved),
         };
         expect(wired.dump()).toStrictEqual(expected);
       })
@@ -6592,7 +6608,7 @@ describe('ReviewManager.deleteRow', () => {
     wired.manager.snippets.offsetTracker.loadHighlights('article/parent.md', [
       {
         id: 'target',
-        parent: 'parent',
+        context: 'parent',
         start_offset: 0,
         end_offset: 1,
       } as SnippetHighlight,
@@ -6632,23 +6648,30 @@ describe('ReviewManager.deleteRow', () => {
     expect(wired.forgetIf).not.toHaveBeenCalled();
   });
 
-  it('takes the deleted row’s highlight off its parent’s note and repaints it', async () => {
+  it('takes the deleted row’s highlight off the note of what it was taken from and repaints it', async () => {
     await fc.assert(
       fc.asyncProperty(
         tableArb,
         fc.option(tableArb, { nil: null }),
         fc.boolean(),
-        async (table, parentTable, parentExists) => {
+        fc.boolean(),
+        async (table, parentTable, parentExists, takenFrom) => {
           const wired = wireDeletion();
           const parentPath = `${parentTable}/parent.md`;
           if (parentTable && parentExists)
             wired.insert(parentTable, 'parent', null);
           wired.insert(table, 'target', parentTable && 'parent');
+          // Moved up under it by a drop, and so taken from nothing
+          if (!takenFrom && table !== 'article') {
+            wired.repo.mutate(
+              `UPDATE ${table} SET context = NULL WHERE id = 'target'`
+            );
+          }
           const { offsetTracker } = wired.manager.snippets;
           const highlight = (id: string) =>
             ({
               id,
-              parent: 'parent',
+              context: 'parent',
               start_offset: 0,
               end_offset: 1,
             }) as SnippetHighlight;
@@ -6659,16 +6682,71 @@ describe('ReviewManager.deleteRow', () => {
 
           await wired.manager.deleteRow(table, 'target');
 
-          // Only a snippet or card has a parent, and only one that is still
-          // there has a note to paint
+          // Only a snippet or card is taken from an item, and only one that
+          // is still there has a note to paint
           const painted =
-            table !== 'article' && parentTable !== null && parentExists;
+            table !== 'article' &&
+            parentTable !== null &&
+            parentExists &&
+            takenFrom;
           expect(
             offsetTracker.getHighlights(parentPath).map(({ id }) => id)
           ).toStrictEqual(painted ? ['sibling'] : ['target', 'sibling']);
           expect(wired.trigger.mock.calls).toStrictEqual(
             painted ? [['ir-highlights-changed', parentPath]] : []
           );
+        }
+      )
+    );
+  });
+
+  it('trashes the row, taking a snippet’s highlight off the note of what it was taken from, and nothing else’s, while that is there', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        tableArb,
+        fc.boolean(),
+        fc.boolean(),
+        async (table, takenFrom, parentExists) => {
+          const wired = wireDeletion();
+          const parentPath = 'article/parent.md';
+          if (parentExists) wired.insert('article', 'parent', null);
+          wired.insert(table, 'target', table === 'article' ? null : 'parent');
+          // Moved up a level by a drop, and so taken from nothing
+          if (!takenFrom && table !== 'article') {
+            wired.repo.mutate(
+              `UPDATE ${table} SET context = NULL WHERE id = 'target'`
+            );
+          }
+          const { offsetTracker } = wired.manager.snippets;
+          const highlight = (id: string) =>
+            ({
+              id,
+              context: 'parent',
+              start_offset: 0,
+              end_offset: 1,
+            }) as SnippetHighlight;
+          offsetTracker.loadHighlights(parentPath, [
+            highlight('target'),
+            highlight('sibling'),
+          ]);
+
+          await wired.manager.handleDeletion({
+            path: `${table}/target.md`,
+          } as never);
+
+          // Only a snippet is painted, on the note it was taken from
+          const painted = table === 'snippet' && takenFrom && parentExists;
+          expect(
+            offsetTracker.getHighlights(parentPath).map(({ id }) => id)
+          ).toStrictEqual(painted ? ['sibling'] : ['target', 'sibling']);
+          expect(wired.trigger.mock.calls).toStrictEqual(
+            painted ? [['ir-highlights-changed', parentPath]] : []
+          );
+          expect(
+            wired.repo.db!.exec(
+              `SELECT deleted FROM ${table} WHERE id = 'target'`
+            )[0].values
+          ).toStrictEqual([[1]]);
         }
       )
     );

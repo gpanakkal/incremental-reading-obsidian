@@ -201,7 +201,7 @@ export const migrations: ReleasedMigration[] = [
             transformRow: (
               row: SafeOmit<
                 TableNameToRowType['snippet'],
-                'interval' | 'deleted' | 'due_fuzz'
+                'interval' | 'deleted' | 'due_fuzz' | 'context'
               >
             ) => {
               const lastReviewTime = latestReviewBySnippet[row.id];
@@ -754,6 +754,21 @@ export const migrations: ReleasedMigration[] = [
           restored_at INTEGER
         );
       `);
+    },
+  },
+  {
+    version: 16,
+    pluginVersion: '0.8.3',
+    description:
+      'Keep the item each snippet and card was taken from apart from its parent',
+    up: (db) => {
+      // `parent` places a row in the tree of items, and moves up a level when
+      // its parent is dropped; `context` names the item whose note holds its
+      // highlight or link, and is erased then instead. Until now they were one
+      for (const table of ['snippet', 'srs_card']) {
+        addColumnIfNotExists(db, table, 'context', 'TEXT DEFAULT NULL');
+        db.exec(`UPDATE ${table} SET context = parent`);
+      }
     },
   },
 ];

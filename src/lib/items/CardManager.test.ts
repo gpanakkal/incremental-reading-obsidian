@@ -65,7 +65,7 @@ import {
   vi,
 } from 'vitest';
 import { CardManager } from './CardManager';
-import { tombstoneRowStatements } from './row-delete';
+import { deleteRowStatements } from './row-delete';
 import SRSCard from './SRSCard';
 
 // #region HELPERS
@@ -154,6 +154,7 @@ function makeCardRow(overrides: Partial<SRSCardRow> = {}): SRSCardRow {
     dismissed: 0,
     deleted: false,
     parent: null,
+    context: null,
     ...overrides,
   };
 }
@@ -180,6 +181,7 @@ function makeCardDisplay(
     dismissed: false,
     deleted: false,
     parent: null,
+    context: null,
     ...overrides,
   };
 }
@@ -204,6 +206,7 @@ function makeCardBase(overrides: Partial<ISRSCard> = {}): ISRSCard {
     dismissed: false,
     deleted: false,
     parent: null,
+    context: null,
     ...overrides,
   };
 }
@@ -275,6 +278,7 @@ const cardRowArb: fc.Arbitrary<SRSCardRow> = fc.record<SRSCardRow>({
   dismissed: fc.oneof(fc.constant(0 as const), fc.constant(1 as const)),
   deleted: fc.boolean(),
   parent: fc.constant(null),
+  context: fc.constant(null),
 });
 
 /** Valid delimiter pairs for testing getClozeGroupsPattern */
@@ -3788,10 +3792,10 @@ describe('review — against the production schema', () => {
     });
     db.exec(
       `INSERT INTO srs_card
-        (id, reference, parent, created_at, due, dismissed, deleted, last_review,
+        (id, reference, parent, context, created_at, due, dismissed, deleted, last_review,
          stability, difficulty, elapsed_days, scheduled_days, learning_steps,
          reps, lapses, state)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
+       VALUES ($1, $2, $3, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
       [
         row.id,
         row.reference,
@@ -5150,9 +5154,9 @@ describe('adoptOrphans', () => {
           } as unknown as SQLiteRepository;
           specs.forEach((spec, i) =>
             db.exec(
-              `INSERT INTO srs_card (id, reference, parent, created_at, due,
+              `INSERT INTO srs_card (id, reference, parent, context, created_at, due,
                  stability, difficulty, elapsed_days, scheduled_days, state, deleted)
-               VALUES ($1, $2, $3, 0, 0, 0, 0, 0, 0, 0, $4)`,
+               VALUES ($1, $2, $3, $3, 0, 0, 0, 0, 0, 0, 0, $4)`,
               [
                 `card-${i}`,
                 `cards/card-${i}.md`,
@@ -5306,6 +5310,9 @@ describe('getPdfHighlights', () => {
   /** A card as a PDF's highlights meet it. */
   const cardSpecArb = fc.record({
     parent: fc.constantFrom<'pdf' | 'other' | null>('pdf', 'other', null),
+    // Whether it was taken from its parent (its `context`), or only sits
+    // under it, moved up a level by a drop that erased its context
+    takenFrom: fc.boolean(),
     deleted: fc.boolean(),
     dismissed: fc.boolean(),
     exists: fc.boolean(),
@@ -5340,23 +5347,24 @@ describe('getPdfHighlights', () => {
       );
     if (isArticle) insertArticle(PDF_ARTICLE_ID, PDF.path);
     insertArticle('other-article', 'papers/Other.pdf');
-    specs.forEach((spec, i) =>
+    specs.forEach((spec, i) => {
+      const parent =
+        spec.parent === 'pdf' ? PDF_ARTICLE_ID : spec.parent && 'other-article';
       db.exec(
-        `INSERT INTO srs_card (id, reference, parent, created_at, due,
+        `INSERT INTO srs_card (id, reference, parent, context, created_at, due,
            stability, difficulty, elapsed_days, scheduled_days, state,
            dismissed, deleted)
-         VALUES ($1, $2, $3, 0, 0, 0, 0, 0, 0, 0, $4, $5)`,
+         VALUES ($1, $2, $3, $4, 0, 0, 0, 0, 0, 0, 0, $5, $6)`,
         [
           `card-${i}`,
           `cards/card-${i}.md`,
-          spec.parent === 'pdf'
-            ? PDF_ARTICLE_ID
-            : spec.parent && 'other-article',
+          parent,
+          spec.takenFrom ? parent : null,
           Number(spec.dismissed),
           Number(spec.deleted),
         ]
-      )
-    );
+      );
+    });
     vi.spyOn(Obsidian, 'getNote').mockImplementation((reference) =>
       specAt(specs, reference)?.exists
         ? ({ path: reference, extension: 'md' } as TFile)
@@ -5388,7 +5396,7 @@ describe('getPdfHighlights', () => {
 
   // #endregion
 
-  it('highlights the selection of each live card of a PDF article, dismissed or not, wherever its link now resolves, and of no other card', async () => {
+  it('highlights the selection of each live card taken from a PDF article, dismissed or not, wherever its link now resolves, and of no other card', async () => {
     await fc.assert(
       fc.asyncProperty(
         fc.array(cardSpecArb, { maxLength: 8 }),
@@ -5400,6 +5408,7 @@ describe('getPdfHighlights', () => {
 
           const expected = specs.flatMap((spec, i) =>
             spec.parent === 'pdf' &&
+            spec.takenFrom &&
             !spec.deleted &&
             spec.exists &&
             spec.irId !== 'other' &&
@@ -5466,9 +5475,9 @@ describe('getPdfHighlights', () => {
       [copy.path]
     );
     db.exec(
-      `INSERT INTO srs_card (id, reference, parent, created_at, due,
+      `INSERT INTO srs_card (id, reference, parent, context, created_at, due,
          stability, difficulty, elapsed_days, scheduled_days, state)
-       VALUES ('card', 'cards/c.md', 'copy', 0, 0, 0, 0, 0, 0, 0)`
+       VALUES ('card', 'cards/c.md', 'copy', 'copy', 0, 0, 0, 0, 0, 0, 0)`
     );
     vi.spyOn(Obsidian, 'getNote').mockReturnValue({
       path: 'cards/c.md',
@@ -5524,7 +5533,7 @@ describe('delete', () => {
 
   /** The writes that tombstone the row `id` with its history, as mutate gets them. */
   const tombstoned = (id: string) =>
-    tombstoneRowStatements('srs_card', id).map(({ query, params }) => [
+    deleteRowStatements('srs_card', id).map(({ query, params }) => [
       query,
       params,
     ]);

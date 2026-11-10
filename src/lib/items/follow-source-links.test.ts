@@ -51,15 +51,15 @@ function insertRow(
     );
   } else if (table === 'snippet') {
     repo.mutate(
-      `INSERT INTO snippet (id, reference, parent, deleted, due, interval, priority)
-       VALUES ($1, $2, $3, $4, 0, 86400000, 30)`,
+      `INSERT INTO snippet (id, reference, parent, context, deleted, due, interval, priority)
+       VALUES ($1, $2, $3, $3, $4, 0, 86400000, 30)`,
       [id, reference, parent, deleted]
     );
   } else {
     repo.mutate(
-      `INSERT INTO srs_card (id, reference, parent, deleted, created_at, due,
+      `INSERT INTO srs_card (id, reference, parent, context, deleted, created_at, due,
          stability, difficulty, elapsed_days, scheduled_days, state)
-       VALUES ($1, $2, $3, $4, 0, 0, 0, 0, 0, 0, 0)`,
+       VALUES ($1, $2, $3, $3, $4, 0, 0, 0, 0, 0, 0, 0)`,
       [id, reference, parent, deleted]
     );
   }

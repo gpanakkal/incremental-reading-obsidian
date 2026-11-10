@@ -19,12 +19,23 @@ import {
 
 const tableArb = fc.constantFrom<ItemTable>('article', 'snippet', 'srs_card');
 
-/** Add a `table` row `id` at `reference`, taken from `parent`. */
+/**
+ * Add a `table` row `id` at `reference`, under `parent` in the tree, and
+ * taken from `context`, its parent unless said otherwise.
+ */
 function insertItem(
   repo: TestRepository,
   table: ItemTable,
   id: string,
-  { reference = `${table}/${id}.md`, parent = null as string | null } = {}
+  {
+    reference = `${table}/${id}.md`,
+    parent = null,
+    context = parent,
+  }: {
+    reference?: string;
+    parent?: string | null;
+    context?: string | null;
+  } = {}
 ) {
   if (table === 'article') {
     repo.mutate(
@@ -33,13 +44,13 @@ function insertItem(
     );
   } else if (table === 'snippet') {
     repo.mutate(
-      `INSERT INTO snippet (id, reference, parent, due, interval, priority) VALUES ($1, $2, $3, 0, 1, 30)`,
-      [id, reference, parent]
+      `INSERT INTO snippet (id, reference, parent, context, due, interval, priority) VALUES ($1, $2, $3, $4, 0, 1, 30)`,
+      [id, reference, parent, context]
     );
   } else {
     repo.mutate(
-      `INSERT INTO srs_card (id, reference, parent, created_at, due, stability, difficulty, elapsed_days, scheduled_days, state) VALUES ($1, $2, $3, 0, 0, 0, 0, 0, 0, 0)`,
-      [id, reference, parent]
+      `INSERT INTO srs_card (id, reference, parent, context, created_at, due, stability, difficulty, elapsed_days, scheduled_days, state) VALUES ($1, $2, $3, $4, 0, 0, 0, 0, 0, 0, 0)`,
+      [id, reference, parent, context]
     );
   }
 }
@@ -120,6 +131,141 @@ function hardDeletesIn(text: string): string[] {
   return [...text.matchAll(new RegExp(HARD_DELETE, 'gi'))].map(
     (match) =>
       `${text.slice(0, match.index).split('\n').length}: ${match[0].replace(/\s+/g, ' ')}`
+  );
+}
+
+/** One row of a tree of items: its id, table, and the two links up. */
+interface TreeNode {
+  id: string;
+  table: ItemTable;
+  parent: string | null;
+  context: string | null;
+}
+
+/** A tree of items, and which of its rows are deleted, for now or for good. */
+interface Tree {
+  nodes: TreeNode[];
+  trashed: Set<string>;
+  purged: Set<string>;
+}
+
+/**
+ * A tree of items at least three levels deep (an article, a snippet taken
+ * from it, one taken from that, and a snippet or card from that), with more
+ * rows hung anywhere: under no parent, an article or snippet of the tree, or
+ * an id no row holds. Each row is taken from its parent, or from nothing
+ * (its context erased by an earlier drop). Some rows are deleted for now
+ * (trashed, which keeps their path), or for good with nothing else done, as
+ * a drop did before it let go of what was taken from the row.
+ */
+const treeArb: fc.Arbitrary<Tree> = fc
+  .record({
+    leaf: fc.constantFrom<ItemTable>('snippet', 'srs_card'),
+    articles: fc.integer({ min: 1, max: 2 }),
+    extra: fc.array(
+      fc.record({
+        table: fc.constantFrom<ItemTable>('snippet', 'srs_card'),
+        under: fc.oneof(fc.constantFrom('none', 'gone'), fc.nat()),
+        takenFrom: fc.boolean(),
+      }),
+      { maxLength: 8 }
+    ),
+    trashed: fc.array(fc.nat(), { maxLength: 2 }),
+    purged: fc.array(fc.nat(), { maxLength: 2 }),
+  })
+  .map(({ leaf, articles, extra, trashed, purged }) => {
+    const nodes: TreeNode[] = [];
+    for (let i = 0; i < articles; i++) {
+      nodes.push({
+        id: `a${i}`,
+        table: 'article',
+        parent: null,
+        context: null,
+      });
+    }
+    const spine: [string, ItemTable][] = [
+      ['s0', 'snippet'],
+      ['s1', 'snippet'],
+      ['leaf', leaf],
+    ];
+    for (const [id, table] of spine) {
+      const parent = nodes[nodes.length - 1].id;
+      nodes.push({ id, table, parent, context: parent });
+    }
+    extra.forEach(({ table, under, takenFrom }, i) => {
+      // Cards are never taken from, so no row hangs under one
+      const parents = nodes.filter((node) => node.table !== 'srs_card');
+      const parent =
+        under === 'none'
+          ? null
+          : under === 'gone'
+            ? 'gone'
+            : parents[under % parents.length].id;
+      nodes.push({
+        id: `x${i}`,
+        table,
+        parent,
+        context: takenFrom ? parent : null,
+      });
+    });
+    const pick = (picks: number[]) =>
+      new Set(picks.map((n) => nodes[n % nodes.length].id));
+    return { nodes, trashed: pick(trashed), purged: pick(purged) };
+  });
+
+/** Put `tree` into `repo`. */
+function plantTree(repo: TestRepository, { nodes, trashed, purged }: Tree) {
+  for (const { id, table, parent, context } of nodes) {
+    insertItem(repo, table, id, { parent, context });
+  }
+  for (const { id, table } of nodes) {
+    if (trashed.has(id)) {
+      repo.mutate(`UPDATE ${table} SET deleted = TRUE WHERE id = $1`, [id]);
+    }
+    if (purged.has(id)) run(repo, tombstoneRowStatements(table, id));
+  }
+}
+
+/** Every snippet's and card's links up, by id, tombstones included. */
+function links(
+  repo: TestRepository
+): Record<string, { parent: unknown; context: unknown }> {
+  return Object.fromEntries(
+    [...repo.storedRows('snippet'), ...repo.storedRows('srs_card')].map(
+      ({ id, parent, context }) => [String(id), { parent, context }]
+    )
+  );
+}
+
+/** Where `id` of `repo` is: whether it is deleted, and its reference. */
+function whereIs(repo: TestRepository, table: ItemTable, id: string) {
+  return repo
+    .storedRows(table, ` WHERE id = '${id}'`)
+    .map(({ deleted, reference }) => [deleted, reference]);
+}
+
+/** The links of `tree` once `target` is dropped from it, as a drop leaves them. */
+function linksAfterDrop(
+  before: ReturnType<typeof links>,
+  tree: Tree,
+  target: TreeNode
+): ReturnType<typeof links> {
+  // Where its children go: the item above it, while that is one a row can
+  // sit under, an article or snippet not deleted for good
+  const above = tree.nodes.find(
+    (node) =>
+      node.id === target.parent &&
+      node.table !== 'srs_card' &&
+      !tree.purged.has(node.id)
+  );
+  return Object.fromEntries(
+    Object.entries(before).map(([id, { parent, context }]) => [
+      id,
+      {
+        parent: parent === target.id ? (above?.id ?? null) : parent,
+        context: context === target.id ? null : context,
+      },
+    ])
   );
 }
 
@@ -218,45 +364,87 @@ describe('tombstoneRowStatements', () => {
 });
 
 describe('deleteRowStatements', () => {
-  it('property: frees what was taken from the row, and only that, before tombstoning it', async () => {
+  it('property: moves what was under the row up to its parent, or to the top, erasing what was taken from it, and changes no other link', async () => {
     await fc.assert(
-      fc.asyncProperty(
-        tableArb,
-        fc.array(
-          fc.record({
-            table: fc.constantFrom<ItemTable>('snippet', 'srs_card'),
-            parent: fc.constantFrom('target', 'elsewhere', null),
-          }),
-          { maxLength: 5 }
-        ),
-        async (table, children) => {
-          const repo = await TestRepository.create();
-          insertItem(repo, table, 'target');
-          children.forEach(({ table: childTable, parent }, i) =>
-            insertItem(repo, childTable, `child-${i}`, { parent })
-          );
+      fc.asyncProperty(treeArb, fc.nat(), async (tree, pick) => {
+        const repo = await TestRepository.create();
+        plantTree(repo, tree);
+        const target = tree.nodes[pick % tree.nodes.length];
+        const before = links(repo);
 
-          const statements = deleteRowStatements(table, 'target');
-          run(repo, statements);
+        run(repo, deleteRowStatements(target.table, target.id));
 
-          expect(statements.slice(2)).toEqual(
-            tombstoneRowStatements(table, 'target')
-          );
-          const parents = [
-            ...repo.rows('snippet'),
-            ...repo.rows('srs_card'),
-          ].map(({ id, parent }) => [id, parent]);
-          expect(parents.sort()).toEqual(
-            children
-              .map(({ parent }, i) => [
-                `child-${i}`,
-                parent === 'target' ? null : parent,
-              ])
-              .sort()
-          );
-        }
-      ),
-      { numRuns: 30 }
+        expect(links(repo)).toEqual(linksAfterDrop(before, tree, target));
+      }),
+      { numRuns: 200 }
+    );
+  });
+
+  it('property: leaves no row under the row it drops', async () => {
+    await fc.assert(
+      fc.asyncProperty(treeArb, fc.nat(), async (tree, pick) => {
+        const repo = await TestRepository.create();
+        plantTree(repo, tree);
+        const target = tree.nodes[pick % tree.nodes.length];
+
+        run(repo, deleteRowStatements(target.table, target.id));
+
+        expect(
+          Object.values(links(repo)).filter(
+            ({ parent, context }) =>
+              parent === target.id || context === target.id
+          )
+        ).toEqual([]);
+      }),
+      { numRuns: 100 }
+    );
+  });
+
+  it('property: tombstones the row last, after letting go of what was taken from it, and keeps its own links', async () => {
+    await fc.assert(
+      fc.asyncProperty(treeArb, fc.nat(), async (tree, pick) => {
+        const target = tree.nodes[pick % tree.nodes.length];
+        const statements = deleteRowStatements(target.table, target.id);
+        const tombstone = tombstoneRowStatements(target.table, target.id);
+
+        expect(statements.slice(-tombstone.length)).toEqual(tombstone);
+        expect(
+          statements
+            .slice(0, -tombstone.length)
+            .every(({ query }) => /^UPDATE (snippet|srs_card) SET /.test(query))
+        ).toBe(true);
+
+        // Its tombstone still says where it sat in the tree
+        const repo = await TestRepository.create();
+        plantTree(repo, tree);
+        const own = links(repo)[target.id];
+        run(repo, statements);
+        expect(links(repo)[target.id]).toEqual(own);
+      }),
+      { numRuns: 50 }
+    );
+  });
+
+  it('property: run again after stopping short anywhere, ends where one run does', async () => {
+    await fc.assert(
+      fc.asyncProperty(treeArb, fc.nat(), fc.nat(), async (tree, pick, cut) => {
+        const target = tree.nodes[pick % tree.nodes.length];
+        const statements = deleteRowStatements(target.table, target.id);
+        const once = await TestRepository.create();
+        plantTree(once, tree);
+        run(once, statements);
+        const stopped = await TestRepository.create();
+        plantTree(stopped, tree);
+
+        run(stopped, statements.slice(0, cut % (statements.length + 1)));
+        run(stopped, statements);
+
+        expect(links(stopped)).toEqual(links(once));
+        expect(whereIs(stopped, target.table, target.id)).toEqual(
+          whereIs(once, target.table, target.id)
+        );
+      }),
+      { numRuns: 50 }
     );
   });
 });

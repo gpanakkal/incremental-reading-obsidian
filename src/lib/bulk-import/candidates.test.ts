@@ -821,13 +821,13 @@ describe('folderSource with unimportChecks', () => {
     article('pdf', 'n/live.pdf');
     article('deleted', 'n/deleted.md', 1);
     repo.mutate(
-      `INSERT INTO snippet (id, reference, parent, due, interval, priority)
-       VALUES ('snippet', 'n/snippet.md', 'live', 0, 86400000, 30)`
+      `INSERT INTO snippet (id, reference, parent, context, due, interval, priority)
+       VALUES ('snippet', 'n/snippet.md', 'live', 'live', 0, 86400000, 30)`
     );
     repo.mutate(
-      `INSERT INTO srs_card (id, reference, parent, created_at, due,
+      `INSERT INTO srs_card (id, reference, parent, context, created_at, due,
          stability, difficulty, elapsed_days, scheduled_days, state)
-       VALUES ('card', 'n/card.md', 'live', 0, 0, 0, 0, 0, 0, 0)`
+       VALUES ('card', 'n/card.md', 'live', 'live', 0, 0, 0, 0, 0, 0, 0)`
     );
     const manager = new ReviewManager(
       {

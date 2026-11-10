@@ -211,7 +211,7 @@ export class SnippetManager extends ItemManager {
       dismissed: Boolean(snippetRow.dismissed),
       start_offset: snippetRow.start_offset,
       end_offset: snippetRow.end_offset,
-      parent: snippetRow.parent ?? '',
+      context: snippetRow.context ?? '',
     };
   }
 
@@ -229,8 +229,8 @@ export class SnippetManager extends ItemManager {
     const file = Obsidian.getNote(row.reference, this.app);
     // Missing, which is never stored: see `MissingItem`
     if (!file) {
-      if (row.parent) {
-        const parentPath = normalizePath(row.parent);
+      if (row.context) {
+        const parentPath = normalizePath(row.context);
         this.offsetTracker.removeHighlight(parentPath, row.id);
       }
       return null;
@@ -718,14 +718,16 @@ export class SnippetManager extends ItemManager {
   ) {
     const query =
       `INSERT INTO snippet ` +
-      `(id, reference, due, interval, priority, parent, start_offset, end_offset, note_mtime) ` +
-      `VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`;
+      `(id, reference, due, interval, priority, parent, context, start_offset, end_offset, note_mtime) ` +
+      `VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`;
     await this.repo.mutate(query, [
       id,
       snippetFile.path,
       dueTime,
       TEXT_BASE_REVIEW_INTERVAL,
       priority,
+      // Taken from its parent, whose note holds its highlight
+      parentId,
       parentId,
       offsets?.start ?? null,
       offsets?.end ?? null,
@@ -846,15 +848,15 @@ export class SnippetManager extends ItemManager {
       parentEntry = await this.findSnippet(parentFile);
     }
 
-    // For articles/snippets with a live DB entry, use the existing parent ID
-    // query. A note's deleted row has none of its children shown, type tag or
+    // For articles/snippets with a live DB entry, the snippets taken from it,
+    // by their context (see `ISnippetBase.context`). A note's deleted row has none of its children shown, type tag or
     // not; a PDF's still does
     if (
       parentEntry &&
       (!parentEntry.deleted || !supportsFrontmatter(parentFile))
     ) {
       const results = (await this.repo.query(
-        'SELECT * FROM snippet WHERE parent = $1 AND start_offset IS NOT NULL AND end_offset IS NOT NULL AND deleted = FALSE',
+        'SELECT * FROM snippet WHERE context = $1 AND start_offset IS NOT NULL AND end_offset IS NOT NULL AND deleted = FALSE',
         [parentEntry.id]
       )) as SnippetRow[];
 
@@ -973,11 +975,11 @@ export class SnippetManager extends ItemManager {
     // Where the highlights of each changed parent are held
     const heldAt = new Map<string, Set<string>>();
     for (const path of this.offsetTracker.getTrackedPaths()) {
-      for (const { parent } of this.offsetTracker.getHighlights(path)) {
-        if (!changed.has(parent)) continue;
-        const paths = heldAt.get(parent) ?? new Set<string>();
+      for (const { context } of this.offsetTracker.getHighlights(path)) {
+        if (!changed.has(context)) continue;
+        const paths = heldAt.get(context) ?? new Set<string>();
         paths.add(path);
-        heldAt.set(parent, paths);
+        heldAt.set(context, paths);
       }
     }
     if (heldAt.size === 0) return;

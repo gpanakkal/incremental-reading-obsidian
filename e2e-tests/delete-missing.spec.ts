@@ -141,8 +141,8 @@ test('permanently deletes a missing item from its queue row, keeping what was ta
   // A snippet taken from it, with its note, due well after
   await writeVaultFile('snippets/Kept child.md', 'A snippet\n');
   await mutate(
-    `INSERT INTO snippet (id, reference, parent, due, interval, priority)
-     VALUES ('child', 'snippets/Kept child.md', 'lost', $1, 86400000, 30)`,
+    `INSERT INTO snippet (id, reference, parent, context, due, interval, priority)
+     VALUES ('child', 'snippets/Kept child.md', 'lost', 'lost', $1, 86400000, 30)`,
     [Date.now() + 1e9]
   );
 
@@ -227,4 +227,74 @@ test('moves review on to the next item due when the item it was on is deleted', 
   // review off a deleted item eventually whatever the delete did
   await expect(reviewTitle(window, 'Next up')).toBeVisible({ timeout: 2_000 });
   await expect(window.locator('.ir-missing-item')).toHaveCount(0);
+});
+
+test('moves a card up to the article above a snippet deleted for good, its context jump falling back to its source', async () => {
+  // An article with its note, and a snippet taken from it whose note is gone
+  await writeVaultFile(
+    'articles/Root.md',
+    '---\nir-id: root\ntags: ir-article\n---\nThe article\n'
+  );
+  await mutate(
+    `INSERT INTO article (id, reference, due, interval, priority)
+     VALUES ('root', 'articles/Root.md', $1, 86400000, 25)`,
+    [Date.now() + 1e9]
+  );
+  await mutate(
+    `INSERT INTO snippet (id, reference, parent, context, due, interval, priority)
+     VALUES ('lost', 'gone/Lost.md', 'root', 'root', $1, 86400000, 30)`,
+    [Date.now() - 60_000]
+  );
+  // A card taken from the snippet, whose source link names a note still there
+  await writeVaultFile('notes/Source.md', 'Where the text came from\n');
+  await writeVaultFile(
+    'cards/Kept card.md',
+    '---\nir-id: kept-card\ntags: ir-card\nsource: "[[Source]]"\n---\nA card\n'
+  );
+  await mutate(
+    `INSERT INTO srs_card (id, reference, parent, context, created_at, due,
+       stability, difficulty, elapsed_days, scheduled_days, state)
+     VALUES ('kept-card', 'cards/Kept card.md', 'lost', 'lost', 0, $1, 0, 0, 0, 0, 0)`,
+    [Date.now() + 1e9]
+  );
+
+  await executeCommandById(window, 'incremental-reading:learn');
+  await setNativeMenus(window, false);
+  const card = window.locator('.ir-queue-row').filter({ hasText: 'Kept card' });
+  await expect(card).toContainText('gone/Lost.md');
+
+  await openRowMenu(missingRows(), 'Permanently delete');
+  await chooseMenuItem('Permanently delete');
+  await confirmation().getByRole('button', { name: 'Delete' }).click();
+  await expect(missingRows()).toHaveCount(0);
+
+  // Its parent column names the article the snippet was taken from
+  await expect(card).toContainText('articles/Root.md');
+  await expect(card).not.toContainText('gone/Lost.md');
+
+  // It was never taken from the article: Go to context opens its source
+  await openRowMenu(card, 'Go to context');
+  await chooseMenuItem('Go to context');
+  // The file each tab shows, through `window.app`, which is unofficial
+  // Obsidian API (see `PageApp`)
+  const openPaths = () =>
+    window.evaluate(() => {
+      const paths: string[] = [];
+      (
+        window as unknown as {
+          app: {
+            workspace: {
+              iterateAllLeaves(
+                each: (leaf: { view: { file?: { path: string } } }) => void
+              ): void;
+            };
+          };
+        }
+      ).app.workspace.iterateAllLeaves((leaf) => {
+        if (leaf.view.file) paths.push(leaf.view.file.path);
+      });
+      return paths;
+    });
+  await expect.poll(openPaths).toContain('notes/Source.md');
+  expect(await openPaths()).not.toContain('articles/Root.md');
 });

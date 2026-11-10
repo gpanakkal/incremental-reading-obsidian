@@ -402,6 +402,7 @@ function makeAdoptedRow(index: number): SnippetRow {
     id: `snippet-${index}`,
     reference: `snippets/snippet-${index}.md`,
     parent: null,
+    context: null,
     due: Date.now(),
     due_fuzz: null,
     interval: TEXT_BASE_REVIEW_INTERVAL,
@@ -600,9 +601,9 @@ async function seedParentless(snippetCount: number, cardCount: number) {
     );
   const insertCard = (id: string, parent: string | null = null, deleted = 0) =>
     db.exec(
-      `INSERT INTO srs_card (id, reference, parent, created_at, due,
+      `INSERT INTO srs_card (id, reference, parent, context, created_at, due,
          stability, difficulty, elapsed_days, scheduled_days, state, deleted)
-       VALUES ($1, $2, $3, 0, 0, 0, 0, 0, 0, 0, $4)`,
+       VALUES ($1, $2, $3, $3, 0, 0, 0, 0, 0, 0, 0, $4)`,
       [id, `cards/${id}.md`, parent, deleted]
     );
   const snippetIds = Array.from({ length: snippetCount }, (_, i) => `s${i}`);
@@ -734,7 +735,9 @@ async function wireMovedRow(
     deleted: true,
   });
   if (table !== 'article') {
-    repo.mutate(`UPDATE ${table} SET parent = 'art' WHERE id = 'moved'`);
+    repo.mutate(
+      `UPDATE ${table} SET parent = 'art', context = 'art' WHERE id = 'moved'`
+    );
   }
   if (table !== 'srs_card') {
     insertItemAt(repo, 'snippet', {
@@ -747,8 +750,12 @@ async function wireMovedRow(
       reference: 'IR/c.md',
       deleted: false,
     });
-    repo.mutate(`UPDATE snippet SET parent = 'moved' WHERE id = 'child-s'`);
-    repo.mutate(`UPDATE srs_card SET parent = 'moved' WHERE id = 'child-c'`);
+    repo.mutate(
+      `UPDATE snippet SET parent = 'moved', context = 'moved' WHERE id = 'child-s'`
+    );
+    repo.mutate(
+      `UPDATE srs_card SET parent = 'moved', context = 'moved' WHERE id = 'child-c'`
+    );
   }
   for (const row of atPath) {
     insertItemAt(repo, row.table, { ...row, reference: at });
@@ -1274,16 +1281,16 @@ function seedChild(
 ) {
   if (table === 'snippet') {
     repo.mutate(
-      `INSERT INTO snippet (id, reference, parent, due, interval, priority)
-       VALUES ($1, $2, $3, 0, 86400000, 30)`,
+      `INSERT INTO snippet (id, reference, parent, context, due, interval, priority)
+       VALUES ($1, $2, $3, $3, 0, 86400000, 30)`,
       [id, `snippets/${id}.md`, parent]
     );
     return;
   }
   repo.mutate(
-    `INSERT INTO srs_card (id, reference, parent, created_at, due,
+    `INSERT INTO srs_card (id, reference, parent, context, created_at, due,
        stability, difficulty, elapsed_days, scheduled_days, state)
-     VALUES ($1, $2, $3, 0, 0, 0, 0, 0, 0, 0)`,
+     VALUES ($1, $2, $3, $3, 0, 0, 0, 0, 0, 0, 0)`,
     [id, `cards/${id}.md`, parent]
   );
 }
@@ -4728,8 +4735,8 @@ describe('import', () => {
           const { repo, db } = await makeSqlJsRepo();
           const insertSnippet = (id: string, parent: string | null) =>
             db.exec(
-              `INSERT INTO snippet (id, reference, due, interval, priority, parent, start_offset, end_offset)
-                   VALUES ($1, $2, 0, 1, 20, $3, 10000000000, 10000000001)`,
+              `INSERT INTO snippet (id, reference, due, interval, priority, parent, context, start_offset, end_offset)
+                   VALUES ($1, $2, 0, 1, 20, $3, $3, 10000000000, 10000000001)`,
               [id, `snippets/${id}.md`, parent]
             );
           const insertCard = (id: string) =>
@@ -8963,16 +8970,18 @@ describe('unimportMany', () => {
           for (const table of ['snippet', 'srs_card']) {
             expect(
               Object.fromEntries(
-                repo.rows(table).map(({ id, parent }) => [id, parent])
+                repo
+                  .rows(table)
+                  .map(({ id, parent, context }) => [id, [parent, context]])
               )
             ).toEqual(
               Object.fromEntries(
-                repo
-                  .rows(table)
-                  .map(({ id }) => [
-                    id,
-                    String(id).startsWith('other') ? 'b' : null,
-                  ])
+                repo.rows(table).map(({ id }) => {
+                  // An article sits under nothing: what was under it goes
+                  // to the top, and loses it as its context
+                  const kept = String(id).startsWith('other') ? 'b' : null;
+                  return [id, [kept, kept]];
+                })
               )
             );
           }
@@ -9016,7 +9025,7 @@ describe('unimportMany', () => {
     expect(repo.rows('article')).toEqual([]);
     expect(repo.rows('article_review')).toEqual([]);
     expect(repo.rows('snippet')).toEqual([
-      expect.objectContaining({ id: 's', parent: null }),
+      expect.objectContaining({ id: 's', parent: null, context: null }),
     ]);
     expect(vault.processFrontMatter).not.toHaveBeenCalled();
     expect(vault.paths()).toEqual([PDF_PATH]);
@@ -9449,9 +9458,9 @@ describe('unimportMany', () => {
           seedArticle(repo, 'a', NOTE);
           for (const [i, [start, length]] of spans.entries()) {
             repo.mutate(
-              `INSERT INTO snippet (id, reference, parent, due, interval,
+              `INSERT INTO snippet (id, reference, parent, context, due, interval,
                  priority, start_offset, end_offset)
-               VALUES ($1, $2, 'a', 0, 86400000, 30, $3, $4)`,
+               VALUES ($1, $2, 'a', 'a', 0, 86400000, 30, $3, $4)`,
               [`s${i}`, `snippets/s${i}.md`, start, start + length]
             );
           }
@@ -9944,9 +9953,12 @@ describe('undoImports', () => {
     expect(repo.rows('article_review')).toEqual([]);
     expect(
       [...repo.rows('snippet'), ...repo.rows('srs_card')].map(
-        ({ parent }) => parent
+        ({ parent, context }) => [parent, context]
       )
-    ).toEqual([null, null]);
+    ).toEqual([
+      [null, null],
+      [null, null],
+    ]);
     expect(vault.trashed).toEqual([result.madeFile!.path]);
     repo.dispose();
   });

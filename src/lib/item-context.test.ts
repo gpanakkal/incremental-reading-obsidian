@@ -46,10 +46,12 @@ const OTHER_PATH = 'notes/Other.md';
 
 function makeSnippet({
   parent = null,
+  context = parent,
   start_offset = null,
   end_offset = null,
 }: {
   parent?: string | null;
+  context?: string | null;
   start_offset?: number | null;
   end_offset?: number | null;
 } = {}): ReviewSnippet {
@@ -58,6 +60,7 @@ function makeSnippet({
       id: 'snippet-1',
       type: 'snippet',
       parent,
+      context,
       start_offset,
       end_offset,
     },
@@ -65,9 +68,9 @@ function makeSnippet({
   } as unknown as ReviewSnippet;
 }
 
-function makeCard(parent: string | null = null): ReviewCard {
+function makeCard(parent: string | null = null, context = parent): ReviewCard {
   return {
-    data: { id: 'card-1', type: 'card', parent },
+    data: { id: 'card-1', type: 'card', parent, context },
     file: makeTFile(CARD_PATH),
   } as unknown as ReviewCard;
 }
@@ -417,14 +420,18 @@ afterEach(() => {
 });
 
 describe('findContextFile', () => {
-  it("is the parent's note when the parent exists, else the source note", async () => {
+  it('is the note of the item it was taken from, or the one it sits under when asked, while that exists, else the source note', async () => {
     await fc.assert(
       fc.asyncProperty(
         fc.constantFrom('snippet', 'card'),
         fc.option(fc.string(), { nil: null }),
+        fc.option(fc.string(), { nil: null }),
+        fc.constantFrom(undefined, 'context' as const, 'parent' as const),
         fc.boolean(),
         fc.boolean(),
-        async (type, parent, parentExists, sourceExists) => {
+        async (type, up, context, link, parentExists, sourceExists) => {
+          // The link followed: its context unless its parent is asked for
+          const parent = link === 'parent' ? up : context;
           vi.restoreAllMocks();
           const parentFile = makeTFile('notes/Parent.md');
           const sourceFile = makeTFile('notes/Source.md');
@@ -437,10 +444,12 @@ describe('findContextFile', () => {
             .spyOn(ObsidianHelpers, 'getSourceFile')
             .mockReturnValue(sourceExists ? sourceFile : null);
           const item =
-            type === 'snippet' ? makeSnippet({ parent }) : makeCard(parent);
+            type === 'snippet'
+              ? makeSnippet({ parent: up, context })
+              : makeCard(up, context);
           const app = makeApp();
 
-          const result = await findContextFile(app, reviewManager, item);
+          const result = await findContextFile(app, reviewManager, item, link);
 
           const hasParent = Boolean(parent) && parentExists;
           const expected = hasParent

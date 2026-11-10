@@ -50,7 +50,7 @@ import type { TFile } from 'obsidian';
 import { resolve } from 'path';
 import initSqlJs, { type Database, type SqlJsStatic } from 'sql.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { deleteRowStatements, tombstoneRowStatements } from './row-delete';
+import { deleteRowStatements } from './row-delete';
 import { SnippetManager } from './SnippetManager';
 
 // #region HELPERS
@@ -67,6 +67,7 @@ function makeSnippet(overrides: Partial<ISnippetBase> = {}): ISnippetBase {
     deleted: false,
     priority: DEFAULT_PRIORITY,
     parent: null,
+    context: null,
     start_offset: null,
     end_offset: null,
     scroll_top: 0,
@@ -150,6 +151,7 @@ const snippetRowArb = fc.record<SnippetRow>({
   deleted: fc.boolean(),
   priority: fc.integer({ min: MINIMUM_PRIORITY, max: MAXIMUM_PRIORITY }),
   parent: fc.oneof(fc.uuid(), fc.constant(null)),
+  context: fc.oneof(fc.uuid(), fc.constant(null)),
   start_offset: fc.oneof(fc.integer({ min: 0 }), fc.constant(null)),
   end_offset: fc.oneof(fc.integer({ min: 0 }), fc.constant(null)),
   scroll_top: fc.integer({ min: 0 }),
@@ -692,7 +694,7 @@ async function wirePending(
   );
   for (const [i, id] of ids.entries()) {
     repo.mutate(
-      `INSERT INTO snippet (id, reference, due, interval, priority, parent, start_offset, end_offset) VALUES ($1, $2, 0, 1, 30, 'article-1', $3, $4)`,
+      `INSERT INTO snippet (id, reference, due, interval, priority, parent, context, start_offset, end_offset) VALUES ($1, $2, 0, 1, 30, 'article-1', 'article-1', $3, $4)`,
       [id, `s/${i}.md`, ...stored[i]]
     );
   }
@@ -909,9 +911,14 @@ describe('rowToReviewSnippet', () => {
     expect(mutateCalls).toHaveLength(0);
   });
 
-  it('calls offsetTracker.removeHighlight when the file is missing and the row has a parent', async () => {
+  it('calls offsetTracker.removeHighlight when the file is missing and the row has a context', async () => {
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(null);
-    const row = makeSnippetRow({ deleted: false, parent: 'parent-id-abc' });
+    // Moved up a level since it was taken, its highlight still on its context
+    const row = makeSnippetRow({
+      deleted: false,
+      parent: 'grandparent-id',
+      context: 'parent-id-abc',
+    });
     const repo = makeSimpleRepo();
     const manager = new SnippetManager({} as never, repo);
     const removeHighlightSpy = vi.spyOn(
@@ -2582,8 +2589,8 @@ function insertOrphanRows(db: Database, rows: SnippetRow[]) {
   for (const row of rows) {
     db.exec(
       `INSERT INTO snippet
-         (id, reference, parent, due, interval, priority, deleted, start_offset, end_offset)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+         (id, reference, parent, context, due, interval, priority, deleted, start_offset, end_offset)
+       VALUES ($1, $2, $3, $3, $4, $5, $6, $7, $8, $9)`,
       [
         row.id,
         row.reference,
@@ -2677,7 +2684,7 @@ describe('rowToHighlight', () => {
     );
   });
 
-  it('passes offsets through and normalizes dismissed and a null parent', async () => {
+  it('passes offsets through and normalizes dismissed and a null context', async () => {
     await fc.assert(
       fc.asyncProperty(
         snippetRowArb.filter(
@@ -2689,7 +2696,8 @@ describe('rowToHighlight', () => {
           expect(highlight.start_offset).toBe(row.start_offset);
           expect(highlight.end_offset).toBe(row.end_offset);
           expect(highlight.dismissed).toBe(Boolean(row.dismissed));
-          expect(highlight.parent).toBe(row.parent ?? '');
+          expect(highlight.context).toBe(row.context ?? '');
+          expect(highlight.parent).toBe(row.parent);
           expect(highlight.id).toBe(row.id);
           expect(highlight.reference).toBe(row.reference);
         }
@@ -2808,7 +2816,7 @@ describe('adoptOrphans', () => {
 
     const [sql, params] = lastMutateCall(repo);
     expect(sql).toMatch(
-      /UPDATE snippet SET parent = \$1 WHERE id IN \(\$2, \$3\)/i
+      /UPDATE snippet SET parent = \$1, context = \$1 WHERE id IN \(\$2, \$3\)/i
     );
     expect(params[0]).toBe('article-1');
     expect(params.slice(1)).toEqual(['snippet-0', 'snippet-1']);
@@ -2887,7 +2895,7 @@ describe('getHighlights for a note with a database entry', () => {
           return [{ type: 'article', reference: ARTICLE.path }];
         }
         if (sql.includes('FROM article')) return [{ id: 'article-1' }];
-        if (sql.includes('WHERE parent = $1')) return rows;
+        if (sql.includes('WHERE context = $1')) return rows;
         return [];
       }),
       mutate: vi.fn().mockResolvedValue([[]]),
@@ -2916,11 +2924,12 @@ describe('getHighlights for a note with a database entry', () => {
     };
   }
 
-  it('queries by the parent id and caches the highlights under the note path', async () => {
+  it('queries by the context id and caches the highlights under the note path', async () => {
     const rows = [
       makeSnippetRow({
         id: 'snippet-a',
         parent: 'article-1',
+        context: 'article-1',
         start_offset: 2,
         end_offset: 8,
       }),
@@ -2934,16 +2943,21 @@ describe('getHighlights for a note with a database entry', () => {
       highlights
     );
     const [sql, params] = lastQueryCall(repo);
-    expect(sql).toMatch(/WHERE parent = \$1/i);
+    expect(sql).toMatch(/WHERE context = \$1/i);
     expect(params[0]).toBe('article-1');
   });
 
   it('skips rows that have no offsets to render', async () => {
     const rows = [
-      makeSnippetRow({ id: 'no-offsets', parent: 'article-1' }),
+      makeSnippetRow({
+        id: 'no-offsets',
+        parent: 'article-1',
+        context: 'article-1',
+      }),
       makeSnippetRow({
         id: 'renderable',
         parent: 'article-1',
+        context: 'article-1',
         start_offset: 0,
         end_offset: 4,
       }),
@@ -2981,8 +2995,8 @@ describe('getHighlights for a PDF', () => {
       deleted = false
     ) =>
       db.exec(
-        `INSERT INTO snippet (id, reference, due, interval, priority, parent, start_offset, end_offset, deleted)
-         VALUES ($1, $2, 0, 1, 20, $3, $4, $5, $6)`,
+        `INSERT INTO snippet (id, reference, due, interval, priority, parent, context, start_offset, end_offset, deleted)
+         VALUES ($1, $2, 0, 1, 20, $3, $3, $4, $5, $6)`,
         [
           id,
           `snippets/${id}.md`,
@@ -3263,7 +3277,7 @@ describe('refreshAllHighlights', () => {
         if (sql.includes('FROM article')) {
           return [{ id: articleIdFor(sqlParams[0] as string) }];
         }
-        if (sql.includes('WHERE parent = $1')) {
+        if (sql.includes('WHERE context = $1')) {
           const rows = rowsByArticleId.get(sqlParams[0] as string) ?? [];
           return rows.filter(
             (row) =>
@@ -3376,6 +3390,7 @@ describe('refreshAllHighlights', () => {
     const row = makeSnippetRow({
       id: 'snippet-a',
       parent: articleIdFor(kept),
+      context: articleIdFor(kept),
       start_offset: 3,
       end_offset: 9,
     });
@@ -4207,9 +4222,9 @@ describe('delete', () => {
 
   const NOTE = { path: 'items/note.md', extension: 'md' } as TFile;
 
-  /** The writes that tombstone the row `id` with its history, as mutate gets them. */
+  /** The writes that drop the row `id` (see `deleteRowStatements`), as mutate gets them. */
   const tombstoned = (id: string) =>
-    tombstoneRowStatements('snippet', id).map(({ query, params }) => [
+    deleteRowStatements('snippet', id).map(({ query, params }) => [
       query,
       params,
     ]);
@@ -4904,7 +4919,7 @@ describe('offsets held back for highlights a note stops having', () => {
           }
           for (const [i, id] of ids.entries()) {
             repo.mutate(
-              `INSERT INTO snippet (id, reference, due, interval, priority, parent, start_offset, end_offset) VALUES ($1, $2, 0, 1, 30, 'article-1', $3, $4)`,
+              `INSERT INTO snippet (id, reference, due, interval, priority, parent, context, start_offset, end_offset) VALUES ($1, $2, 0, 1, 30, 'article-1', 'article-1', $3, $4)`,
               [id, `s/${i}.md`, ...stored[i]]
             );
           }
@@ -4929,15 +4944,16 @@ describe('offsets held back for highlights a note stops having', () => {
             OTHER_ARTICLE,
             typed
               .filter((_, i) => fates[i] === 'elsewhere')
-              .map((h) => ({ ...h, parent: 'article-2' }))
+              .map((h) => ({ ...h, parent: 'article-2', context: 'article-2' }))
           );
           manager.offsetsPending(OTHER_ARTICLE);
           for (const [i, id] of ids.entries()) {
             if (fates[i] === 'stays') continue;
-            repo.mutate('UPDATE snippet SET parent = $1 WHERE id = $2', [
-              fates[i] === 'leaves' ? null : 'article-2',
-              id,
-            ]);
+            // As an adoption hands it over (see `adoptStatements`)
+            repo.mutate(
+              'UPDATE snippet SET parent = $1, context = $1 WHERE id = $2',
+              [fates[i] === 'leaves' ? null : 'article-2', id]
+            );
           }
 
           await manager.refreshHighlightsAt(PENDING_ARTICLE);
@@ -4952,7 +4968,7 @@ describe('offsets held back for highlights a note stops having', () => {
           for (const [i, id] of ids.entries()) {
             if (fates[i] === 'leaves') {
               repo.mutate(
-                "UPDATE snippet SET parent = 'article-1' WHERE id = $1",
+                "UPDATE snippet SET parent = 'article-1', context = 'article-1' WHERE id = $1",
                 [id]
               );
             }
@@ -5536,9 +5552,9 @@ describe('highlights following their parent rows', () => {
     );
     for (const parent of ['p', 'u']) {
       repo.mutate(
-        `INSERT INTO snippet (id, reference, parent, due, interval, priority,
+        `INSERT INTO snippet (id, reference, parent, context, due, interval, priority,
            start_offset, end_offset)
-         VALUES ($1, $2, $3, 0, 1, 10, 1, 5)`,
+         VALUES ($1, $2, $3, $3, 0, 1, 10, 1, 5)`,
         [`of-${parent}`, `snippets/of-${parent}.md`, parent]
       );
     }
@@ -5550,6 +5566,7 @@ describe('highlights following their parent rows', () => {
       {
         id: `of-${parent}`,
         parent,
+        context: parent,
         start_offset: 1,
         end_offset: 5,
       } as SnippetHighlight,
@@ -5906,7 +5923,7 @@ describe('highlights in a note at the path of its own deleted row', () => {
           });
           for (const [i, id] of [...children, ...orphans].entries()) {
             repo.mutate(
-              `INSERT INTO snippet (id, reference, due, interval, priority, parent, start_offset, end_offset) VALUES ($1, $2, 0, 1, 30, $3, $4, $5)`,
+              `INSERT INTO snippet (id, reference, due, interval, priority, parent, context, start_offset, end_offset) VALUES ($1, $2, 0, 1, 30, $3, $3, $4, $5)`,
               [
                 id,
                 `snippets/${id}.md`,

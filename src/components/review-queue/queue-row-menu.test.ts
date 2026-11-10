@@ -346,10 +346,12 @@ describe('queue row menu actions', () => {
       ).callback?.(undefined);
       await settle();
 
+      // The parent the row shows, not the context Go to context opens
       expect(findContext).toHaveBeenCalledExactlyOnceWith(
         plugin.app,
         plugin.reviewManager,
-        item
+        item,
+        'parent'
       );
       expect(findSource).not.toHaveBeenCalled();
       expect(plugin.leaf.openFile).toHaveBeenCalledExactlyOnceWith(parent, {
