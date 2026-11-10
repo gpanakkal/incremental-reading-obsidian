@@ -192,7 +192,7 @@ describe('BackupRestoreModal', () => {
             ).toBe(new Date(backup.time).toLocaleString());
             if (named(backup)) {
               expect(descs[i]).toMatch(
-                new RegExp(` ${literally(backup.pluginVersion)}$`)
+                new RegExp(` v${literally(backup.pluginVersion)}$`)
               );
             }
             expect(shown[i].getAttribute('aria-label')).toMatch(
@@ -256,7 +256,7 @@ describe('BackupRestoreModal', () => {
       const modal = await openPicker(makeRepo({ backups: [backup] }));
 
       expect(descOf(rows(modal)[0])).toMatch(
-        new RegExp(` ${literally(shown)}$`)
+        new RegExp(` v${literally(shown)}$`)
       );
       modal.close();
     }
@@ -285,7 +285,7 @@ describe('BackupRestoreModal', () => {
           expect(descOf(row)).toBe(descOf(unnamedRow));
           const label = row.getAttribute('aria-label')!;
           expect(label).toMatch(new RegExp(`\\b${version}$`));
-          if (taker !== null) expect(label).toContain(` ${taker} `);
+          if (taker !== null) expect(label).toContain(` v${taker} `);
           else expect(label).not.toContain(String(null));
           modal.close();
         }
@@ -304,7 +304,7 @@ describe('BackupRestoreModal', () => {
     };
     const modal = await openPicker(makeRepo({ backups: [backup] }));
 
-    expect(descOf(rows(modal)[0])).toMatch(/ 0\.8\.0–0\.8\.2$/);
+    expect(descOf(rows(modal)[0])).toMatch(/ v0\.8\.0–0\.8\.2$/);
     modal.close();
   });
 
@@ -333,7 +333,7 @@ describe('BackupRestoreModal', () => {
           const modal = await openPicker(makeRepo({ backups }), { running });
 
           const intro = modal.contentEl.querySelector(`.${INTRO_CLASS}`);
-          expect(intro?.textContent).toContain(` ${running} `);
+          expect(intro?.textContent).toContain(`: ${running}.`);
           modal.close();
         }
       ),
