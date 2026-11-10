@@ -2,6 +2,7 @@ import { createReviewInterface } from '#/components/ReviewInterface';
 import { MORE_OPTIONS_SECTIONS, PLUGIN_ICON } from '#/lib/constants';
 import { asksForFocus, EditorFocusHandoff } from '#/lib/editor-focus-handoff';
 import { isPositionalEState } from '#/lib/ephemeral-position';
+import { heldClaim } from '#/lib/items/note-holding';
 import type ReviewManager from '#/lib/items/ReviewManager';
 import { isEditableText } from '#/lib/mime';
 import type { ExtractedMarkdownEditor } from '#/lib/obsidian-editor';
@@ -37,6 +38,7 @@ import {
 } from '#/lib/store';
 import type { MaybeMissingItem, NoteType, ReviewItem } from '#/lib/types';
 import { adoptWindow, showMenu } from '#/lib/ui-window';
+import { unimportArticle } from '#/lib/unimport-article';
 import type IncrementalReadingPlugin from '#/main';
 import {
   FileView,
@@ -1271,9 +1273,11 @@ export default class ReviewView
 
   /**
    * Everything a markdown tab's menu offers for the file it is showing: rename
-   * and delete, which the view owns, then the `file-menu` event, which is where
-   * the rest of the menu comes from — Move file to, Bookmark, Copy path, Reveal
-   * in navigation, and whatever community plugins add.
+   * and delete, which the view owns, an article's un-import, which the
+   * plugin's own `file-menu` handler leaves to this tab, then the `file-menu`
+   * event, which is where the rest of the menu comes from — Move file to,
+   * Bookmark, Copy path, Reveal in navigation, and whatever community plugins
+   * add.
    *
    * `source` is passed through untouched because handlers branch on it; the
    * file explorer's own reveal entry, for one, skips its own context menu that
@@ -1314,6 +1318,26 @@ export default class ReviewView
           void this.app.fileManager.promptForDeletion(file);
         })
     );
+    // The plugin's own `file-menu` entries skip this tab, so its un-import is
+    // offered here instead, beside Delete as the other way to stop reviewing
+    // the item. Review takes a note claiming no id at its article's path for
+    // that article, but the note holds none there, and the plugin's own menus
+    // offer it an import instead (see `heldArticleLookup`). The note is read
+    // as it is now, not as it was when the item was fetched.
+    if (this.fileType === 'article' && heldClaim(file, this.app) !== null) {
+      menu.addItem((item) =>
+        item
+          .setTitle('Un-import article')
+          .setIcon('lucide-file-x')
+          .setSection('danger')
+          .setWarning(true)
+          .onClick(() => {
+            adoptWindow(this.app, this.containerEl);
+            // Its refresh moves review off the article once its row is gone
+            void unimportArticle(this.plugin, file);
+          })
+      );
+    }
 
     this.app.workspace.trigger('file-menu', menu, file, source, this.leaf);
   }

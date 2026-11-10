@@ -1365,7 +1365,8 @@ export default class IncrementalReadingPlugin extends Plugin {
    *
    * Skipped in the review tab, whose menu {@link ReviewView.addFileMenuItems}
    * raises: the note showing there is already an item, so the entries would
-   * offer to import what the user is in the middle of reviewing. Keyed on the
+   * offer to import what the user is in the middle of reviewing. That method
+   * adds the tab's own "Un-import article", for an article item. Keyed on the
    * leaf's view rather than on the menu's `source`, because a plain note's own
    * ⋮ and tab-header menus report those same sources and do want the entries.
    *
