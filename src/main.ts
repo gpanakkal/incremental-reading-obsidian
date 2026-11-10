@@ -836,6 +836,7 @@ export default class IncrementalReadingPlugin extends Plugin {
       dbFilePath: DATABASE_FILE_PATH,
       schema: databaseSchema as string,
       signal: unloaded.signal,
+      pluginVersion: this.manifest.version,
       replaySettings: () => ({
         fsrsParams: this.settings.fsrsParams,
         fuzzTextReviews: this.settings.fuzzTextReviews,
@@ -1640,7 +1641,11 @@ export default class IncrementalReadingPlugin extends Plugin {
    * @param origin what it was asked for from (see `uiWindow`)
    */
   openBackupRestore(origin?: UiOrigin): BackupRestoreModal {
-    const modal = new BackupRestoreModal(this.app, this.reviewManager.repo);
+    const modal = new BackupRestoreModal(
+      this.app,
+      this.reviewManager.repo,
+      this.manifest.version
+    );
     openModal(modal, origin);
     return modal;
   }

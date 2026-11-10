@@ -1,10 +1,10 @@
-import { migrations } from '#/db/migrations';
+import { migrations, pluginVersionsOfSchema } from '#/db/migrations';
 import { BACKUP_DIRECTORY } from '#/lib/constants';
 import { notify } from '#/lib/notices';
 import { requireReady } from '#/lib/readiness';
 import type { BackupFile, BackupKind } from '#/lib/repository/retention';
 import type { SQLiteRepository } from '#/lib/types';
-import { type App, Modal, Setting } from 'obsidian';
+import { type App, Modal, normalizePath, Platform, Setting } from 'obsidian';
 import { promptForConfirmation } from './ConfirmModal';
 
 /** What the picker needs of the repository. */
@@ -19,9 +19,9 @@ export type BackupSource = Pick<
 
 /** What each kind of backup was taken before, as its row says. */
 const KIND_DESCRIPTIONS: Readonly<Record<BackupKind, string>> = {
-  merge: "Taken before another device's changes were merged in",
-  stale: 'Taken before the database was replaced',
-  migration: 'Taken before a database upgrade',
+  merge: "Made before another device's changes were merged in",
+  stale: 'Made before the database was replaced',
+  migration: 'Made before a database upgrade',
 };
 
 /** The class of the line the picker shows when there is nothing to pick. */
@@ -32,18 +32,85 @@ export const MODAL_CLASS = 'ir-backup-modal';
 export const ROW_CLASS = 'ir-backup-row';
 /** The class of the line saying why a row's backup can't be restored. */
 export const REFUSAL_CLASS = 'ir-backup-refusal';
+/** The class of the picker's opening paragraph, above its rows. */
+export const INTRO_CLASS = 'ir-backup-intro';
+/** The class of the row with the button that opens the backups folder. */
+export const FOLDER_CLASS = 'ir-backup-folder';
 
 /** The schema version this plugin version migrates databases to. */
 const LATEST_VERSION = migrations[migrations.length - 1].version;
 
-/** When `backup` was taken, as its row shows it. */
+/** When `backup` was made, as its row shows it. */
 export function backupDate(backup: BackupFile): string {
   return new Date(backup.time).toLocaleString();
 }
 
-/** What a backup's row says under its date. */
+/**
+ * The plugin version whose data `backup` holds, as its row shows it: the one
+ * its name holds, or else the releases whose databases were at its schema
+ * version ("0.6.0–0.6.5", or one version when they are a single release).
+ * Always the latter for a backup made before a migration: the version in
+ * its name is the one that migrated the data, not the one that wrote it.
+ * Null for a backup from a schema version past this plugin's, its version
+ * not taken from its name.
+ */
+export function backupPluginVersion(backup: BackupFile): string | null {
+  if (backup.pluginVersion !== null && backup.kind !== 'migration') {
+    return backup.pluginVersion;
+  }
+  const span = pluginVersionsOfSchema(backup.version);
+  if (!span) return null;
+  return span.first === span.last ? span.first : `${span.first}–${span.last}`;
+}
+
+/**
+ * What a backup's row says under its date: why it was taken, and which
+ * version of the plugin took it. Not its schema version, which means nothing
+ * to a user; the row's tooltip has that (see {@link backupSchemaLabel}).
+ */
 export function backupDescription(backup: BackupFile): string {
-  return `${KIND_DESCRIPTIONS[backup.kind]} · schema version ${backup.version}`;
+  const version = backupPluginVersion(backup);
+  const from = version === null ? 'from a newer version' : `v${version}`;
+  return `${KIND_DESCRIPTIONS[backup.kind]} · ${from}`;
+}
+
+/**
+ * The tooltip of a backup's row, for debugging: the plugin version that took
+ * it, when its name holds one, and its schema version.
+ */
+export function backupSchemaLabel(backup: BackupFile): string {
+  const schema = `Schema version ${backup.version}`;
+  return backup.pluginVersion === null
+    ? schema
+    : `Made in v${backup.pluginVersion} · ${schema}`;
+}
+
+/**
+ * Reveal `BACKUP_DIRECTORY` in the system file manager, creating it first if
+ * there is none yet, so the button that asks for it always works.
+ * `App.showInFolder` is undocumented (typed by obsidian-typings) and does
+ * nothing outside the desktop app; it takes a vault-relative path, as
+ * Obsidian's own "Show in system explorer" items pass it.
+ */
+export async function openBackupsFolder(app: App): Promise<void> {
+  const folder = normalizePath(BACKUP_DIRECTORY);
+  try {
+    if (!(await app.vault.adapter.exists(folder))) {
+      await app.vault.adapter.mkdir(folder);
+    }
+  } catch (error) {
+    console.error(
+      'Incremental Reading - Failed to create the backups folder:',
+      error
+    );
+    notify(
+      `Couldn't create the backups folder, ${folder}. Check the console for details.`,
+      { kind: 'error' }
+    );
+    return;
+  }
+  // Undocumented: see above
+  app.showInFolder(folder);
 }
 
 /**
@@ -67,9 +134,8 @@ export async function restoreChosenBackup(
   const confirmed = await promptForConfirmation(app, {
     title: 'Restore this backup?',
     paragraphs: [
-      `The review database will be replaced with the backup taken ${backupDate(backup)}. ` +
-        'Reviews and changes made since then will be gone from it.',
-      'The current database is backed up first, so this can be undone by restoring that backup.',
+      `The review database will be replaced with this backup from ${backupDate(backup)}. `,
+      'The current database will be backed up first.',
     ],
     confirmText: 'Restore',
     destructive: true,
@@ -89,7 +155,7 @@ export async function restoreChosenBackup(
     );
     return false;
   }
-  notify(`Restored the backup taken ${backupDate(backup)}.`, {
+  notify(`Restored the backup from ${backupDate(backup)}.`, {
     kind: 'success',
     persist: true,
   });
@@ -98,17 +164,21 @@ export async function restoreChosenBackup(
 
 /**
  * Lists the backups the plugin keeps in the vault (`BACKUP_DIRECTORY`),
- * newest first, each with when it was taken, why, and its schema version,
- * for the user to restore one in place of the database. Obsidian Sync's
- * version history can't be listed from a plugin, so the in-vault backups are
- * all it offers, as its empty state says.
+ * newest first, each with when it was taken, why, and the plugin version that
+ * took it, for the user to restore one in place of the database. Obsidian
+ * Sync's version history can't be listed from a plugin, so the in-vault
+ * backups are all it offers, as its empty state says. On desktop, it also
+ * opens their folder in the system file manager.
  */
 export class BackupRestoreModal extends Modal {
   readonly #repo: BackupSource;
+  /** The version of the plugin running (its manifest's). */
+  readonly #pluginVersion: string;
 
-  constructor(app: App, repo: BackupSource) {
+  constructor(app: App, repo: BackupSource, pluginVersion: string) {
     super(app);
     this.#repo = repo;
+    this.#pluginVersion = pluginVersion;
   }
 
   async onOpen() {
@@ -119,20 +189,37 @@ export class BackupRestoreModal extends Modal {
       createEl('p', {
         cls: EMPTY_CLASS,
         text:
-          `There are no backups in ${BACKUP_DIRECTORY}. Only backups the ` +
-          'plugin keeps in the vault can be restored here: plugins have no ' +
+          `There are no backups in ${BACKUP_DIRECTORY}. Only backups ` +
+          'in the vault can be restored here. Plugins have no ' +
           "access to Obsidian Sync's version history.",
         parent: this.contentEl,
       });
+      this.#addFolderRow();
       return;
     }
     createEl('p', {
+      cls: INTRO_CLASS,
       text:
-        'Replace the review database with a backup, as it was when the ' +
-        'backup was taken. The current database is backed up first.',
+        'Replace the review database with a backup. The current database will be backed up first. ' +
+        `Current plugin version: ${this.#pluginVersion}.`,
       parent: this.contentEl,
     });
+    this.#addFolderRow();
     for (const backup of backups) this.#addRow(backup);
+  }
+
+  /** The row that opens the backups folder: desktop only, as revealing a
+   * folder in a file manager has no meaning on mobile. */
+  #addFolderRow() {
+    if (Platform.isMobile) return;
+    new Setting(this.contentEl)
+      .setClass(FOLDER_CLASS)
+      .setDesc(`Backups are kept in ${normalizePath(BACKUP_DIRECTORY)}.`)
+      .addButton((button) => {
+        button.setButtonText('Open backups folder').onClick(() => {
+          void openBackupsFolder(this.app);
+        });
+      });
   }
 
   #addRow(backup: BackupFile) {
@@ -141,12 +228,14 @@ export class BackupRestoreModal extends Modal {
       .setClass(ROW_CLASS)
       .setName(backupDate(backup))
       .setDesc(backupDescription(backup));
+    // Obsidian shows an `aria-label` as its own tooltip
+    row.settingEl.setAttribute('aria-label', backupSchemaLabel(backup));
     if (!restorable) {
       // In the row, not a tooltip: a disabled button shows none, and a phone
       // has no hover
       createDiv({
         cls: `${REFUSAL_CLASS} mod-warning`,
-        text: 'Made by a newer version of the plugin. Update it to restore this backup.',
+        text: 'Made by a newer version of the plugin. Update to restore this backup.',
         parent: row.descEl,
       });
     }

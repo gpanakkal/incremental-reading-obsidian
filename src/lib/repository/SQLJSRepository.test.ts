@@ -3109,6 +3109,7 @@ describe('start', () => {
     // A migration still to come, that rewrites a row the file already stamps
     migrations.push({
       version: LATEST_VERSION + 1,
+      pluginVersion: '99.0.0',
       description: 'test-only rewrite',
       up: (db) => db.exec(`UPDATE article SET priority = 40`),
     });
@@ -9109,6 +9110,28 @@ describe('restoreBackup', () => {
       { numRuns: 15 }
     );
   });
+
+  it.each([['0.8.3'], [undefined]])(
+    'names the backup it takes with the plugin version it was started with (%s)',
+    async (pluginVersion) => {
+      const files = new Map([[DATABASE_FILE_PATH, await dbFileWith(['a'])]]);
+      const vault = makeVault(INDEXED, files);
+      const repo = await startRepo(vault.app, { pluginVersion });
+      try {
+        const path = await addBackup(files, ['b']);
+        const before = new Set(backupsIn(files));
+        await repo.restoreBackup(path);
+        await settle();
+
+        const added = backupsIn(files).filter((p) => !before.has(p));
+        expect(added.map((p) => parseBackupName(p)?.pluginVersion)).toEqual([
+          pluginVersion ?? null,
+        ]);
+      } finally {
+        repo.dispose();
+      }
+    }
+  );
 
   type RestoreFailure =
     | { missing: true }

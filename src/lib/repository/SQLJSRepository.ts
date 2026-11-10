@@ -388,6 +388,11 @@ export class SQLJSRepository implements SQLiteRepository {
    */
   #stampClock: () => number;
   /**
+   * The plugin version backups are named with (see `backupFileName`); none
+   * when not given.
+   */
+  readonly #pluginVersion: string | undefined;
+  /**
    * This device's generation in the database in memory (its `write_stamp`
    * row, 0 if none), read each time the row stamps are armed: after every
    * save, load and merge.
@@ -463,8 +468,11 @@ export class SQLJSRepository implements SQLiteRepository {
     stampClock?: () => number;
     /** The settings a merge replays review logs with (see `mergeInto`). */
     replaySettings?: () => ReplaySettings;
+    /** The plugin's version (its manifest's), for naming backups. */
+    pluginVersion?: string;
   }) {
     this.app = params.app;
+    this.#pluginVersion = params.pluginVersion;
     this.#deviceId = params.deviceId;
     this.#stampClock = params.stampClock ?? (() => Date.now());
     this.#replaySettings =
@@ -512,6 +520,8 @@ export class SQLJSRepository implements SQLiteRepository {
    * unbacked: startup stops, or passes over a local copy (see
    * `#backUpBeforeMigrating`)
    * @param signal an abort stops startup wherever it has got to
+   * @param pluginVersion the plugin's version (its manifest's), which backups
+   * are named with; without it, they are named with none
    * @throws {DatabaseLoadError} if the file exists but cannot be loaded
    * @throws {MigrationVerificationError} if migrating the file loses data
    * @throws {StartupCancelledError} if `holdForSync` says not to go ahead,
@@ -533,6 +543,7 @@ export class SQLJSRepository implements SQLiteRepository {
     holdForSync?: SyncHold;
     signal?: AbortSignal;
     replaySettings?: () => ReplaySettings;
+    pluginVersion?: string;
   }): Promise<SQLJSRepository> {
     const repo = new SQLJSRepository({ ...params, app: params.plugin.app });
     repo.#syncHold = params.holdForSync;
@@ -2704,7 +2715,8 @@ export class SQLJSRepository implements SQLiteRepository {
     const name = backupFileName(
       currentVersion,
       from?.marker ?? 'migration',
-      new Date(this.#stampClock())
+      new Date(this.#stampClock()),
+      this.#pluginVersion
     );
     const backupPath = normalizePath(`${BACKUP_DIRECTORY}/${name}`);
 

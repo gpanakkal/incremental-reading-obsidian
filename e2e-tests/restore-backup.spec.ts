@@ -1,3 +1,4 @@
+import { pluginVersionsOfSchema } from '#/db/migrations';
 import {
   ARTICLE_TAG,
   BACKUP_DIRECTORY,
@@ -142,6 +143,11 @@ test('restores a backup from the picker, and the review home shows what it holds
 
   await window.locator('#restore-backup-button').click();
   await expect(backupRows()).toHaveCount(1);
+  // Its name has no plugin version: the release that brought its schema
+  // version stands in
+  await expect(backupRows().first()).toContainText(
+    pluginVersionsOfSchema(version)!.first
+  );
   await backupRows().first().locator('button').click();
   await window.locator('.modal-container.mod-confirmation .mod-cta').click();
 
@@ -149,9 +155,18 @@ test('restores a backup from the picker, and the review home shows what it holds
   await expect(queueRow(ARTICLES[0].name)).toContainText(/Priority\s*3\.0/);
   await expect(window.locator('.ir-backup-modal')).toHaveCount(0);
 
-  // What it replaced was backed up, and is offered back
+  // What it replaced was backed up, and is offered back, by the version of
+  // the plugin that took it
   await window.locator('#restore-backup-button').click();
   await expect(backupRows()).toHaveCount(2);
+  const manifest = JSON.parse(
+    await fs.readFile(path.join(projectRoot, 'manifest.json'), 'utf8')
+  ) as { version: string };
+  await expect(backupRows().first()).toContainText(manifest.version);
+  // And the picker names the version running
+  await expect(
+    window.locator('.ir-backup-modal .ir-backup-intro')
+  ).toContainText(manifest.version);
 });
 
 test('takes on whole a database another device restored when it arrives, backing up its own first', async () => {

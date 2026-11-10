@@ -7,9 +7,59 @@ import {
   type Migration,
 } from './migration-helpers';
 
-export const migrations: Migration[] = [
+/** A migration, with the release of the plugin that first shipped it. */
+export interface ReleasedMigration extends Migration {
+  /**
+   * The plugin version (the manifest's) whose release brought the migration;
+   * for one not yet released, the version about to be. Found from history
+   * for those before backups were named with the plugin version, so that a
+   * backup from then can say which versions wrote it.
+   */
+  pluginVersion: string;
+}
+
+/**
+ * Every release of the plugin up to the one before the newest migration's,
+ * oldest first (the repository's version tags; pre-releases left out).
+ * Adding a migration in a new release means adding every release since the
+ * last one listed: {@link pluginVersionsOfSchema} counts a version missing
+ * here as one not yet released.
+ */
+export const PLUGIN_RELEASES: readonly string[] = [
+  '0.1.0',
+  '0.2.0',
+  '0.3.0',
+  '0.3.1',
+  '0.4.0',
+  '0.4.1',
+  '0.4.2',
+  '0.4.3',
+  '0.4.4',
+  '0.4.5',
+  '0.5.0',
+  '0.5.1',
+  '0.5.2',
+  '0.5.3',
+  '0.5.4',
+  '0.5.5',
+  '0.6.0',
+  '0.6.1',
+  '0.6.2',
+  '0.6.3',
+  '0.6.4',
+  '0.6.5',
+  '0.7.0',
+  '0.7.1',
+  '0.7.2',
+  '0.8.0',
+  '0.8.1',
+  '0.8.2',
+];
+
+export const migrations: ReleasedMigration[] = [
   {
     version: 1,
+    pluginVersion: '0.4.0',
     description: 'Add start_offset and end_offset columns to snippet table',
     up: (db) => {
       addColumnIfNotExists(
@@ -23,6 +73,7 @@ export const migrations: Migration[] = [
   },
   {
     version: 2,
+    pluginVersion: '0.4.0',
     description: 'Add scroll position column to article and snippet tables',
     up: (db) => {
       addColumnIfNotExists(
@@ -41,6 +92,7 @@ export const migrations: Migration[] = [
   },
   {
     version: 3,
+    pluginVersion: '0.5.0',
     description:
       'Store last calculated review interval on articles and snippets',
     up: (db) => {
@@ -166,6 +218,7 @@ export const migrations: Migration[] = [
   },
   {
     version: 4,
+    pluginVersion: '0.5.2',
     description: 'Remove upper bound on fixed review intervals',
     up: (db) => {
       recreateTable(
@@ -201,6 +254,7 @@ export const migrations: Migration[] = [
   },
   {
     version: 5,
+    pluginVersion: '0.6.0',
     description: 'Add deleted field on item rows',
     up: (db) => {
       recreateTable(
@@ -317,6 +371,7 @@ export const migrations: Migration[] = [
   },
   {
     version: 6,
+    pluginVersion: '0.6.0',
     description:
       'Migrate references from DATA_DIRECTORY-relative to vault-relative paths',
     up: (db) => {
@@ -333,6 +388,7 @@ export const migrations: Migration[] = [
   },
   {
     version: 7,
+    pluginVersion: '0.6.0',
     description: 'Add due time intra-day fuzzing column',
     up: (db) => {
       addColumnIfNotExists(db, 'article', 'due_fuzz', 'INTEGER DEFAULT NULL');
@@ -341,6 +397,7 @@ export const migrations: Migration[] = [
   },
   {
     version: 8,
+    pluginVersion: '0.6.0',
     description: 'Add learning_steps field for FSRS-6 cards',
     up: (db) => {
       addColumnIfNotExists(
@@ -359,6 +416,7 @@ export const migrations: Migration[] = [
   },
   {
     version: 9,
+    pluginVersion: '0.6.0',
     description:
       'Key item tables on id, cascade review deletes, and restore lost indexes',
     up: (db) => {
@@ -564,6 +622,7 @@ export const migrations: Migration[] = [
   },
   {
     version: 10,
+    pluginVersion: '0.7.0',
     description: 'Record startup rebinds of PDF articles',
     up: (db) => {
       db.exec(`
@@ -584,6 +643,7 @@ export const migrations: Migration[] = [
   },
   {
     version: 11,
+    pluginVersion: '0.8.0',
     description: 'Stamp every synced row and tombstone review logs and rebinds',
     up: (db) => {
       // Listed here rather than shared, so that later changes to what is
@@ -630,6 +690,7 @@ export const migrations: Migration[] = [
   },
   {
     version: 12,
+    pluginVersion: '0.8.0',
     description: 'Stamp each save with the saving device and a generation',
     up: (db) => {
       db.exec(`
@@ -645,6 +706,7 @@ export const migrations: Migration[] = [
   },
   {
     version: 13,
+    pluginVersion: '0.8.0',
     description:
       "Record each item note's mtime as of the plugin's last identity write",
     up: (db) => {
@@ -658,6 +720,7 @@ export const migrations: Migration[] = [
   },
   {
     version: 14,
+    pluginVersion: '0.8.0',
     description: 'Index each review log by the item it logs',
     up: (db) => {
       // A merge reads the log of every item whose copies disagree on it, and
@@ -675,6 +738,7 @@ export const migrations: Migration[] = [
   },
   {
     version: 15,
+    pluginVersion: '0.8.3',
     description: 'Mark a database restored from a backup with a restore epoch',
     up: (db) => {
       db.exec(`
@@ -693,3 +757,41 @@ export const migrations: Migration[] = [
     },
   },
 ];
+
+/** The releases of the plugin whose databases were at one schema version. */
+export interface PluginVersionSpan {
+  /** The release that brought the schema version */
+  first: string;
+  /** The last release before the next schema version; `first` for the
+   * current one, or for one replaced within the release that brought it */
+  last: string;
+}
+
+/** Where `version` comes among the releases; past them all if unreleased. */
+function releaseRank(version: string): number {
+  const rank = PLUGIN_RELEASES.indexOf(version);
+  return rank === -1 ? PLUGIN_RELEASES.length : rank;
+}
+
+/**
+ * The releases of the plugin that wrote databases at `schema` (0: the
+ * releases before the first migration), for naming the plugin version of a
+ * backup whose name doesn't. Null for a schema version past this plugin's,
+ * or none at all.
+ */
+export function pluginVersionsOfSchema(
+  schema: number
+): PluginVersionSpan | null {
+  const first =
+    schema === 0
+      ? PLUGIN_RELEASES[0]
+      : migrations.find((m) => m.version === schema)?.pluginVersion;
+  if (first === undefined) return null;
+  const next = migrations.find((m) => m.version === schema + 1);
+  if (!next) return { first, last: first };
+  const before = releaseRank(next.pluginVersion) - 1;
+  return {
+    first,
+    last: before > releaseRank(first) ? PLUGIN_RELEASES[before] : first,
+  };
+}
