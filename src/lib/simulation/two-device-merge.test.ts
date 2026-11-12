@@ -2,8 +2,10 @@ import { MS_PER_DAY } from '#/lib/constants';
 import IRScheduler from '#/lib/IRScheduler';
 import { ArticleManager } from '#/lib/items/ArticleManager';
 import { CardManager } from '#/lib/items/CardManager';
+import ReviewManager from '#/lib/items/ReviewManager';
 import {
   PURGED_REFERENCE_PREFIX,
+  purgedReference,
   tombstoneRowStatements,
 } from '#/lib/items/row-delete';
 import SRSCard from '#/lib/items/SRSCard';
@@ -174,14 +176,36 @@ const CARD_COLUMNS = [
   'state',
 ] as const;
 
-/** Un-import (or delete) an article as `ReviewManager.deleteRow` does. */
-async function purge(device: FakeDevice, id: string) {
+/**
+ * Un-import (or delete) an article, or delete any other item for good, as
+ * `ReviewManager.deleteRow` does.
+ */
+async function purge(
+  device: FakeDevice,
+  id: string,
+  table: 'article' | 'snippet' | 'srs_card' = 'article'
+) {
   await device.repo.transaction(() => {
-    for (const { query, params } of tombstoneRowStatements('article', id)) {
+    for (const { query, params } of tombstoneRowStatements(table, id)) {
       device.repo.mutate(query, params);
     }
   });
   await device.repo.settle();
+}
+
+/** Dismiss the `table` row `id` on `device`, as `dismissItem` does. */
+async function dismiss(
+  device: FakeDevice,
+  table: 'article' | 'srs_card',
+  id: string
+) {
+  device.repo.mutate(`UPDATE ${table} SET dismissed = 1 WHERE id = $1`, [id]);
+  await device.repo.settle();
+}
+
+/** A review manager over `device`'s database, for its dismissal writes. */
+function reviewManagerOf(device: FakeDevice) {
+  return new ReviewManager(PLUGIN, device.repo);
 }
 
 function rows(
@@ -400,6 +424,15 @@ async function run(
     );
     // Undone already, with its article un-imported: the undo is refused
     if (review.deleted !== 0) return;
+    // Its article un-imported elsewhere, by a purge that never saw the
+    // review: refused too, writing nothing
+    const id = String(last.before.id);
+    const [article] = rows(
+      device,
+      'SELECT reference FROM article WHERE id = $1',
+      [id]
+    );
+    if (article.reference === purgedReference(id)) return;
     await managersOf(device).articles.undoReview(
       { ...last.before, dismissed: !!last.before.dismissed } as never,
       last.id
@@ -906,6 +939,232 @@ describe('two devices merging one database file', () => {
       expect(Object.fromEntries(CARD_COLUMNS.map((c) => [c, held[c]]))).toEqual(
         Object.fromEntries(CARD_COLUMNS.map((c) => [c, made[c]]))
       );
+    }
+    expect(everything(a)).toEqual(everything(b));
+  });
+
+  it('leaves a card the other device deleted for good as it holds it when one undoes its dismissal there, on both, telling the undo nothing was put back', async () => {
+    const [a, b] = await twoDevices();
+    await makeCard(a, 'c');
+    const card = { data: { id: 'c', type: 'card' } } as never;
+    await reviewManagerOf(a).dismissItem(card);
+    await a.repo.settle();
+    await sync.deliver(a, b);
+    b.clock.now += 1000;
+    await purge(b, 'c', 'srs_card');
+    await sync.deliver(b, a);
+    const purged = rows(a, 'SELECT * FROM srs_card');
+
+    a.clock.now += 2000;
+    const undone = await reviewManagerOf(a).unDismissItem(card);
+    await a.repo.settle();
+    await sync.quiesce(a, b);
+
+    for (const device of [a, b]) {
+      expect(rows(device, 'SELECT * FROM srs_card')).toEqual(purged);
+    }
+    expect(everything(a)).toEqual(everything(b));
+    expect(undone).toBe(false);
+  });
+
+  it('keeps a card dismissed on the other device after a grade it merged when one undoes the grade, with the state from before the grade, on both', async () => {
+    const [a, b] = await twoDevices();
+    await makeCard(a, 'c');
+    a.clock.now += MS_PER_DAY;
+    const graded = await gradeCard(a, 'c', Rating.Good);
+    await sync.deliver(a, b);
+    b.clock.now += MS_PER_DAY + 60_000;
+    await dismiss(b, 'srs_card', 'c');
+    await sync.deliver(b, a);
+
+    // The undo is the latest write, so it is the one the merge keeps
+    a.clock.now = b.clock.now + 60_000;
+    await managersOf(a).cards.rollbackBeforeReview(graded.before, graded.id);
+    await a.repo.settle();
+    await sync.quiesce(a, b);
+
+    const made = CardManager.displayToRow(graded.before) as unknown as Row;
+    for (const device of [a, b]) {
+      const [held] = rows(device, 'SELECT * FROM srs_card');
+      expect(held.dismissed).toBe(1);
+      expect(Object.fromEntries(CARD_COLUMNS.map((c) => [c, held[c]]))).toEqual(
+        Object.fromEntries(CARD_COLUMNS.map((c) => [c, made[c]]))
+      );
+    }
+    expect(everything(a)).toEqual(everything(b));
+  });
+
+  it('keeps an article dismissed on the other device after a review it merged when one undoes the review, with the schedule from before the review, on both', async () => {
+    const [a, b] = await twoDevices();
+    await importArticle(a, 'note', 'notes/n0.md');
+    const [imported] = rows(a, 'SELECT interval, due FROM article');
+    a.clock.now += MS_PER_DAY;
+    const before = articleOn(a, 'note');
+    const id = await reviewArticle(a, 'note');
+    await sync.deliver(a, b);
+    b.clock.now += MS_PER_DAY + 60_000;
+    await dismiss(b, 'article', 'note');
+    await sync.deliver(b, a);
+
+    // The undo is the latest write, so it is the one the merge keeps
+    a.clock.now = b.clock.now + 60_000;
+    await managersOf(a).articles.undoReview(before, id);
+    await a.repo.settle();
+    await sync.quiesce(a, b);
+
+    for (const device of [a, b]) {
+      expect(
+        rows(device, 'SELECT dismissed, interval, due FROM article')
+      ).toEqual([{ dismissed: 1, ...imported }]);
+    }
+    expect(everything(a)).toEqual(everything(b));
+  });
+
+  it('dismisses a card again when one undoes the grade that took its dismissal away, on both', async () => {
+    const [a, b] = await twoDevices();
+    await makeCard(a, 'c');
+    await dismiss(a, 'srs_card', 'c');
+    a.clock.now += MS_PER_DAY;
+    const graded = await gradeCard(a, 'c', Rating.Good);
+    expect(rows(a, 'SELECT dismissed FROM srs_card')).toEqual([
+      { dismissed: 0 },
+    ]);
+    await sync.deliver(a, b);
+
+    a.clock.now += 60_000;
+    await managersOf(a).cards.rollbackBeforeReview(graded.before, graded.id);
+    await a.repo.settle();
+    await sync.quiesce(a, b);
+
+    for (const device of [a, b]) {
+      expect(rows(device, 'SELECT dismissed FROM srs_card')).toEqual([
+        { dismissed: 1 },
+      ]);
+    }
+    expect(everything(a)).toEqual(everything(b));
+  });
+
+  it('dismisses an article again when one undoes the review that took its dismissal away, on both', async () => {
+    const [a, b] = await twoDevices();
+    await importArticle(a, 'note', 'notes/n0.md');
+    await dismiss(a, 'article', 'note');
+    a.clock.now += MS_PER_DAY;
+    const before = articleOn(a, 'note');
+    const id = await reviewArticle(a, 'note');
+    expect(rows(a, 'SELECT dismissed FROM article')).toEqual([
+      { dismissed: 0 },
+    ]);
+    await sync.deliver(a, b);
+
+    a.clock.now += 60_000;
+    await managersOf(a).articles.undoReview(before, id);
+    await a.repo.settle();
+    await sync.quiesce(a, b);
+
+    for (const device of [a, b]) {
+      expect(rows(device, 'SELECT dismissed FROM article')).toEqual([
+        { dismissed: 1 },
+      ]);
+    }
+    expect(everything(a)).toEqual(everything(b));
+  });
+
+  it('property: an undone review or grade leaves an item dismissed when it was before the review or is now, and only then', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom('article', 'srs_card' as const),
+        fc.boolean(),
+        fc.boolean(),
+        async (table, before, now) => {
+          const a = await makeDevice('a', { now: T });
+          if (table === 'article') await importArticle(a, 'x', 'notes/n0.md');
+          else await makeCard(a, 'x');
+          if (before) await dismiss(a, table, 'x');
+          a.clock.now += MS_PER_DAY;
+          const undo =
+            table === 'article'
+              ? await (async () => {
+                  const original = articleOn(a, 'x');
+                  const id = await reviewArticle(a, 'x');
+                  return () => managersOf(a).articles.undoReview(original, id);
+                })()
+              : await (async () => {
+                  const graded = await gradeCard(a, 'x', Rating.Good);
+                  return () =>
+                    managersOf(a).cards.rollbackBeforeReview(
+                      graded.before,
+                      graded.id
+                    );
+                })();
+          a.clock.now += 60_000;
+          if (now) await dismiss(a, table, 'x');
+
+          await undo();
+          await a.repo.settle();
+
+          expect(rows(a, `SELECT dismissed FROM ${table}`)).toEqual([
+            { dismissed: before || now ? 1 : 0 },
+          ]);
+        }
+      ),
+      { numRuns: 16 }
+    );
+  });
+
+  it('refuses to undo a grade of a card the other device deleted for good without seeing the grade, writing nothing, on both', async () => {
+    const [a, b] = await twoDevices();
+    await makeCard(a, 'c');
+    await sync.deliver(a, b);
+    a.clock.now += MS_PER_DAY;
+    const graded = await gradeCard(a, 'c', Rating.Good);
+    b.clock.now += MS_PER_DAY + 60_000;
+    await purge(b, 'c', 'srs_card');
+    await sync.deliver(b, a);
+    // The grade stays live: the purge never saw it
+    expect(
+      rows(a, 'SELECT deleted FROM srs_card_review WHERE id = $1', [graded.id])
+    ).toEqual([{ deleted: 0 }]);
+    const held = everything(a);
+
+    a.clock.now = b.clock.now + 60_000;
+    await expect(
+      managersOf(a).cards.rollbackBeforeReview(graded.before, graded.id)
+    ).rejects.toThrow(/deleted for good/);
+    await a.repo.settle();
+
+    expect(everything(a)).toEqual(held);
+    await sync.quiesce(a, b);
+    for (const device of [a, b]) {
+      expect(rows(device, 'SELECT * FROM srs_card')).toEqual(held.srs_card);
+    }
+    expect(everything(a)).toEqual(everything(b));
+  });
+
+  it('refuses to undo a review of an article the other device deleted for good without seeing the review, writing nothing, on both', async () => {
+    const [a, b] = await twoDevices();
+    await importArticle(a, 'note', 'notes/n0.md');
+    await sync.deliver(a, b);
+    a.clock.now += MS_PER_DAY;
+    const before = articleOn(a, 'note');
+    const id = await reviewArticle(a, 'note');
+    b.clock.now += MS_PER_DAY + 60_000;
+    await purge(b, 'note');
+    await sync.deliver(b, a);
+    expect(
+      rows(a, 'SELECT deleted FROM article_review WHERE id = $1', [id])
+    ).toEqual([{ deleted: 0 }]);
+    const held = everything(a);
+
+    a.clock.now = b.clock.now + 60_000;
+    await expect(managersOf(a).articles.undoReview(before, id)).rejects.toThrow(
+      /deleted for good/
+    );
+    await a.repo.settle();
+
+    expect(everything(a)).toEqual(held);
+    await sync.quiesce(a, b);
+    for (const device of [a, b]) {
+      expect(rows(device, 'SELECT * FROM article')).toEqual(held.article);
     }
     expect(everything(a)).toEqual(everything(b));
   });

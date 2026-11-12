@@ -341,6 +341,12 @@ export interface SQLiteRepository {
    * @throws if it can't, leaving the database and its file as they were
    */
   restoreBackup(path: string): Promise<void>;
+  /**
+   * The restore epoch of the database held now (see `readRestoreEpoch`),
+   * which moves on whenever a restore replaces it, here or taken on from
+   * another device.
+   */
+  restoreEpoch(): number;
 }
 
 export type SchedulingStrategy = 'priority' | 'fixed-interval';

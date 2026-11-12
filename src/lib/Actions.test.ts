@@ -99,8 +99,12 @@ function makePlugin() {
     settings: { dayRolloverOffset: 4 },
     reviewManager: {
       dismissItem: vi.fn().mockResolvedValue(undefined),
-      unDismissItem: vi.fn().mockResolvedValue(undefined),
-      repo: { writeRefusal: () => null, readiness: 'ready' },
+      unDismissItem: vi.fn().mockResolvedValue(true),
+      repo: {
+        writeRefusal: () => null,
+        readiness: 'ready',
+        restoreEpoch: () => 0,
+      },
     },
     app: {
       workspace: {
@@ -147,11 +151,15 @@ function makeReviewingPlugin({
       reviewSnippet: vi.fn().mockResolvedValue(reviewId),
       reviewCard: vi.fn().mockResolvedValue(reviewId),
       dismissItem: vi.fn().mockResolvedValue(undefined),
-      unDismissItem: vi.fn().mockResolvedValue(undefined),
+      unDismissItem: vi.fn().mockResolvedValue(true),
       articles: { undoReview: reverse },
       snippets: { undoReview: reverse },
       cards: { rollbackBeforeReview: reverse },
-      repo: { writeRefusal: () => null, readiness: 'ready' },
+      repo: {
+        writeRefusal: () => null,
+        readiness: 'ready',
+        restoreEpoch: () => 0,
+      },
     },
     app: {
       workspace: {
@@ -615,6 +623,9 @@ function mergingRepo() {
   const repo = {
     readiness: 'merging' as Readiness,
     writeRefusal: () => null,
+    /** Set by a test, standing in for a restore the merge takes on. */
+    epoch: 0,
+    restoreEpoch: () => repo.epoch,
     onReadinessChange: (listener: (state: Readiness) => void) => {
       listeners.add(listener);
       return () => listeners.delete(listener);
@@ -631,7 +642,11 @@ function mergingRepo() {
 function refusing(reason: string) {
   const plugin = makePlugin();
   Object.assign(plugin.reviewManager, {
-    repo: { writeRefusal: () => new Error(reason), readiness: 'starting' },
+    repo: {
+      writeRefusal: () => new Error(reason),
+      readiness: 'starting',
+      restoreEpoch: () => 0,
+    },
   });
   return new Actions(plugin);
 }
@@ -952,6 +967,25 @@ function plainEntry(
 ): ActionStackEntry {
   return { description, undo: vi.fn(undo), writes: false };
 }
+
+/**
+ * A ready database at restore epoch `epoch`, which a test sets to stand in
+ * for a restore.
+ */
+function epochRepo(epoch: number) {
+  const repo = {
+    writeRefusal: () => null,
+    readiness: 'ready' as Readiness,
+    epoch,
+    restoreEpoch: () => repo.epoch,
+  };
+  return repo;
+}
+
+/** Two restore epochs, the second one after a restore from the first. */
+const restoredEpochsArb = fc
+  .tuple(fc.nat(), fc.nat())
+  .filter(([before, after]) => before !== after);
 
 // #endregion
 
@@ -1738,6 +1772,32 @@ describe('Actions — undo of a dismissal', () => {
 
         await actions.undo();
 
+        expect(dispatched(plugin)).toEqual([]);
+      })
+    );
+  });
+
+  it('says it could not undo a dismissal with no row left to lift it from, dropping it and leaving review where it is', async () => {
+    // Deleted for good on another device meanwhile: the write is skipped
+    await fc.assert(
+      fc.asyncProperty(reviewCaseArb, async (c) => {
+        const { plugin, item, actions } = wireCase({
+          ...c,
+          currentItemId: c.itemId,
+        });
+        await actions.dismissItem(item);
+        (
+          plugin.reviewManager.unDismissItem as ReturnType<typeof vi.fn>
+        ).mockResolvedValue(false);
+        const notify = vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
+        plugin.store.dispatch.mockClear();
+
+        await actions.undo();
+
+        expect(actions.undoStack).toEqual([]);
+        expect(notify).toHaveBeenCalledExactlyOnceWith(expect.any(String), {
+          kind: 'error',
+        });
         expect(dispatched(plugin)).toEqual([]);
       })
     );
@@ -5387,6 +5447,7 @@ describe('Actions.recordImport', () => {
       repo: {
         writeRefusal: () => new Error('Saving is paused.'),
         readiness: 'starting',
+        restoreEpoch: () => 0,
       },
     });
     const entry = actions.recordImport({
@@ -5541,6 +5602,132 @@ describe('Actions.undoEntry', () => {
 
     expect(undoEntry).not.toHaveBeenCalled();
     expect(notify).toHaveBeenCalledOnce();
+  });
+});
+
+describe('Actions.undo after the database was restored', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('property: drops an entry recorded before a restore without running it, saying why', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        restoredEpochsArb,
+        fc.string(),
+        fc.constantFrom(true, undefined),
+        async ([before, after], description, writes) => {
+          vi.restoreAllMocks();
+          const { actions, notify, listener } = wireImports();
+          const repo = epochRepo(before);
+          Object.assign(actions.plugin.reviewManager, { repo });
+          const below: ActionStackEntry = {
+            description: 'below',
+            undo: vi.fn(),
+            writes: true,
+          };
+          const entry: ActionStackEntry = {
+            description,
+            undo: vi.fn(),
+            writes,
+          };
+          actions._pushUndo(below);
+          actions._pushUndo(entry);
+          repo.epoch = after;
+          listener.mockClear();
+
+          await actions.undoEntry(entry);
+
+          expect(entry.undo).not.toHaveBeenCalled();
+          expect(below.undo).not.toHaveBeenCalled();
+          expect(actions.undoStack).toEqual([below]);
+          expect(listener).toHaveBeenCalledOnce();
+          expect(notify).toHaveBeenCalledExactlyOnceWith(
+            expect.stringContaining(description),
+            { kind: 'error' }
+          );
+        }
+      )
+    );
+  });
+
+  it('property: still undoes an entry that writes nothing, recorded before a restore', async () => {
+    await fc.assert(
+      fc.asyncProperty(restoredEpochsArb, async ([before, after]) => {
+        vi.restoreAllMocks();
+        const { actions, notify } = wireImports();
+        const repo = epochRepo(before);
+        Object.assign(actions.plugin.reviewManager, { repo });
+        const entry = plainEntry('skipping');
+        actions._pushUndo(entry);
+        repo.epoch = after;
+
+        await actions.undoEntry(entry);
+
+        expect(entry.undo).toHaveBeenCalledOnce();
+        expect(actions.undoStack).toEqual([]);
+        expect(notify).toHaveBeenCalledExactlyOnceWith(
+          expect.stringContaining('skipping'),
+          { kind: 'success', category: 'undo' }
+        );
+      })
+    );
+  });
+
+  it('property: undoes an entry that writes as ever when no restore came between', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.nat(),
+        fc.constantFrom(true, undefined),
+        async (epoch, writes) => {
+          vi.restoreAllMocks();
+          const { actions, notify } = wireImports();
+          Object.assign(actions.plugin.reviewManager, {
+            repo: epochRepo(epoch),
+          });
+          const entry: ActionStackEntry = {
+            description: 'doing',
+            undo: vi.fn(),
+            writes,
+          };
+          actions._pushUndo(entry);
+
+          await actions.undoEntry(entry);
+
+          expect(entry.undo).toHaveBeenCalledOnce();
+          expect(actions.undoStack).toEqual([]);
+          expect(notify).toHaveBeenCalledExactlyOnceWith(
+            expect.stringContaining('doing'),
+            { kind: 'success', category: 'undo' }
+          );
+        }
+      )
+    );
+  });
+
+  it('drops an entry when the merge its undo waits out takes on a restored file', async () => {
+    const { actions, notify } = wireImports();
+    const repo = mergingRepo();
+    Object.assign(actions.plugin.reviewManager, { repo });
+    const entry: ActionStackEntry = {
+      description: 'doing',
+      undo: vi.fn(),
+      writes: true,
+    };
+    actions._pushUndo(entry);
+
+    const undone = actions.undoEntry(entry);
+    await Promise.resolve();
+    repo.epoch = 1;
+    repo.becomes('ready');
+    await undone;
+
+    expect(entry.undo).not.toHaveBeenCalled();
+    expect(actions.undoStack).toEqual([]);
+    expect(notify).toHaveBeenCalledExactlyOnceWith(
+      expect.stringContaining('doing'),
+      { kind: 'error' }
+    );
   });
 });
 

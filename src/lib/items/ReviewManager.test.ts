@@ -3308,6 +3308,10 @@ describe('ReviewManager.dismissItem and unDismissItem', () => {
     'unDismissItem uses table "%s" for %s type',
     async (type, expectedTable) => {
       const repo = makeRepo();
+      // The row is there to un-dismiss
+      (repo.query as ReturnType<typeof vi.fn>).mockResolvedValue([
+        { id: 'item-1' },
+      ]);
       const manager = new ReviewManager(makePlugin(), repo);
       const item = makeReviewItem(type);
       vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue(type);
@@ -3319,6 +3323,55 @@ describe('ReviewManager.dismissItem and unDismissItem', () => {
       expect(params).toEqual([item.data.id]);
     }
   );
+});
+
+describe('ReviewManager.unDismissItem on a database', () => {
+  beforeAll(async () => {
+    const wasmBinary = readFileSync(
+      require.resolve('sql.js/dist/sql-wasm.wasm')
+    );
+    SQL = await initSqlJs({ wasmBinary: wasmBinary as unknown as ArrayBuffer });
+  });
+
+  it('property: un-dismisses a row that is there, saying so, and leaves one deleted for good as it is', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.boolean(),
+        fc.boolean(),
+        fc.boolean(),
+        async (dismissed, deleted, purged) => {
+          const repo = TestRepository.create();
+          repo.mutate(
+            `INSERT INTO article (id, reference, due, interval, priority, dismissed, deleted)
+             VALUES ('a', $1, 0, 86400000, 30, $2, $3)`,
+            [purged ? purgedReference('a') : 'notes/a.md', dismissed, deleted]
+          );
+          const before = repo.row('article', 'a');
+          const manager = new ReviewManager(makePlugin(), repo);
+
+          const undone = await manager.unDismissItem(
+            makeReviewItem('article', 'a')
+          );
+
+          expect(undone).toBe(!purged);
+          const after = repo.row('article', 'a');
+          if (purged) expect(after).toEqual(before);
+          else expect(after?.dismissed).toBe(0);
+          repo.dispose();
+        }
+      )
+    );
+  });
+
+  it('says it un-dismissed nothing when no row has the id', async () => {
+    const repo = TestRepository.create();
+    const manager = new ReviewManager(makePlugin(), repo);
+
+    expect(await manager.unDismissItem(makeReviewItem('card', 'none'))).toBe(
+      false
+    );
+    repo.dispose();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -7163,7 +7216,13 @@ describe('readiness gate', () => {
     {
       name: 'unDismissItem',
       run: (m: ReviewManager) => m.unDismissItem(makeReviewItem('snippet')),
-      write: (m: ReviewManager) => vi.spyOn(m.repo, 'mutate'),
+      write: (m: ReviewManager) => {
+        // The row is there to un-dismiss
+        vi.spyOn(m.repo, 'query').mockResolvedValue([
+          { id: 'item-1' },
+        ] as never);
+        return vi.spyOn(m.repo, 'mutate');
+      },
     },
   ] as const;
 

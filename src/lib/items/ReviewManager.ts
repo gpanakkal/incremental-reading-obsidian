@@ -877,14 +877,31 @@ export default class ReviewManager {
     this.plugin.sessionTracker?.forgetIf(item.data.id);
   }
 
-  /** @throws {ActionRefusedError} as {@link reviewCard} does */
-  async unDismissItem(item: MaybeMissingItem): Promise<void> {
+  /**
+   * Lift the dismissal of `item`. A row deleted for good is never written
+   * again, so one another device purged meanwhile is left as it is.
+   * @returns whether a row was there to un-dismiss, dismissed or not
+   * @throws {ActionRefusedError} as {@link reviewCard} does
+   */
+  async unDismissItem(item: MaybeMissingItem): Promise<boolean> {
     await assertReady(this.#repo, 'db-write', 'restore the item');
     const type = item.data.type;
     const table = type === 'card' ? 'srs_card' : type;
-    await this.#repo.mutate(`UPDATE ${table} SET dismissed = 0 WHERE id = $1`, [
-      item.data.id,
-    ]);
+    const id = item.data.id;
+    // Looked for rather than told by the update: an update that changes
+    // nothing, of a row not dismissed now, is skipped (see `armRowStamps`)
+    return this.#repo.transaction(async () => {
+      const [found] = await this.#repo.query(
+        `SELECT id FROM ${table} WHERE id = $1 AND ${NOT_PURGED}`,
+        [id]
+      );
+      if (!found) return false;
+      await this.#repo.mutate(
+        `UPDATE ${table} SET dismissed = 0 WHERE id = $1 AND ${NOT_PURGED}`,
+        [id]
+      );
+      return true;
+    });
   }
 
   /**
