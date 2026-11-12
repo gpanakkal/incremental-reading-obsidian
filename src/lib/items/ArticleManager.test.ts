@@ -505,8 +505,9 @@ function makeApp(): Record<string, unknown> {
 }
 
 /**
- * An app whose note at `claimedPath` carries another item's `ir-id`, so the row
- * pointing there is refused as that note's owner. Every other note is plain.
+ * An app whose note at `claimedPath` carries another item's `ir-id`, so a row
+ * pointing there that recorded the note's mtime (see {@link noteAt}) is
+ * refused, the note proving it gone. Every other note is plain.
  */
 function makeAppClaiming(claimedPath: string): Record<string, unknown> {
   return {
@@ -520,9 +521,20 @@ function makeAppClaiming(claimedPath: string): Record<string, unknown> {
   };
 }
 
-/** Each reference's own note, so a claimed one can be told apart. */
+/** The mtime of every note {@link noteAt} makes. */
+const WRITTEN_AT = 5_000;
+
+/**
+ * Each reference's own note, so a claimed one can be told apart, last
+ * written at {@link WRITTEN_AT}: a row recording that mtime was written into
+ * it, and a claim of another id there proves that row gone.
+ */
 function noteAt(reference: string): TFile {
-  return { path: reference, extension: 'md' } as TFile;
+  return {
+    path: reference,
+    extension: 'md',
+    stat: { ctime: 0, mtime: WRITTEN_AT, size: 0 },
+  } as TFile;
 }
 
 /**
@@ -1747,7 +1759,7 @@ describe('getDue', () => {
       db.close();
     });
 
-    it('leaves out a row whose note is another item’s and fetches on, however many were seen', async () => {
+    it('leaves out a row whose note proves it gone and fetches on, however many were seen', async () => {
       const { repo, db } = await makeSqlJsRepo();
       insertArticleRow(db, {
         id: 'claimed',
@@ -1755,6 +1767,9 @@ describe('getDue', () => {
         due_fuzz: null,
         priority: DEFAULT_PRIORITY,
       });
+      db.exec(`UPDATE article SET note_mtime = $1 WHERE id = 'claimed'`, [
+        WRITTEN_AT,
+      ]);
       insertArticleRow(db, {
         id: 'own',
         due: 2,
@@ -1893,7 +1908,7 @@ describe('getDue', () => {
     expect(excludedIdsOf(firstCallParams)).toContain(rowA.id);
   });
 
-  it('filters out items where rowToReviewArticle refuses a note that is not the row’s', async () => {
+  it('filters out items where rowToReviewArticle refuses a note that proves the row gone', async () => {
     // Give each row a unique reference so the getNote mock can discriminate.
     // The second call must still return rowWithFile so that `due` is not empty after the retry.
     const rowWithFile = makeArticleRow({
@@ -1901,11 +1916,14 @@ describe('getDue', () => {
       reference: 'articles/with-file.md',
       due: 1,
     });
-    const rowNoFile = makeArticleRow({
-      id: 'no-file-filter',
-      reference: 'articles/no-file.md',
-      due: 1,
-    });
+    const rowNoFile = {
+      ...makeArticleRow({
+        id: 'no-file-filter',
+        reference: 'articles/no-file.md',
+        due: 1,
+      }),
+      note_mtime: WRITTEN_AT,
+    };
     vi.spyOn(Obsidian, 'getNote').mockImplementation(noteAt);
 
     // First call returns both rows; second call returns only rowWithFile (rowNoFile is excluded).
@@ -2179,7 +2197,7 @@ describe('rowToReviewArticle', () => {
     { noteMtime: 5_001, deletes: false },
     { noteMtime: 4_999, deletes: false },
   ])(
-    'returns null when frontmatter has a different ir-id, and tombstones the row only when the note has the mtime it recorded (note at $noteMtime)',
+    'refuses and tombstones the row when frontmatter has a different ir-id only when the note has the mtime it recorded, else keeps it (note at $noteMtime)',
     async ({ noteMtime, deletes }) => {
       const fakeFile = {
         path: 'articles/test.md',
@@ -2208,7 +2226,7 @@ describe('rowToReviewArticle', () => {
         repo
       );
       const result = manager.rowToReviewArticle(row);
-      expect(result).toBeNull();
+      expect(result?.file ?? null).toBe(deletes ? null : fakeFile);
       await Promise.resolve();
       const mutateCalls = (repo.mutate as ReturnType<typeof vi.fn>).mock
         .calls as [string, unknown[]][];
@@ -3466,13 +3484,17 @@ describe('getDue (filter correctness)', () => {
   });
 
   it('excludes items where rowToReviewArticle refuses the note from the final result', async () => {
-    // rowToReviewArticle returns null when the note claims another item's id.
+    // rowToReviewArticle returns null when the note claims another item's id
+    // and is the one the row was written into.
     // Rows must have distinct references so the mock can discriminate.
-    const rowNoFile = makeArticleRow({
-      id: 'null-item',
-      reference: 'articles/no-file.md',
-      due: 0,
-    });
+    const rowNoFile = {
+      ...makeArticleRow({
+        id: 'null-item',
+        reference: 'articles/no-file.md',
+        due: 0,
+      }),
+      note_mtime: WRITTEN_AT,
+    };
     const rowWithFile = makeArticleRow({
       id: 'real-item',
       reference: 'articles/with-file.md',
@@ -3512,11 +3534,14 @@ describe('getDue (filter correctness)', () => {
     // Mutant: lastMissingNotes += 1 → lastMissingNotes -= 1 would cause the loop
     // to terminate after one pass even when items are still missing.
     // Rows must have distinct references so the mock can discriminate.
-    const missingRow = makeArticleRow({
-      id: 'missing',
-      reference: 'articles/missing.md',
-      due: 0,
-    });
+    const missingRow = {
+      ...makeArticleRow({
+        id: 'missing',
+        reference: 'articles/missing.md',
+        due: 0,
+      }),
+      note_mtime: WRITTEN_AT,
+    };
     const presentRow = makeArticleRow({
       id: 'present',
       reference: 'articles/present.md',

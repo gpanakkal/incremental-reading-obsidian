@@ -680,6 +680,16 @@ export class LeftoverWatch {
     if (this.deps.isReviewOpen()) this.#announce();
   }
 
+  /**
+   * Look again, as something outside the watch may have made a leftover a
+   * row's note (the damaged-notes notice's Re-associate, say), opening
+   * nothing.
+   * @returns whether it could look
+   */
+  refresh(): Promise<boolean> {
+    return this.#look();
+  }
+
   /** Told by each review tab as it opens, which shows the notice if due. */
   reviewOpened(): void {
     if (this.#scanned) this.#announce();

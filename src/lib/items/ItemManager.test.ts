@@ -462,7 +462,7 @@ describe('reconcileNote', () => {
     );
   });
 
-  it('refuses the row a note claiming another id, tombstoning a live row only when the note is provably the one it was written with', async () => {
+  it('keeps the row a note claiming another id, refusing and tombstoning a live row only when the note is provably the one it was written with', async () => {
     await fc.assert(
       fc.asyncProperty(
         settledArb.filter(
@@ -475,12 +475,13 @@ describe('reconcileNote', () => {
             frontmatter: structuredClone(frontmatter),
           } as CachedMetadata);
 
+          const gone = !row.deleted && proven(row, noteMtime);
           expect(manager.reconcile(row, noteAt(noteMtime), type, tag)).toBe(
-            false
+            !gone
           );
 
           expect(markDeleted.mock.calls).toStrictEqual(
-            !row.deleted && proven(row, noteMtime) ? [[row.id, type]] : []
+            gone ? [[row.id, type]] : []
           );
           expect(writeNote).not.toHaveBeenCalled();
           expect(markUndeleted).not.toHaveBeenCalled();
@@ -591,7 +592,7 @@ describe('reconcileNote', () => {
 
     expect(
       manager.reconcile(unrecorded, noteAt(5), 'article', 'ir-article')
-    ).toBe(false);
+    ).toBe(true);
     expect(markDeleted).not.toHaveBeenCalled();
     expect(markUndeleted).not.toHaveBeenCalled();
   });

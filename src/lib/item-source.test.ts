@@ -1,8 +1,10 @@
+import { heldClaim, unlinkedFrom } from '#/lib/items/note-holding';
 import { TestRepository } from '#/test/item-vault';
 import { makeLinkVault } from '#/test/link-vault';
 import fc from 'fast-check';
 import type { App, TFile } from 'obsidian';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { mismatchOf } from './damaged-note-actions';
 import {
   findItemSource,
   findRoot,
@@ -282,6 +284,58 @@ describe('itemNodeAt', () => {
           expect(found).toEqual(
             holds ? { id: rowId, type, reference, parent } : null
           );
+        }
+      )
+    );
+  });
+
+  it("property: finds no row for the note at a live row's path exactly when the queue flags that row Unlinked and the damaged-notes notice offers to re-associate the note", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom<NoteType>('article', 'snippet', 'card'),
+        fc.constantFrom('item-0', '7'),
+        fc.oneof(
+          fc.constant({ kind: 'pdf' as const }),
+          fc.constantFrom(...CLAIMS).map((claim) => ({
+            kind: 'note' as const,
+            ...claim,
+          }))
+        ),
+        async (type, rowId, file) => {
+          const path = file.kind === 'pdf' ? 'ir/at.pdf' : 'ir/at.md';
+          const parent = type === 'article' ? null : 'p';
+          const repo = await TestRepository.create();
+          insert(repo, rowId, type, parent, 0, path);
+          insert(repo, 'item-1', type, parent, 0, 'ir/other.md');
+          const vault = makeLinkVault({
+            [path]:
+              file.kind === 'pdf'
+                ? null
+                : 'irId' in file
+                  ? { 'ir-id': file.irId }
+                  : {},
+          });
+          const app = vault.app as unknown as App;
+          const note = vault.files.get(path)!;
+          const table = type === 'card' ? 'srs_card' : type;
+
+          const found = itemNodeAt(repo, app, note);
+          const unlinked = unlinkedFrom(note, rowId, app);
+          // The notice reads no file without frontmatter, as a PDF
+          const offered =
+            file.kind === 'note' &&
+            mismatchOf(
+              path,
+              heldClaim(note, app) ?? null,
+              [
+                { table, id: rowId, reference: path },
+                { table, id: 'item-1', reference: 'ir/other.md' },
+              ],
+              (reference) => vault.files.has(reference)
+            ) !== null;
+
+          expect(unlinked).toBe(found === null);
+          expect(offered).toBe(unlinked);
         }
       )
     );

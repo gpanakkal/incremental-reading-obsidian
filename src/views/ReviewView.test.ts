@@ -1756,6 +1756,60 @@ describe('ReviewView.setFile', () => {
     );
   });
 
+  it('tells the damaged-notes notice of each other note it shows while it holds the active file, once, through the file-open it has the workspace send, and of none in the background', () => {
+    // The plugin learns the active note from `file-open` alone; a second
+    // telling from the view itself would double every lookup.
+    fc.assert(
+      fc.property(
+        fc.array(
+          fc.record({
+            name: fc.option(fc.constantFrom('a', 'b'), { nil: null }),
+            inFront: fc.boolean(),
+          }),
+          { maxLength: 8 }
+        ),
+        (steps) => {
+          const receiver = makeTitleReceiver('review', null);
+          const opened = vi.fn(async (_path: string) => {});
+          Object.assign(receiver.plugin, { damagedNotes: { opened } });
+          const { workspace } = receiver.app;
+          let front = false;
+          workspace.getActiveFileView.mockImplementation(() =>
+            front ? receiver : null
+          );
+          // As Obsidian's `activeLeafEvents`: `file-open` only once the active
+          // file has changed, which the plugin passes on to the notice
+          let lastActive: TFile | null = null;
+          workspace.requestActiveLeafEvents.mockImplementation(() => {
+            const active = front ? (receiver.file ?? null) : null;
+            if (active === lastActive) return;
+            lastActive = active;
+            if (active) void opened(active.path);
+          });
+          const files = new Map(
+            ['a', 'b'].map((name) => [
+              name,
+              { ...makeFile(name), path: `${name}.md` } as TFile,
+            ])
+          );
+
+          const told: string[] = [];
+          let last: TFile | null = null;
+          for (const { name, inFront } of steps) {
+            front = inFront;
+            if (!front) lastActive = null;
+            const file = name === null ? null : files.get(name)!;
+            asView(receiver).setFile(file, file && 'article');
+            if (file && file !== last && inFront) told.push(file.path);
+            last = file;
+          }
+
+          expect(opened.mock.calls.map(([path]) => path)).toStrictEqual(told);
+        }
+      )
+    );
+  });
+
   it('drops back to the plugin name when the queue hands over no file', () => {
     const receiver = makeTitleReceiver('review', makeFile('Chunking'));
 

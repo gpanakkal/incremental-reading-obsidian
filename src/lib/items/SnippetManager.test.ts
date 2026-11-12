@@ -172,8 +172,9 @@ function makeApp(): Record<string, unknown> {
 }
 
 /**
- * An app whose note at `claimedPath` carries another item's `ir-id`, so the row
- * pointing there is refused as that note's owner. Every other note is plain.
+ * An app whose note at `claimedPath` carries another item's `ir-id`, so a row
+ * pointing there that recorded the note's mtime (see {@link noteAt}) is
+ * refused, the note proving it gone. Every other note is plain.
  */
 function makeAppClaiming(claimedPath: string): Record<string, unknown> {
   return {
@@ -187,9 +188,20 @@ function makeAppClaiming(claimedPath: string): Record<string, unknown> {
   };
 }
 
-/** Each reference's own note, so a claimed one can be told apart. */
+/** The mtime of every note {@link noteAt} makes. */
+const WRITTEN_AT = 5_000;
+
+/**
+ * Each reference's own note, so a claimed one can be told apart, last
+ * written at {@link WRITTEN_AT}: a row recording that mtime was written into
+ * it, and a claim of another id there proves that row gone.
+ */
 function noteAt(reference: string): TFile {
-  return { path: reference, extension: 'md' } as TFile;
+  return {
+    path: reference,
+    extension: 'md',
+    stat: { ctime: 0, mtime: WRITTEN_AT, size: 0 },
+  } as TFile;
 }
 
 let emptyDb: Promise<{ SQL: SqlJsStatic; bytes: Uint8Array }> | null = null;
@@ -952,7 +964,7 @@ describe('rowToReviewSnippet', () => {
     { noteMtime: 5_001, deletes: false },
     { noteMtime: 4_999, deletes: false },
   ])(
-    'returns null when frontmatter has a different ir-id, and tombstones the row only when the note has the mtime it recorded (note at $noteMtime)',
+    'refuses and tombstones the row when frontmatter has a different ir-id only when the note has the mtime it recorded, else keeps it (note at $noteMtime)',
     async ({ noteMtime, deletes }) => {
       const fakeFile = {
         path: 'snippets/test.md',
@@ -980,7 +992,7 @@ describe('rowToReviewSnippet', () => {
         repo
       );
       const result = manager.rowToReviewSnippet(row);
-      expect(result).toBeNull();
+      expect(result?.file ?? null).toBe(deletes ? null : fakeFile);
       await Promise.resolve();
       const mutateCalls = (repo.mutate as ReturnType<typeof vi.fn>).mock
         .calls as [string, unknown[]][];
@@ -1736,7 +1748,7 @@ describe('getDue', () => {
       db.close();
     });
 
-    it('leaves out a row whose note is another item’s and fetches on, however many were seen', async () => {
+    it('leaves out a row whose note proves it gone and fetches on, however many were seen', async () => {
       const { repo, db } = await makeSqlJsRepo();
       insertSnippetRow(db, {
         id: 'claimed',
@@ -1744,6 +1756,9 @@ describe('getDue', () => {
         due_fuzz: null,
         priority: DEFAULT_PRIORITY,
       });
+      db.exec(`UPDATE snippet SET note_mtime = $1 WHERE id = 'claimed'`, [
+        WRITTEN_AT,
+      ]);
       insertSnippetRow(db, {
         id: 'own',
         due: 2,
@@ -1910,11 +1925,14 @@ describe('getDue', () => {
   });
 
   it('fetches again without a refused row, so it never holds a place another row could take', async () => {
-    const refused = makeSnippetRow({
-      id: 'refused',
-      reference: 'snippets/refused.md',
-      due: 0,
-    });
+    const refused = {
+      ...makeSnippetRow({
+        id: 'refused',
+        reference: 'snippets/refused.md',
+        due: 0,
+      }),
+      note_mtime: WRITTEN_AT,
+    };
     const own = makeSnippetRow({
       id: 'own',
       reference: 'snippets/own.md',
@@ -1947,17 +1965,20 @@ describe('getDue', () => {
     expect(excludedIdsOf(queryCalls[1])).toContain('refused');
   });
 
-  it('filters out items where rowToReviewSnippet refuses a note that is not the row’s', async () => {
+  it('filters out items where rowToReviewSnippet refuses a note that proves the row gone', async () => {
     const rowWithFile = makeSnippetRow({
       id: 'has-file',
       reference: 'snippets/with-file.md',
       due: 1,
     });
-    const rowNoFile = makeSnippetRow({
-      id: 'no-file-filter',
-      reference: 'snippets/no-file.md',
-      due: 1,
-    });
+    const rowNoFile = {
+      ...makeSnippetRow({
+        id: 'no-file-filter',
+        reference: 'snippets/no-file.md',
+        due: 1,
+      }),
+      note_mtime: WRITTEN_AT,
+    };
     vi.spyOn(Obsidian, 'getNote').mockImplementation(noteAt);
 
     let call = 0;

@@ -1,5 +1,12 @@
+import { TYPE_ICONS } from '#/components/icons/typeIcons';
+import type { NoteType } from '#/lib/types';
+import { h, render as renderVNode } from 'preact';
 import { NOTICE_MIN_DURATION_MS } from './constants';
-import type { DamagedNote, DamagedNoteActions } from './damaged-note-actions';
+import type {
+  Candidate,
+  DamagedNote,
+  DamagedNoteActions,
+} from './damaged-note-actions';
 import type { ItemTable } from './moved-note-scan';
 import { notify } from './notices';
 
@@ -11,7 +18,7 @@ import { notify } from './notices';
 export interface NoticeTarget {
   /** The notice's own element. Obsidian detaches it once it is hidden. */
   containerEl: HTMLElement;
-  setMessage(message: string): unknown;
+  setMessage(message: string | DocumentFragment): unknown;
   hide(): void;
 }
 
@@ -273,8 +280,20 @@ function noteName(path: string): string {
   return file.endsWith('.md') ? file.slice(0, -'.md'.length) : file;
 }
 
-/** The kind of item each table holds, as a row of the notice names it. */
-const KIND_BY_TABLE: Readonly<Record<ItemTable, string>> = {
+/**
+ * Where a row points, said without the note's name, which the line above it
+ * already gives: its folder, or the vault's root.
+ */
+function noteWhere(path: string): string {
+  const cut = path.lastIndexOf('/');
+  return cut === -1 ? 'at the vault root' : `in ${path.slice(0, cut)}/`;
+}
+
+/**
+ * The kind of item each table holds, as a row of the notice names it, and as
+ * the type its icon and tint are drawn for.
+ */
+const KIND_BY_TABLE: Readonly<Record<ItemTable, NoteType>> = {
   article: 'article',
   snippet: 'snippet',
   srs_card: 'card',
@@ -282,25 +301,106 @@ const KIND_BY_TABLE: Readonly<Record<ItemTable, string>> = {
 
 /**
  * What the notice says above its rows, about `count` notes whose `ir-id` was
- * taken off or changed outside the plugin. What that costs differs by row (see
- * {@link damageText}), so the heading says only what happened.
+ * taken off or changed outside the plugin, or whose row moved away. It says
+ * only what happened: the rows say what can be done about it.
  */
 export function damagedNotesHeading(count: number): string {
   const notes = count === 1 ? 'an item note' : `${count} item notes`;
-  return `Incremental reading: the ir-id of ${notes} was removed or changed.`;
+  const where = count === 1 ? 'the note' : 'the notes';
+  return `Incremental reading: the ID of ${notes} was removed or changed in ${where}`;
 }
 
 /**
- * What a row says about its note: what it is, what became of its id, and what
- * that costs. A note with no id is still its row's by its path, so its review
- * data is still served; one claiming another id loses it on the next review.
+ * Name the note at `path` under `parent` as the queue would: its type's icon
+ * on its type's tint, then its name, the full path on hover for two notes of
+ * the same name.
  */
-function damageText({ table, change }: DamagedNote): string {
-  const kind = KIND_BY_TABLE[table];
-  return change === 'removed'
-    ? `${kind} · ir-id removed. It is still connected with its review data until it is moved or renamed.`
-    : `${kind} · ir-id changed. Restore it so it can be found in the database.`;
+function appendNoteLabel(parent: HTMLElement, path: string, table: ItemTable) {
+  const type = KIND_BY_TABLE[table];
+  const icon = parent.createSpan({
+    cls: 'ir-damaged-note-icon',
+    attr: { 'data-type': type },
+  });
+  renderVNode(h(TYPE_ICONS[type], {}), icon);
+  parent.createSpan({
+    cls: 'ir-damaged-note-name',
+    text: noteName(path),
+    attr: { 'aria-label': path },
+  });
 }
+
+/**
+ * The notice's message for `notes`: a lone note named in it, by its icon and
+ * name; several counted, each named on its own row instead.
+ */
+function damagedNotesMessage(
+  notes: readonly DamagedNote[]
+): string | DocumentFragment {
+  if (notes.length !== 1) return damagedNotesHeading(notes.length);
+  const [{ path, table }] = notes;
+  return createFragment((message) => {
+    message.append('Incremental reading: the ID of ');
+    appendNoteLabel(message.createSpan('ir-damaged-note-label'), path, table);
+    message.append(' was removed or changed in the note');
+  });
+}
+
+/**
+ * Whether a note's candidates are shown a block each. With one row to offer,
+ * what its button does goes without saying, and the heading already names
+ * the note; with two or more, the blocks are what tell the buttons apart, and
+ * a blocked row's block says which row its reason is about.
+ */
+const showsCandidateBlocks = ({ candidates }: DamagedNote) =>
+  candidates.length >= 2 || candidates.some(({ blocked }) => blocked !== null);
+
+/**
+ * What heads the block of the row `candidate` offers: its kind, and how it
+ * matches the note, at the note's path or by holding the id the note claims.
+ */
+export function candidateHeading({ by, table }: Candidate): string {
+  const kind = KIND_BY_TABLE[table];
+  const named = kind[0].toUpperCase() + kind.slice(1);
+  return by === 'path'
+    ? `${named} pointing to this path`
+    : `${named} matching this note's ID`;
+}
+
+/**
+ * The attributes that tell, on its block and on what it offers, which row a
+ * candidate is, and what blocks it, if anything.
+ */
+const candidateAttr = ({
+  by,
+  table,
+  id,
+  blocked,
+}: Candidate): Record<string, string> => ({
+  'data-by': by,
+  'data-table': table,
+  'data-id': id,
+  ...(blocked ? { 'data-blocked': blocked } : {}),
+});
+
+/**
+ * Why a row of `table` can't be re-associated with the note, said in the row
+ * of buttons where its Re-associate would be: its own note is still where it
+ * points, or another item is recorded at this note's path.
+ */
+export function blockedText(
+  blocked: NonNullable<Candidate['blocked']>,
+  table: ItemTable
+) {
+  return blocked === 'occupied'
+    ? `Can't re-associate; this ${KIND_BY_TABLE[table]} already has a note.`
+    : "Can't re-associate; another item is recorded at this note's path.";
+}
+
+/**
+ * What a listed note is told as, to tell whether it was told of already as
+ * it is now: one per note per load (see {@link DamagedNotesNotice.opened}).
+ */
+const toldAs = (note: DamagedNote) => JSON.stringify(note);
 
 export interface DamagedNotesNotice {
   /**
@@ -310,6 +410,26 @@ export interface DamagedNotesNotice {
    * Never rejects: a failed lookup is told of in the console.
    */
   report(paths: readonly string[]): Promise<void>;
+  /**
+   * Told that the note at `path` is now in front of the user (opened, its tab
+   * come to the front, or shown in review): list it if no live row holds it,
+   * once per load as it is now. Reopened as it was told of, it is left as
+   * it is, dismissed or not; changed since, its row is replaced, or a notice
+   * raised for it. Found whole, it is taken off. Never rejects: a failed
+   * lookup is told of in the console.
+   */
+  opened(path: string): Promise<void>;
+  /**
+   * Look up again the notes at `paths`, changed since (all the notice lists,
+   * without), as a note mended by hand or a database another device changed
+   * leaves them: each the notice lists is taken off once found whole, or
+   * its row redrawn; each told of this load and found whole is told of
+   * afresh when next opened damaged, dismissed or not; each come in front
+   * before the metadata cache read it is looked up as {@link opened} would
+   * have, once. Other notes are not looked up, and nothing else is raised.
+   * Never rejects: a failed lookup is told of in the console.
+   */
+  recheck(paths?: readonly string[]): Promise<void>;
   /** Hide the notice if it is up. For plugin unload. */
   dispose(): void;
 }
@@ -329,19 +449,27 @@ interface OpenDamagedNotes {
 }
 
 /**
- * One notice listing the notes whose `ir-id` was taken off or changed, a row
- * each, kept up until the user dismisses it: the edit isn't undone for them,
- * so it must not slip by. Notes reported while it is up are added to it rather
- * than stacking another, since Sync can deliver a damaged folder over several
- * passes.
+ * One notice listing the notes no live row holds by both path and `ir-id`
+ * (see `mismatchOf`), a row each, kept up until the user dismisses it: the
+ * edit isn't undone for them, so it must not slip by. Notes reported while it
+ * is up are added to it rather than stacking another, since Sync can deliver
+ * a damaged folder over several passes. Two things report them: a note damaged
+ * by a write on screen ({@link DamagedNotesNotice.report}), and a note coming
+ * in front of the user ({@link DamagedNotesNotice.opened}), which is how a
+ * note damaged by Sync or while the plugin was off is told of.
  *
- * Each row offers Open, so the user can look at the note, and Restore where
- * one live row sits at its path (see {@link DamagedNoteActions.restore}): the
- * plugin never puts an id back by itself, only from this button. Restore all
- * restores every note the notice holds that Restore can, listed or counted.
- * A note found whole again (restored, opened and found mended, or looked up
- * again with a later report) leaves the notice, which goes once it lists
- * nothing.
+ * Each row offers, per row the note could be re-associated with, a block of
+ * its own with Open, so the user can look at the note (for a row holding its
+ * id elsewhere, at the note where that row points, if one is there), and its
+ * Re-associate; a lone row to offer gets no block, only Open and its button.
+ * Where one live row sits at its path, its button is Restore (see
+ * {@link DamagedNoteActions.restore}), and any other row's re-associates it
+ * (see {@link DamagedNoteActions.reassociate}): the plugin never puts an id
+ * back by itself, only from these buttons. Restore all restores every note
+ * the notice holds that Restore can, listed or counted. A note found whole
+ * again (restored, opened and found mended, or looked up again with a later
+ * report) leaves the notice, which goes once it lists nothing, or once
+ * clicked away.
  */
 export function createDamagedNotesNotice(
   createNotice: NoticeFactory,
@@ -350,15 +478,37 @@ export function createDamagedNotesNotice(
   let open: OpenDamagedNotes | null = null;
   /** Bumped by `dispose`, so a lookup it overtook raises nothing. */
   let disposals = 0;
+  /** What each note listed this load was told as (see {@link toldAs}). */
+  const told = new Map<string, string>();
+  /**
+   * Notes come in front before the metadata cache read them, which read as no
+   * note: looked up again as it does (see {@link DamagedNotesNotice.recheck}).
+   */
+  const unreadInFront = new Set<string>();
 
   const onScreen = (state: OpenDamagedNotes) =>
     !state.dismissed && state.notice.containerEl.isConnected;
 
+  /** List `note` on `state`, in its place if it is listed already. */
+  const list = (state: OpenDamagedNotes, note: DamagedNote) => {
+    state.notes.set(note.path, note);
+    told.set(note.path, toldAs(note));
+  };
+
+  /**
+   * Take the note at `path` off `state`, found whole: told of afresh should
+   * it be damaged again.
+   */
+  const unlist = (state: OpenDamagedNotes, path: string) => {
+    state.notes.delete(path);
+    told.delete(path);
+  };
+
   /** Look the note at `path` up again, and list what it is now, if anything. */
   const refresh = async (state: OpenDamagedNotes, path: string) => {
     const [note] = await actions.describe([path]);
-    if (note) state.notes.set(path, note);
-    else state.notes.delete(path);
+    if (note) list(state, note);
+    else unlist(state, path);
   };
 
   const restoreOne = async (state: OpenDamagedNotes, path: string) => {
@@ -366,12 +516,38 @@ export function createDamagedNotesNotice(
     state.restoring.add(path);
     render(state);
     try {
-      if (await actions.restore(path)) state.notes.delete(path);
+      if (await actions.restore(path)) unlist(state, path);
       else await refresh(state, path);
     } catch (error) {
       console.error(
         `Incremental Reading - failed to restore the ir-id of ${path}:`,
         error
+      );
+    } finally {
+      state.restoring.delete(path);
+      render(state);
+    }
+  };
+
+  const reassociateOne = async (
+    state: OpenDamagedNotes,
+    path: string,
+    candidate: Candidate
+  ) => {
+    if (state.restoring.has(path)) return;
+    state.restoring.add(path);
+    render(state);
+    try {
+      if (await actions.reassociate(path, candidate)) unlist(state, path);
+      else await refresh(state, path);
+    } catch (error) {
+      console.error(
+        `Incremental Reading - failed to re-associate ${path}:`,
+        error
+      );
+      notify(
+        `Incremental reading: couldn't re-associate "${noteName(path)}". The console has the details.`,
+        { kind: 'error' }
       );
     } finally {
       state.restoring.delete(path);
@@ -406,6 +582,26 @@ export function createDamagedNotesNotice(
   };
 
   /**
+   * Open the note at `path`, where a row holding the note's id points, for
+   * the user to compare the note with. Not the note the notice lists, so
+   * nothing is looked up for it; only should it be gone by now is the listed
+   * note at `of` looked up again, since its row is then free to come here.
+   */
+  const openPointedAt = async (
+    state: OpenDamagedNotes,
+    of: string,
+    path: string
+  ) => {
+    try {
+      if (await actions.open(path)) return;
+      await refresh(state, of);
+    } catch (error) {
+      console.error(`Incremental Reading - failed to open ${path}:`, error);
+    }
+    render(state);
+  };
+
+  /**
    * A button that runs `run` and leaves the notice up. Obsidian's notice
    * hides on any click on it (undocumented: its constructor listens for
    * `click` on `containerEl`), so the click stops at the button.
@@ -415,14 +611,59 @@ export function createDamagedNotesNotice(
     text: string,
     cls: string[],
     disabled: boolean,
-    run: () => Promise<void>
+    run: () => void | Promise<void>,
+    attr?: Record<string, string>
   ) => {
-    const button = parent.createEl('button', { text, cls });
+    const button = parent.createEl('button', { text, cls, attr });
     button.disabled = disabled;
     button.addEventListener('click', (evt) => {
       evt.stopPropagation();
       void run();
     });
+  };
+
+  /**
+   * Add to `actions` what the row `candidate` offers the listed `note`: its
+   * Re-associate, Restore for the one row at the note's path, held off while
+   * `held`; or, when it can't be re-associated, why not.
+   */
+  const addOffer = (
+    actions: HTMLElement,
+    state: OpenDamagedNotes,
+    note: DamagedNote,
+    candidate: Candidate,
+    held: boolean
+  ) => {
+    const attr = candidateAttr(candidate);
+    if (candidate.blocked) {
+      actions.createSpan({
+        cls: 'ir-damaged-note-blocked',
+        text: blockedText(candidate.blocked, candidate.table),
+        attr,
+      });
+      return;
+    }
+    // The one row at its path is what Restore gives the note back to, and
+    // what Restore all counts
+    if (note.restorable && candidate.by === 'path') {
+      addButton(
+        actions,
+        'Re-associate',
+        ['ir-damaged-note-restore', 'mod-cta'],
+        held,
+        () => restoreOne(state, note.path),
+        attr
+      );
+    } else {
+      addButton(
+        actions,
+        'Re-associate',
+        ['ir-damaged-note-reassociate', 'mod-cta'],
+        held,
+        () => reassociateOne(state, note.path, candidate),
+        attr
+      );
+    }
   };
 
   /** Redraw the notice's rows from what it holds, or take it down if nothing. */
@@ -434,9 +675,9 @@ export function createDamagedNotesNotice(
       return;
     }
     const notes = [...state.notes.values()];
-    state.notice.setMessage(damagedNotesHeading(notes.length));
-    const list = state.listEl;
-    list.replaceChildren();
+    state.notice.setMessage(damagedNotesMessage(notes));
+    const listEl = state.listEl;
+    listEl.replaceChildren();
     state.allEl.replaceChildren();
     const busy = state.restoringAll || state.restoring.size > 0;
     if (notes.filter((note) => note.restorable).length >= 2) {
@@ -449,35 +690,82 @@ export function createDamagedNotesNotice(
       );
     }
     for (const note of notes.slice(0, DAMAGED_NOTES_LISTED)) {
-      const row = list.createDiv({
+      const row = listEl.createDiv({
         cls: 'ir-damaged-note',
-        attr: { 'data-path': note.path },
+        attr: { 'data-path': note.path, 'data-change': note.change },
       });
-      const info = row.createDiv('ir-damaged-note-info');
-      // The full path, for two notes of the same name
-      info.createDiv({
-        cls: 'ir-damaged-note-name',
-        text: noteName(note.path),
-        attr: { 'aria-label': note.path },
-      });
-      info.createDiv({ cls: 'ir-damaged-note-kind', text: damageText(note) });
-      const buttons = row.createDiv('ir-damaged-note-buttons');
-      addButton(buttons, 'Open', ['ir-damaged-note-open'], false, () =>
-        openOne(state, note.path)
-      );
-      if (note.restorable) {
-        addButton(
-          buttons,
-          'Restore',
-          ['ir-damaged-note-restore', 'mod-cta'],
-          state.restoringAll || state.restoring.has(note.path),
-          () => restoreOne(state, note.path)
+      // A lone note is named in the message above
+      if (notes.length > 1) {
+        appendNoteLabel(
+          row.createDiv('ir-damaged-note-title'),
+          note.path,
+          note.table
         );
+      }
+      const held = state.restoringAll || state.restoring.has(note.path);
+      const openNote = () => openOne(state, note.path);
+      if (!showsCandidateBlocks(note)) {
+        // A lone row to offer, or none: Open and its button right under the
+        // note, which the heading or the row's title names already
+        const actions = row.createDiv('ir-damaged-note-actions');
+        addButton(
+          actions,
+          'Open note',
+          ['ir-damaged-note-open'],
+          false,
+          openNote
+        );
+        for (const candidate of note.candidates) {
+          addOffer(actions, state, note, candidate, held);
+        }
+        continue;
+      }
+      // A block per row, each with its own buttons, so that no button or
+      // reason can be read as another row's
+      const blocks = row.createDiv('ir-damaged-note-candidates');
+      for (const candidate of note.candidates) {
+        const { by, blocked, reference } = candidate;
+        const block = blocks.createDiv({
+          cls: 'ir-damaged-note-candidate',
+          attr: candidateAttr(candidate),
+        });
+        block.createDiv({
+          cls: 'ir-damaged-note-candidate-heading',
+          text: candidateHeading(candidate),
+        });
+        block.createDiv({
+          cls: 'ir-damaged-note-candidate-name',
+          text: noteName(reference),
+          attr: { 'aria-label': reference },
+        });
+        if (by === 'id') {
+          block.createDiv({
+            cls: 'ir-damaged-note-candidate-path',
+            text: noteWhere(reference),
+          });
+        }
+        const actions = block.createDiv('ir-damaged-note-actions');
+        // A path row's note is the listed one; an id row's is the note where
+        // it points, the one this may be a copy of, when a file is there
+        if (by === 'path') {
+          addButton(
+            actions,
+            'Open note',
+            ['ir-damaged-note-open'],
+            false,
+            openNote
+          );
+        } else if (blocked === 'occupied') {
+          addButton(actions, 'Open note', ['ir-damaged-note-open'], false, () =>
+            openPointedAt(state, note.path, reference)
+          );
+        }
+        addOffer(actions, state, note, candidate, held);
       }
     }
     const rest = notes.length - DAMAGED_NOTES_LISTED;
     if (rest > 0) {
-      list.createDiv({ cls: 'ir-damaged-notes-more', text: `+${rest} more` });
+      listEl.createDiv({ cls: 'ir-damaged-notes-more', text: `+${rest} more` });
     }
   }
 
@@ -512,7 +800,7 @@ export function createDamagedNotesNotice(
     return state;
   };
 
-  return {
+  const api: DamagedNotesNotice = {
     async report(paths) {
       if (paths.length === 0) return;
       const disposalsBefore = disposals;
@@ -548,13 +836,99 @@ export function createDamagedNotesNotice(
         // Only what was held when the lookup began: a row added since was
         // looked up on its own
         for (const path of held) {
-          if (!found.has(path)) shown.notes.delete(path);
+          // A note the cache is re-reading reads as none, not as whole
+          if (!found.has(path) && !actions.unread(path)) unlist(shown, path);
         }
       }
       if (!shown && listed.length === 0) return;
       const state = shown ?? raise(listed.length);
-      for (const note of listed) state.notes.set(note.path, note);
+      for (const note of listed) list(state, note);
       render(state);
+    },
+    async opened(path) {
+      const disposalsBefore = disposals;
+      let note: DamagedNote | undefined;
+      try {
+        [note] = await actions.describe([path]);
+      } catch (error) {
+        console.error(
+          `Incremental Reading - failed to look up whether ${path} is its item's note:`,
+          error
+        );
+        return;
+      }
+      if (disposals !== disposalsBefore) return;
+      const shown = open && onScreen(open) ? open : null;
+      if (!note && actions.unread(path)) {
+        // Read as no note until the cache has read it, as it soon will
+        unreadInFront.add(path);
+        return;
+      }
+      if (!note) {
+        told.delete(path);
+        if (shown?.notes.has(path)) {
+          unlist(shown, path);
+          render(shown);
+        }
+        return;
+      }
+      // Once per note per load, as it is now: dismissed, it stays so until
+      // the note changes
+      if (told.get(path) === toldAs(note)) return;
+      const state = shown ?? raise(1);
+      list(state, note);
+      render(state);
+    },
+    async recheck(paths) {
+      // Read now, and looked up as it would have been had it been read then
+      const cameRead = (paths ?? []).filter((path) =>
+        unreadInFront.delete(path)
+      );
+      await Promise.all(cameRead.map((path) => api.opened(path)));
+      const disposalsBefore = disposals;
+      const shownBefore = open && onScreen(open) ? open : null;
+      const listed = shownBefore
+        ? [...shownBefore.notes.keys()].filter(
+            (path) => !paths || paths.includes(path)
+          )
+        : [];
+      // A note told of and dismissed, as Sync may mend it and damage it again
+      // without its being opened between
+      const quiet = (paths ?? []).filter(
+        (path) => told.has(path) && !listed.includes(path)
+      );
+      const asked = [...new Set([...listed, ...quiet])];
+      if (asked.length === 0) return;
+      let notes: DamagedNote[];
+      try {
+        notes = await actions.describe(asked);
+      } catch (error) {
+        console.error(
+          'Incremental Reading - failed to look up notes listed as no item note:',
+          error
+        );
+        return;
+      }
+      if (disposals !== disposalsBefore) return;
+      const found = new Map(notes.map((note) => [note.path, note]));
+      // A note the cache is re-reading reads as none, not as whole: left as
+      // it was until the change that ends the read rechecks it
+      const whole = asked.filter(
+        (path) => !found.has(path) && !actions.unread(path)
+      );
+      for (const path of whole) told.delete(path);
+      const shown = open && onScreen(open) ? open : null;
+      // Dismissed meanwhile, or replaced: nothing to redraw, and nothing to
+      // raise, as the user saw these already
+      if (!shown || shown !== shownBefore) return;
+      for (const path of listed) {
+        // Dropped meanwhile (re-associated, or found mended by Open)
+        if (!shown.notes.has(path)) continue;
+        const note = found.get(path);
+        if (note) list(shown, note);
+        else if (whole.includes(path)) unlist(shown, path);
+      }
+      render(shown);
     },
     dispose() {
       disposals += 1;
@@ -562,4 +936,5 @@ export function createDamagedNotesNotice(
       open = null;
     },
   };
+  return api;
 }

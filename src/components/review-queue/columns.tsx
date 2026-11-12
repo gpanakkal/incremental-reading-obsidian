@@ -164,6 +164,20 @@ function missingReference(path: string): ComponentChild {
 }
 
 /**
+ * The file cell of an item whose note is at its path without claiming its
+ * `ir-id`: flagged as a missing item is, with a badge of its own, since the
+ * note is there and opens as any other.
+ */
+function unlinkedReference(path: string): ComponentChild {
+  return (
+    <span className="ir-queue-missing-reference">
+      <span className="ir-queue-unlinked-badge">Unlinked</span>
+      {referencePath(path)}
+    </span>
+  );
+}
+
+/**
  * Format a due date as `2026/7/10` (local time, no zero padding). A null due
  * (row has no due time) renders as `--` rather than the epoch.
  */
@@ -288,7 +302,9 @@ export function renderQueueCells(
     reference:
       row.file === null
         ? missingReference(row.reference)
-        : referencePath(row.reference),
+        : row.unlinked
+          ? unlinkedReference(row.reference)
+          : referencePath(row.reference),
     parent: (
       <span>
         <span className="ir-queue-inline-label ir-queue-origin-label">
@@ -311,7 +327,11 @@ export function queueCellTitles(row: QueueRow): Record<QueueColumnKey, string> {
     due: formatQueueDate(row.due),
     scheduling: schedulingText(row),
     reference:
-      row.file === null ? `No file at ${row.reference}` : row.reference,
+      row.file === null
+        ? `No file at ${row.reference}`
+        : row.unlinked
+          ? `The note at ${row.reference} doesn't have this item's ir-id`
+          : row.reference,
     parent: `${originLabel(row.type)} ${row.parent ?? EMPTY_CELL}`,
   };
 }

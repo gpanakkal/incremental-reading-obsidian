@@ -8,8 +8,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ARTICLE_TAG, CARD_TAG, SNIPPET_TAG } from './constants';
 import {
   createDamagedNoteActions,
+  mismatchOf,
   reassociatedFrontmatter,
+  type Candidate,
   type DamagedNote,
+  type LiveRow,
 } from './damaged-note-actions';
 import {
   createDamagedNotesNotice,
@@ -18,7 +21,20 @@ import {
 } from './ir-id-warning-notice';
 import { createIrIdWatch } from './ir-id-watch';
 import { TAG_BY_TABLE } from './item-tags';
+import { claimedId } from './items/note-holding';
 import { ITEM_TABLES, type ItemTable } from './moved-note-scan';
+
+// lucide-react's icons use hooks, which under Vitest resolve against another
+// preact instance than the one the notice renders its type icon with (see the
+// react→preact aliasing TODO in vitest.config.ts): stand-ins that draw an
+// SVG, as the real ones do
+vi.mock('lucide-react', async () => {
+  const { h } = await import('preact');
+  return {
+    FileText: () => h('svg', { 'data-icon': 'file-text' }),
+    Scissors: () => h('svg', { 'data-icon': 'scissors' }),
+  };
+});
 
 // #region HELPERS
 
@@ -94,8 +110,17 @@ async function makeActions(
   const repo = await TestRepository.create();
   for (const { table, ...row } of rows) insertItemAt(repo, table, row);
   const vault = makeVault(notes);
-  const actions = createDamagedNoteActions({ repo, ...vault.deps });
-  return { repo, vault, actions };
+  const reassociateNote = vi.fn(
+    async (_file: TFile, _table: ItemTable, _id: string, _from?: string) => {}
+  );
+  const onRepaired = vi.fn((_path: string) => {});
+  const actions = createDamagedNoteActions({
+    repo,
+    ...vault.deps,
+    reassociateNote,
+    onRepaired,
+  });
+  return { repo, vault, actions, reassociateNote, onRepaired };
 }
 
 const PATHS = ['notes/one.md', 'notes/two.md', 'three.md', 'copy.md'];
@@ -189,27 +214,45 @@ const liveAt = (rows: readonly StoredRow[], path: string) =>
   );
 
 /**
- * What became of the `ir-id` of a note at `path`, as the rows have it:
- * nothing to tell (null) unless a live row is at its path. No id at all is
- * one taken off; an id other than a live row's there is one changed. Tags
- * play no part.
+ * What became of the `ir-id` of a note at `path` as the rows have it, the
+ * candidates as {@link mismatchOf} finds them over the live rows (it has tests
+ * of its own): nothing to tell (null) for a note one of them holds, or none
+ * of them could be re-associated with. A note with no row at its path is one
+ * whose row moved away; else no id at all is one taken off, and any other
+ * claim one changed. Tags play no part.
  */
 function expectedDamage(
   rows: readonly StoredRow[],
-  path: string,
-  frontmatter: Frontmatter | undefined
+  notes: Record<string, Frontmatter | undefined>,
+  path: string
 ): DamagedNote | null {
-  const live = liveAt(rows, path);
-  if (live.length === 0) return null;
-  const irId = frontmatter?.['ir-id'];
-  const restorable = live.length === 1;
-  if (!irId) {
-    return { path, table: live[0].table, change: 'removed', restorable };
-  }
-  return live.some((row) => row.id !== irId)
-    ? { path, table: live[0].table, change: 'changed', restorable }
-    : null;
+  const irId = notes[path]?.['ir-id'];
+  const live = ITEM_TABLES.flatMap((table) =>
+    rows.filter((row) => row.table === table && !row.deleted)
+  );
+  const candidates = mismatchOf(
+    path,
+    claimedId(irId) ?? null,
+    live.map(({ table, id, reference }) => ({ table, id, reference })),
+    (reference) => reference in notes
+  );
+  if (!candidates) return null;
+  const atPath = candidates.filter((candidate) => candidate.by === 'path');
+  return {
+    path,
+    table: (atPath[0] ?? candidates[0]).table,
+    change: atPath.length === 0 ? 'moved' : irId ? 'changed' : 'removed',
+    restorable: atPath.length === 1,
+    candidates,
+  };
 }
+
+/** A candidate at the note's path `path`, as {@link mismatchOf} lists one. */
+const atPathCandidate = (
+  path: string,
+  table: ItemTable,
+  id: string
+): Candidate => ({ by: 'path', table, id, reference: path, blocked: null });
 
 /** Type tags, plain words and lookalikes, as a hand-kept list holds them. */
 const plainTagsArb: fc.Arbitrary<string[] | undefined> = fc.option(
@@ -275,9 +318,108 @@ afterEach(() => {
   document.body.replaceChildren();
 });
 
+/** Paths a note or row may be at, and ids; few, so they collide. */
+const MISMATCH_PATHS = ['a.md', 'b.md', 'c.md'];
+const MISMATCH_IDS = ['i1', 'i2', 'i3'];
+
+/**
+ * Live rows of any table over {@link MISMATCH_PATHS} and {@link MISMATCH_IDS},
+ * unconstrained: broader than the schema allows, which repeats neither an id
+ * nor a reference within a table.
+ */
+const liveRowsArb: fc.Arbitrary<LiveRow[]> = fc.array(
+  fc.record({
+    table: fc.constantFrom(...ITEM_TABLES),
+    id: fc.constantFrom(...MISMATCH_IDS),
+    reference: fc.constantFrom(...MISMATCH_PATHS),
+  }),
+  { maxLength: 6 }
+);
+
+describe('mismatchOf', () => {
+  it("lists every row at the note's path, then every row holding its claim elsewhere, unless a row at its path holds that claim or nothing could be re-associated", () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom(...MISMATCH_PATHS),
+        fc.option(fc.constantFrom(...MISMATCH_IDS, 'other'), { nil: null }),
+        liveRowsArb,
+        fc.subarray(MISMATCH_PATHS),
+        (path, claim, rows, files) => {
+          const fileAt = (reference: string) => files.includes(reference);
+
+          const found = mismatchOf(path, claim, rows, fileAt);
+
+          const atPath = rows.filter((row) => row.reference === path);
+          const elsewhere = rows.filter(
+            (row) =>
+              claim !== null && row.id === claim && row.reference !== path
+          );
+          const held = atPath.some((row) => row.id === claim);
+          const movable = elsewhere.some((row) => !fileAt(row.reference));
+          if (held || (atPath.length === 0 && !movable)) {
+            expect(found).toBeNull();
+            return;
+          }
+          expect(found).toStrictEqual([
+            ...atPath.map((row) => ({ ...row, by: 'path', blocked: null })),
+            ...elsewhere.map((row) => ({
+              ...row,
+              by: 'id',
+              blocked: fileAt(row.reference)
+                ? 'occupied'
+                : atPath.length > 0
+                  ? 'held'
+                  : null,
+            })),
+          ]);
+        }
+      )
+    );
+  });
+
+  it('offers both rows of two tables sharing the path of a note neither holds, and nothing once either does', () => {
+    fc.assert(
+      fc.property(
+        fc.uniqueArray(fc.constantFrom(...ITEM_TABLES), {
+          minLength: 2,
+          maxLength: 2,
+        }),
+        fc.constantFrom(null, 'other', 'i1', 'i2'),
+        ([first, second], claim) => {
+          const rows: LiveRow[] = [
+            { table: first, id: 'i1', reference: 'a.md' },
+            { table: second, id: 'i2', reference: 'a.md' },
+          ];
+
+          const found = mismatchOf('a.md', claim, rows, () => true);
+
+          if (claim === 'i1' || claim === 'i2') expect(found).toBeNull();
+          else {
+            expect(found?.map(({ table, by }) => [table, by])).toStrictEqual([
+              [first, 'path'],
+              [second, 'path'],
+            ]);
+          }
+        }
+      )
+    );
+  });
+
+  it('says nothing of a copy, a note claiming an id whose row points where a file is, with no row at its path', () => {
+    expect(
+      mismatchOf(
+        'copy.md',
+        'i1',
+        [{ table: 'article', id: 'i1', reference: 'a.md' }],
+        () => true
+      )
+    ).toBeNull();
+  });
+});
+
 describe('createDamagedNoteActions', () => {
   describe('describe', () => {
-    it('answers, for each note, whether its ir-id was taken off or changed and the table of the row at its path, whatever its tags', async () => {
+    it('answers, for each note no live row holds, whether its ir-id was taken off or changed or its row moved away, the table of the row at its path, and the rows it could be re-associated with, whatever its tags', async () => {
       await fc.assert(
         fc.asyncProperty(rowsArb, notesArb, async (rows, notes) => {
           const { actions } = await makeActions(rows, notes);
@@ -286,7 +428,7 @@ describe('createDamagedNoteActions', () => {
 
           const expected = PATHS.flatMap((path) => {
             if (!(path in notes)) return [];
-            const damage = expectedDamage(rows, path, notes[path]);
+            const damage = expectedDamage(rows, notes, path);
             return damage ? [damage] : [];
           });
           expect(described).toStrictEqual(expected);
@@ -310,7 +452,13 @@ describe('createDamagedNoteActions', () => {
             );
 
             expect(await actions.describe(['a.md'])).toStrictEqual([
-              { path: 'a.md', table, change: 'removed', restorable: true },
+              {
+                path: 'a.md',
+                table,
+                change: 'removed',
+                restorable: true,
+                candidates: [atPathCandidate('a.md', table, 'i1')],
+              },
             ]);
           }
         )
@@ -325,6 +473,229 @@ describe('createDamagedNoteActions', () => {
       vault.parsing.add('a.md');
 
       expect(await actions.describe(['a.md'])).toStrictEqual([]);
+    });
+
+    it('passes over a file with no frontmatter at a live row, a PDF, which holds the row by its path', async () => {
+      const { vault, actions } = await makeActions(
+        [{ table: 'article', id: 'i1', reference: 'a.pdf', deleted: false }],
+        { 'a.pdf': undefined }
+      );
+      (vault.fileAt('a.pdf') as { extension: string }).extension = 'pdf';
+
+      expect(await actions.describe(['a.pdf'])).toStrictEqual([]);
+    });
+
+    it("lists the row holding the note's id elsewhere beside the row at its path, no action for it while a file is where it points, and alone for a note whose row moved away", async () => {
+      const { actions } = await makeActions(
+        [
+          { table: 'article', id: 'i1', reference: 'a.md', deleted: false },
+          { table: 'snippet', id: 'i2', reference: 'b.md', deleted: false },
+          { table: 'srs_card', id: 'i3', reference: 'c.md', deleted: false },
+        ],
+        { 'a.md': { 'ir-id': 'i2' }, 'b.md': {}, 'd.md': { 'ir-id': 'i3' } }
+      );
+
+      expect(await actions.describe(['a.md', 'd.md'])).toStrictEqual([
+        {
+          path: 'a.md',
+          table: 'article',
+          change: 'changed',
+          restorable: true,
+          candidates: [
+            atPathCandidate('a.md', 'article', 'i1'),
+            {
+              by: 'id',
+              table: 'snippet',
+              id: 'i2',
+              reference: 'b.md',
+              blocked: 'occupied',
+            },
+          ],
+        },
+        {
+          path: 'd.md',
+          table: 'srs_card',
+          change: 'moved',
+          restorable: false,
+          candidates: [
+            {
+              by: 'id',
+              table: 'srs_card',
+              id: 'i3',
+              reference: 'c.md',
+              blocked: null,
+            },
+          ],
+        },
+      ]);
+    });
+  });
+
+  describe('unread', () => {
+    it('is true of a note the metadata cache has not read yet, and false of one it has or of no note', async () => {
+      const { vault, actions } = await makeActions(
+        [{ table: 'article', id: 'i1', reference: 'a.md', deleted: false }],
+        { 'a.md': {}, 'b.md': { 'ir-id': 'i1' } }
+      );
+      vault.parsing.add('a.md');
+
+      expect(
+        ['a.md', 'b.md', 'gone.md'].map((path) => actions.unread(path))
+      ).toStrictEqual([true, false, false]);
+    });
+  });
+
+  describe('reassociate', () => {
+    it("writes the id of the path row chosen of two sharing the note's path into it, through the item layer, and tells of the repair", async () => {
+      const { actions, vault, reassociateNote, onRepaired } = await makeActions(
+        [
+          { table: 'article', id: 'i1', reference: 'a.md', deleted: false },
+          { table: 'snippet', id: 'i2', reference: 'a.md', deleted: false },
+        ],
+        { 'a.md': {} }
+      );
+
+      expect(
+        await actions.reassociate(
+          'a.md',
+          atPathCandidate('a.md', 'snippet', 'i2')
+        )
+      ).toBe(true);
+
+      expect(reassociateNote).toHaveBeenCalledExactlyOnceWith(
+        vault.fileAt('a.md'),
+        'snippet',
+        'i2',
+        'a.md'
+      );
+      expect(onRepaired).toHaveBeenCalledExactlyOnceWith('a.md');
+    });
+
+    it("brings the row holding the note's id here from where it points, when no file is there and no live row holds this path", async () => {
+      const { actions, vault, reassociateNote, onRepaired } = await makeActions(
+        [{ table: 'article', id: 'i1', reference: 'old.md', deleted: false }],
+        { 'new.md': { 'ir-id': 'i1' } }
+      );
+
+      expect(
+        await actions.reassociate('new.md', {
+          by: 'id',
+          table: 'article',
+          id: 'i1',
+          reference: 'old.md',
+          blocked: null,
+        })
+      ).toBe(true);
+
+      expect(reassociateNote).toHaveBeenCalledExactlyOnceWith(
+        vault.fileAt('new.md'),
+        'article',
+        'i1',
+        'old.md'
+      );
+      expect(onRepaired).toHaveBeenCalledExactlyOnceWith('new.md');
+    });
+
+    it("does nothing, answering false, for a row it would not offer now: blocked, not at the note's path, holding the note already, or for a note gone or mid-parse", async () => {
+      const { actions, vault, reassociateNote, onRepaired } = await makeActions(
+        [
+          { table: 'article', id: 'i1', reference: 'a.md', deleted: false },
+          { table: 'snippet', id: 'i2', reference: 'b.md', deleted: false },
+          { table: 'srs_card', id: 'i3', reference: 'c.md', deleted: false },
+        ],
+        {
+          'a.md': { 'ir-id': 'i2' },
+          'b.md': {},
+          'c.md': { 'ir-id': 'i3' },
+          'p.md': {},
+        }
+      );
+      vault.parsing.add('p.md');
+
+      const asked: [string, Candidate][] = [
+        // A file is at its reference, and the article holds a.md
+        [
+          'a.md',
+          {
+            by: 'id',
+            table: 'snippet',
+            id: 'i2',
+            reference: 'b.md',
+            blocked: null,
+          },
+        ],
+        ['a.md', atPathCandidate('a.md', 'snippet', 'i2')],
+        // Each one field off the article at a.md's path
+        [
+          'a.md',
+          {
+            ...atPathCandidate('a.md', 'article', 'i1'),
+            by: 'id',
+          },
+        ],
+        ['a.md', atPathCandidate('a.md', 'snippet', 'i1')],
+        ['a.md', atPathCandidate('a.md', 'article', 'i9')],
+        ['c.md', atPathCandidate('c.md', 'srs_card', 'i3')],
+        ['gone.md', atPathCandidate('gone.md', 'article', 'i1')],
+        ['p.md', atPathCandidate('p.md', 'article', 'i1')],
+      ];
+      for (const [path, candidate] of asked) {
+        expect(await actions.reassociate(path, candidate)).toBe(false);
+      }
+
+      expect(reassociateNote).not.toHaveBeenCalled();
+      expect(onRepaired).not.toHaveBeenCalled();
+    });
+
+    it('writes nothing while writes are refused, and says why', async () => {
+      const notify = vi.spyOn(Obsidian, 'notify').mockImplementation(() => {});
+      const { repo, actions, reassociateNote } = await makeActions(
+        [{ table: 'article', id: 'i1', reference: 'a.md', deleted: false }],
+        { 'a.md': {} }
+      );
+      repo.refuseWrites();
+
+      expect(
+        await actions.reassociate(
+          'a.md',
+          atPathCandidate('a.md', 'article', 'i1')
+        )
+      ).toBe(false);
+
+      expect(reassociateNote).not.toHaveBeenCalled();
+      expect(notify).toHaveBeenCalledOnce();
+    });
+
+    it('writes nothing when the row has left the path by the time the database settles', async () => {
+      const { repo, actions, reassociateNote } = await makeActions(
+        [{ table: 'article', id: 'i1', reference: 'a.md', deleted: false }],
+        { 'a.md': {} }
+      );
+      const release = repo.holdMerging();
+      const done = actions.reassociate(
+        'a.md',
+        atPathCandidate('a.md', 'article', 'i1')
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      repo.mutate(`UPDATE article SET reference = 'c.md' WHERE id = 'i1'`);
+      release();
+
+      expect(await done).toBe(false);
+      expect(reassociateNote).not.toHaveBeenCalled();
+    });
+
+    it('rejects with what the item layer threw, telling of no repair', async () => {
+      const { actions, reassociateNote, onRepaired } = await makeActions(
+        [{ table: 'article', id: 'i1', reference: 'a.md', deleted: false }],
+        { 'a.md': {} }
+      );
+      const failure = new Error('write failed');
+      reassociateNote.mockRejectedValueOnce(failure);
+
+      await expect(
+        actions.reassociate('a.md', atPathCandidate('a.md', 'article', 'i1'))
+      ).rejects.toBe(failure);
+      expect(onRepaired).not.toHaveBeenCalled();
     });
   });
 
@@ -374,6 +745,28 @@ describe('createDamagedNoteActions', () => {
           }
         )
       );
+    });
+
+    it('tells of the repair of a note it wrote, and of none when it wrote nothing', async () => {
+      const { vault, actions, onRepaired } = await makeActions(
+        [
+          { table: 'article', id: 'i1', reference: 'a.md', deleted: false },
+          { table: 'article', id: 'i2', reference: 'b.md', deleted: false },
+        ],
+        { 'a.md': {}, 'b.md': { 'ir-id': 'i2' } }
+      );
+
+      expect(await actions.restore('a.md')).toBe(true);
+      expect(onRepaired).toHaveBeenCalledExactlyOnceWith('a.md');
+      onRepaired.mockClear();
+      vault.deps.fileManager.processFrontMatter.mockResolvedValueOnce(
+        undefined
+      );
+      vault.notes.set('a.md', {});
+
+      expect(await actions.restore('a.md')).toBe(false);
+      expect(await actions.restore('b.md')).toBe(true);
+      expect(onRepaired).not.toHaveBeenCalled();
     });
 
     it('restores a note that lost its id and one that claims another alike', async () => {
@@ -713,13 +1106,6 @@ describe('a note given its id back by Restore, as the rest of the plugin reads i
       mtime(OTHER),
     ]);
     const { app } = vault;
-    const actions = createDamagedNoteActions({
-      repo,
-      vault: app.vault,
-      metadataCache: app.metadataCache,
-      fileManager: app.fileManager,
-      workspace: { getLeaf: vi.fn() },
-    });
     const manager = new ArticleManager(
       {
         app: { ...app, workspace: { trigger: vi.fn() } },
@@ -727,6 +1113,15 @@ describe('a note given its id back by Restore, as the rest of the plugin reads i
       } as never,
       repo
     );
+    const actions = createDamagedNoteActions({
+      repo,
+      vault: app.vault,
+      metadataCache: app.metadataCache,
+      fileManager: app.fileManager,
+      workspace: { getLeaf: vi.fn() },
+      reassociateNote: (...args) => manager.reassociateNote(...args),
+      onRepaired: vi.fn(),
+    });
     const onDamage = vi.fn();
     const watch = createIrIdWatch({
       repo,

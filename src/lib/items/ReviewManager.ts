@@ -76,7 +76,7 @@ import {
 } from './ArticleManager';
 import { type CardSelection, CardManager } from './CardManager';
 import { type FileMove, followSourceLinks } from './follow-source-links';
-import { claimedId } from './note-holding';
+import { claimedId, unlinkedFrom } from './note-holding';
 import { deleteRowStatements, NOT_PURGED, purgedReference } from './row-delete';
 import { SnippetManager } from './SnippetManager';
 
@@ -453,9 +453,9 @@ export default class ReviewManager {
    * no tombstone set or lifted, no fuzz filled in, and no notice shown. For
    * asking often with no review open.
    *
-   * It reads only the rows, so a due row whose note claims another item's id
-   * counts here though {@link getDue} drops it (marking it deleted, after
-   * which neither counts it).
+   * It reads only the rows, so a due row whose note proves it gone (see
+   * `ItemManager.reconcileNote`) counts here though {@link getDue} drops it
+   * (marking it deleted, after which neither counts it).
    * @throws if a table of an included type cannot be read
    */
   async anyDue(
@@ -556,6 +556,7 @@ export default class ReviewManager {
       id: row.id,
       type: 'article',
       file,
+      unlinked: unlinkedFrom(file, row.id, this.app),
       due: row.due === null ? null : new Date(row.due + (row.due_fuzz ?? 0)),
       reference: row.reference,
       parent: file && this.#articleSource(file),
@@ -573,6 +574,7 @@ export default class ReviewManager {
       id: row.id,
       type: 'snippet',
       file,
+      unlinked: unlinkedFrom(file, row.id, this.app),
       due: row.due === null ? null : new Date(row.due + (row.due_fuzz ?? 0)),
       reference: row.reference,
       parent: (row.parent && parentPaths.get(row.parent)) || null,
@@ -590,6 +592,7 @@ export default class ReviewManager {
       id: row.id,
       type: 'card',
       file,
+      unlinked: unlinkedFrom(file, row.id, this.app),
       due: new Date(row.due),
       reference: row.reference,
       parent: (row.parent && parentPaths.get(row.parent)) || null,
@@ -826,7 +829,9 @@ export default class ReviewManager {
   /**
    * The item with id `itemId` as review shows it: with its file, or as a
    * {@link MissingItem} when a live row has no file at its reference. `null`
-   * for no such row, a tombstone, or a note that belongs to another item.
+   * for no such row, a tombstone with no file, or a row its note proves gone.
+   * A note claiming another id, or none, is still the row's to show: the
+   * queue flags such a row as unlinked, and a click on it opens the note.
    */
   async getItemOrMissingFromId(
     itemId: string
