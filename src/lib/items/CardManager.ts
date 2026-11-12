@@ -1300,19 +1300,25 @@ export class CardManager extends ItemManager {
   /**
    * Undo the review `reviewRowId` of `card`: take it back with the later
    * reviews this device made of it, and give the card the state the reviews
-   * left imply (see `cardAfterUndo`), dismissed or not as it was, all in one
-   * transaction. A dismissal put back by a write of its own could be lost on
-   * its own, leaving a card that was dismissed back in the queue.
+   * left imply (see `cardAfterUndo`), dismissed again if the review took its
+   * dismissal away, all in one transaction. A dismissal put back by a write
+   * of its own could be lost on its own, leaving a card that was dismissed
+   * back in the queue.
    * @param card the card as it was before the review
-   * @throws when the review is no live review of the card, undone already
+   * @throws when the review is no live review of the card, undone already,
+   *   or the card was deleted for good: nothing is written then
    */
   async rollbackBeforeReview(card: ISRSCardDisplay, reviewRowId: string) {
     const taken = await this.repo.transaction(async () => {
       const plan = await this.takeBackReview('srs_card', card.id, reviewRowId);
-      const [{ created_at }] = (await this.repo.query(
-        `SELECT created_at FROM srs_card WHERE id = $1`,
+      const [held] = (await this.repo.query(
+        `SELECT created_at FROM srs_card WHERE id = $1 AND ${NOT_PURGED}`,
         [card.id]
-      )) as unknown as Pick<SRSCardRow, 'created_at'>[];
+      )) as unknown as (Pick<SRSCardRow, 'created_at'> | undefined)[];
+      // Deleted for good on another device, whose purge never saw the grade:
+      // nothing is written, and the grade stays as it is
+      if (!held) throw new Error(`srs_card ${card.id} was deleted for good`);
+      const { created_at } = held;
       const updatedCard = cardAfterUndo(
         plan,
         CardManager.displayToRow(card),
@@ -1327,10 +1333,13 @@ export class CardManager extends ItemManager {
         `scheduled_days = $6`,
         `learning_steps = $7`,
         `reps = $8, lapses = $9`,
-        `state = $10, dismissed = $11`,
+        // Dismissed again only when the grade took a dismissal away: one
+        // made since, on another device, stays
+        `state = $10, dismissed = CASE WHEN $11 THEN 1 ELSE dismissed END`,
       ];
       updateQuery += columnUpdateSegments.join(', ');
-      updateQuery += ` WHERE id = $12`;
+      // A row deleted for good is never written again
+      updateQuery += ` WHERE id = $12 AND ${NOT_PURGED}`;
       const updateParams = [
         updatedCard.due,
         updatedCard.last_review,

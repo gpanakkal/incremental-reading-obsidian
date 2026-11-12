@@ -977,6 +977,15 @@ export class SQLJSRepository implements SQLiteRepository {
     await restore;
   }
 
+  /**
+   * The restore epoch of the database held now: moved on by
+   * {@link restoreBackup}, and by taking on a file another device restored
+   * (see `#answerIncoming`). {@link NEVER_RESTORED} before one is loaded.
+   */
+  restoreEpoch(): number {
+    return this.db ? readRestoreEpoch(this.db) : NEVER_RESTORED;
+  }
+
   /** Answer, once a restore ends, a change to the file that came meanwhile. */
   #afterRestore(): Promise<void> | undefined {
     this.#reloading = null;

@@ -983,7 +983,10 @@ export class ItemManager {
    * Undo review `reviewId` of `original`, the text as it was before it: take
    * it back with the later reviews this device made of it, and give it the
    * schedule the reviews left imply under its rules now (see
-   * `textAfterUndo`), dismissed or not as it was, all in one transaction.
+   * `textAfterUndo`), dismissed again if the review took its dismissal away,
+   * all in one transaction.
+   * @throws when the review is no live review of the text, undone already,
+   *   or the text was deleted for good: nothing is written then
    */
   protected async undoTextReview(
     table: 'article' | 'snippet',
@@ -993,17 +996,24 @@ export class ItemManager {
     const taken = await this.repo.transaction(async () => {
       const plan = await this.takeBackReview(table, original.id, reviewId);
       const [now] = (await this.repo.query(
-        `SELECT * FROM ${table} WHERE id = $1`,
+        `SELECT * FROM ${table} WHERE id = $1 AND ${NOT_PURGED}`,
         [original.id]
-      )) as unknown as TextRules[];
+      )) as unknown as (TextRules | undefined)[];
+      // Deleted for good on another device, whose purge never saw the review:
+      // nothing is written, and the review stays as it is
+      if (!now) throw new Error(`${table} ${original.id} was deleted for good`);
       const { interval, due, due_fuzz } = textAfterUndo(
         plan,
         original,
         now,
         this.plugin.settings
       );
+      // Dismissed again only when the review took a dismissal away: one
+      // made since, on another device, stays. A row deleted for good is
+      // never written again.
       await this.repo.mutate(
-        `UPDATE ${table} SET dismissed = $1, due = $2, interval = $3, due_fuzz = $4 WHERE id = $5`,
+        `UPDATE ${table} SET dismissed = CASE WHEN $1 THEN 1 ELSE dismissed END, ` +
+          `due = $2, interval = $3, due_fuzz = $4 WHERE id = $5 AND ${NOT_PURGED}`,
         [original.dismissed, due, interval, due_fuzz, original.id]
       );
       return plan.taken;

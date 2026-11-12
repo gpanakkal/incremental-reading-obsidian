@@ -153,6 +153,12 @@ export type ActionStackEntry = {
    * while writes are refused; any other is held until they aren't.
    */
   writes?: boolean;
+  /**
+   * The database's restore epoch when the action was made, set as it is
+   * pushed (see `Actions._pushUndo`). An undo that writes never runs at
+   * another: a restore since replaced the rows it would write.
+   */
+  restoreEpoch?: number;
 };
 
 /**
@@ -438,7 +444,11 @@ export class Actions {
       item,
       description: `dismissing "${itemName(item)}"`,
       undo: async () => {
-        await this.plugin.reviewManager.unDismissItem(item);
+        // No row left to lift it from: deleted for good meanwhile, as on
+        // another device
+        if (!(await this.plugin.reviewManager.unDismissItem(item))) {
+          return 'failed';
+        }
         await invalidateItemQuery(item.data.id);
         if (wasBeingReviewed) this._returnToItem(item);
       },
@@ -1326,6 +1336,19 @@ export class Actions {
       Obsidian.notify('Already undone');
       return;
     }
+    // After the wait, which may have taken on another device's restored file
+    if (
+      actionEntry.writes !== false &&
+      actionEntry.restoreEpoch !== this.plugin.reviewManager.repo.restoreEpoch()
+    ) {
+      this.undoStack.splice(at, 1);
+      this.emitter.emit();
+      Obsidian.notify(
+        `Can't undo ${actionEntry.description}: the database was restored since`,
+        { kind: 'error' }
+      );
+      return;
+    }
     this.undoStack.splice(at, 1);
     // Emitted before the reversal runs, not after: the entry is already off the
     // stack, and an undo that throws partway would otherwise leave subscribers
@@ -1577,9 +1600,12 @@ export class Actions {
   /**
    * Record an undoable action. Every push goes through here: the stack is a
    * plain array subscribers cannot watch, so a push that skips the emit leaves
-   * the undo button showing the action before it.
+   * the undo button showing the action before it. The entry itself is kept,
+   * not a copy, so whoever holds it can still undo it by it (see
+   * {@link undoEntry}).
    */
   _pushUndo = (entry: ActionStackEntry) => {
+    entry.restoreEpoch = this.plugin.reviewManager.repo.restoreEpoch();
     this.undoStack.push(entry);
     this.emitter.emit();
   };

@@ -29,7 +29,11 @@ import {
   type MockInstance,
 } from 'vitest';
 import { BulkMutateError } from './BulkMutateError';
-import { KNOWN_RESTORE_EPOCH_KEY, readRestoreEpoch } from './restore-epoch';
+import {
+  KNOWN_RESTORE_EPOCH_KEY,
+  NEVER_RESTORED,
+  readRestoreEpoch,
+} from './restore-epoch';
 import { backupFileName, parseBackupName, type BackupKind } from './retention';
 import * as rowMerge from './row-merge';
 import { disarmRowStamps } from './row-stamps';
@@ -9718,5 +9722,36 @@ describe('restoreBackup', () => {
       repo.dispose();
       other.dispose();
     }
+  });
+});
+
+describe('restoreEpoch', () => {
+  it('property: answers the restore epoch of the database it holds', async () => {
+    await fc.assert(
+      fc.asyncProperty(epochArb, async (epoch) => {
+        const files = new Map([
+          [DATABASE_FILE_PATH, await atEpoch(await dbFileWith(['a']), epoch)],
+        ]);
+        const repo = await startRepo(
+          withStorage(makeVault(INDEXED, files).app)
+        );
+        try {
+          expect(repo.restoreEpoch()).toBe(epoch);
+        } finally {
+          repo.dispose();
+        }
+      }),
+      { numRuns: 20 }
+    );
+  });
+
+  it('answers never restored once it holds no database', async () => {
+    const files = new Map([
+      [DATABASE_FILE_PATH, await atEpoch(await dbFileWith(['a']), 5)],
+    ]);
+    const repo = await startRepo(withStorage(makeVault(INDEXED, files).app));
+    repo.dispose();
+
+    expect(repo.restoreEpoch()).toBe(NEVER_RESTORED);
   });
 });
