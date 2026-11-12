@@ -7,6 +7,7 @@ import {
   heldClaim,
   heldRowOf,
   holdingOf,
+  unlinkedFrom,
   type IdHolder,
 } from './note-holding';
 
@@ -73,6 +74,50 @@ describe('heldClaim', () => {
 
           expect(heldClaim(vault.files.get(path)!, vault.app as never)).toBe(
             claimed === undefined && extension === 'md' ? null : claimed
+          );
+        }
+      )
+    );
+  });
+});
+
+describe('unlinkedFrom', () => {
+  it("flags a note claiming anything but the row's id, none included, and never a missing file, one with no frontmatter, or one the cache has not read yet", () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom('md', 'pdf'),
+        fc.boolean(),
+        fc.string({ minLength: 1, maxLength: 4 }),
+        fc.option(
+          fc.option(
+            fc.oneof(
+              fc.anything(),
+              fc.constantFrom<unknown>('x', 7, '7', true)
+            ),
+            { nil: undefined }
+          ),
+          { nil: null }
+        ),
+        fc.boolean(),
+        (extension, present, id, irId, claimsRow) => {
+          const path = `notes/a.${extension}`;
+          const claim: unknown = claimsRow ? id : irId;
+          // `null`: no cache entry; `undefined`: frontmatter with no ir-id
+          const vault = makeLinkVault({
+            [path]:
+              claim === null
+                ? null
+                : claim === undefined
+                  ? {}
+                  : { 'ir-id': claim },
+          });
+          const file = present ? vault.files.get(path)! : null;
+          const claimed = claimedId(claim ?? undefined);
+
+          // A note not read yet, as one just made is, is no note to flag:
+          // the queue would keep the flag until its next refetch
+          expect(unlinkedFrom(file, id, vault.app as never)).toBe(
+            present && extension === 'md' && claim !== null && claimed !== id
           );
         }
       )

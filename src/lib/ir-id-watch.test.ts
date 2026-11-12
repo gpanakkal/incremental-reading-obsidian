@@ -44,6 +44,18 @@ import { type Holder, ITEM_TABLES, type ItemTable } from './moved-note-scan';
 import { MERGE_WAIT_MS } from './readiness';
 import type { Readiness } from './types';
 
+// lucide-react's icons use hooks, which under Vitest resolve against another
+// preact instance than the one the notice renders its type icon with (see the
+// react→preact aliasing TODO in vitest.config.ts): stand-ins that draw an
+// SVG, as the real ones do
+vi.mock('lucide-react', async () => {
+  const { h } = await import('preact');
+  return {
+    FileText: () => h('svg', { 'data-icon': 'file-text' }),
+    Scissors: () => h('svg', { 'data-icon': 'scissors' }),
+  };
+});
+
 // #region HELPERS
 
 /** An item row as the database holds it. */
@@ -622,6 +634,8 @@ describe('createIrIdWatch', () => {
           metadataCache: harness.vault.metadataCache,
           fileManager: { processFrontMatter: vi.fn() },
           workspace: { getLeaf: vi.fn() },
+          reassociateNote: vi.fn(),
+          onRepaired: vi.fn(),
         })
       );
       report = (paths) => notice.report(paths);

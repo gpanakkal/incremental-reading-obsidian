@@ -28,6 +28,7 @@ function makeQueueRow(overrides: Partial<QueueRow> = {}): QueueRow {
     id: 'a1',
     type: 'article',
     file: { path: 'articles/a1.md' } as TFile,
+    unlinked: false,
     due: new Date(2026, 6, 10),
     reference: 'articles/a1.md',
     parent: null,
@@ -88,6 +89,7 @@ const queueRowArb: fc.Arbitrary<QueueRow> = fc.record({
   id: fc.string({ minLength: 1 }),
   type: fc.constantFrom<QueueRow['type']>('article', 'snippet', 'card'),
   file: fc.constant({ path: 'articles/a1.md' } as TFile),
+  unlinked: fc.constant(false),
   due: fc.option(
     fc.date({
       min: new Date('2000-01-01T00:00:00Z'),
@@ -586,6 +588,63 @@ describe('queue column configuration', () => {
     expect(widths.get('scheduling')).toBe('content');
     expect(widths.get('reference')).toBe('flexible');
     expect(widths.get('parent')).toBe('flexible');
+  });
+});
+
+describe('an unlinked row', () => {
+  const unlinkedRowArb = queueRowArb.map(
+    (row): QueueRow => ({ ...row, unlinked: true })
+  );
+
+  it('flags its file cell with a badge of its own ahead of its path, laid out as a missing row is', () => {
+    fc.assert(
+      fc.property(unlinkedRowArb, (row) => {
+        const unlinked = renderQueueCells(row).reference as VNode<{
+          className: string;
+          children: [VNode<{ className: string; children: string }>, unknown];
+        }>;
+        const missing = renderQueueCells({ ...row, file: null })
+          .reference as typeof unlinked;
+        const linked = renderQueueCells({ ...row, unlinked: false }).reference;
+
+        expect(unlinked.props.className).toBe(missing.props.className);
+        const [badge, path] = unlinked.props.children;
+        expect(badge.props.className).toBe('ir-queue-unlinked-badge');
+        expect(badge.props.children).toBeTruthy();
+        expect(badge.props.children).not.toBe(
+          missing.props.children[0].props.children
+        );
+        expect((path as VNode<{ className: string }>).props.className).toBe(
+          (linked as VNode<{ className: string }>).props.className
+        );
+        expect(renderedText(path)).toBe(renderedText(linked));
+      })
+    );
+  });
+
+  it('says so in its file cell’s title, apart from a missing row’s', () => {
+    fc.assert(
+      fc.property(unlinkedRowArb, (row) => {
+        const title = queueCellTitles(row).reference;
+        expect(title).toContain(row.reference);
+        expect(title).not.toBe(row.reference);
+        expect(title).not.toBe(
+          queueCellTitles({ ...row, file: null }).reference
+        );
+      })
+    );
+  });
+
+  it('renders every other cell as a linked row would', () => {
+    fc.assert(
+      fc.property(unlinkedRowArb, (row) => {
+        const cells = renderQueueCells(row);
+        const expected = renderQueueCells({ ...row, unlinked: false });
+        for (const key of ['type', 'due', 'scheduling', 'parent'] as const) {
+          expect(renderedText(cells[key])).toBe(renderedText(expected[key]));
+        }
+      })
+    );
   });
 });
 

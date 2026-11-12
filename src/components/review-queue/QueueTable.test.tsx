@@ -22,6 +22,7 @@ function makeQueueRow(overrides: Partial<QueueRow> = {}): QueueRow {
     id: 'a1',
     type: 'article',
     file: { path: 'articles/a1.md' } as TFile,
+    unlinked: false,
     due: new Date(2026, 6, 10),
     reference: 'articles/a1.md',
     parent: null,
@@ -830,5 +831,17 @@ describe('QueueTable row menu', () => {
       null,
       '',
     ]);
+  });
+
+  it('marks an unlinked row, and only an unlinked row, which a click still opens', () => {
+    const unlinked = makeQueueRow({ id: 'unlinked', unlinked: true });
+    const { rowEls, onRowClick } = mountMenuTable([article, unlinked]);
+
+    expect(rowEls.map((row) => row.getAttribute('data-unlinked'))).toEqual([
+      null,
+      '',
+    ]);
+    rowEls[1].click();
+    expect(onRowClick).toHaveBeenCalledExactlyOnceWith(unlinked);
   });
 });

@@ -271,8 +271,9 @@ export class CardManager extends ItemManager {
    * that day are due already, and an instant at the end itself belongs to the
    * next day.
    *
-   * Only cards review could show are counted: not dismissed or deleted, and at
-   * a note of their own.
+   * Only cards review could show are counted: not dismissed or deleted, and
+   * with a note at their reference that doesn't prove them gone (see
+   * `reconcileNote`).
    *
    * @param now The current time, as a Unix timestamp.
    */
@@ -826,8 +827,9 @@ export class CardManager extends ItemManager {
   /**
    * The highlight of the card `row`, as its note's `source` link names its
    * selection; when `from` is given, only if that link resolves to `from`.
-   * A note at its reference with another item's `ir-id` is that item's, not
-   * the card's (see `reconcileNote`), and gives it none.
+   * A note at its reference with another item's `ir-id` gives it none: the
+   * `source` link there is that item's, whatever review shows for the card
+   * (see `reconcileNote`).
    */
   private pdfHighlight(row: SRSCardRow, from?: TFile): PdfHighlight | null {
     const note = Obsidian.getNote(row.reference, this.app);

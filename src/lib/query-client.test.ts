@@ -34,6 +34,7 @@ function makeQueueRow(overrides: Partial<QueueRow> = {}): QueueRow {
     id: 'a1',
     type: 'article',
     file: { path: 'articles/a1.md' } as TFile,
+    unlinked: false,
     due: new Date('2000-01-01T00:00:00Z'),
     reference: 'articles/a1.md',
     parent: null,

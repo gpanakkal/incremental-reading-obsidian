@@ -117,7 +117,8 @@ function makePlugin(appOverrides: Record<string, unknown> = {}) {
 
 /**
  * App overrides whose note at `claimedPath` carries another item's `ir-id`, so
- * the row pointing there is refused as that note's owner.
+ * a row pointing there that recorded the note's mtime (see {@link noteAt}) is
+ * refused, the note proving it gone.
  */
 function claiming(claimedPath: string): Record<string, unknown> {
   return {
@@ -130,9 +131,20 @@ function claiming(claimedPath: string): Record<string, unknown> {
   };
 }
 
-/** Each reference's own note, so a claimed one can be told apart. */
+/** The mtime of every note {@link noteAt} makes. */
+const WRITTEN_AT = 5_000;
+
+/**
+ * Each reference's own note, so a claimed one can be told apart, last
+ * written at {@link WRITTEN_AT}: a row recording that mtime was written into
+ * it, and a claim of another id there proves that row gone.
+ */
 function noteAt(reference: string): TFile {
-  return { path: reference, extension: 'md' } as TFile;
+  return {
+    path: reference,
+    extension: 'md',
+    stat: { ctime: 0, mtime: WRITTEN_AT, size: 0 },
+  } as TFile;
 }
 
 /** Build a minimal SRSCardRow. State is stored as a number (enum value). */
@@ -1979,13 +1991,16 @@ describe('getDue', () => {
   });
 
   it('does not include rows whose note is refused in results', async () => {
-    // rowA's note claims another item's id, rowB's is its own — only rowB
-    // should appear in results
-    const rowA = makeCardRow({
-      id: 'null-file',
-      reference: 'cards/null-file.md',
-      due: 0,
-    });
+    // rowA's note claims another item's id, written when rowA was, so proves
+    // it gone; rowB's is its own — only rowB should appear in results
+    const rowA = {
+      ...makeCardRow({
+        id: 'null-file',
+        reference: 'cards/null-file.md',
+        due: 0,
+      }),
+      note_mtime: WRITTEN_AT,
+    };
     const rowB = makeCardRow({
       id: 'has-file',
       reference: 'cards/has-file.md',
@@ -2021,11 +2036,14 @@ describe('getDue', () => {
 
   it('excludes refused rows on the NEXT retry, not on the same call', async () => {
     // Verifies lastMissingNotes is incremented (+1 not -1), triggering the retry loop
-    const rowNoFile = makeCardRow({
-      id: 'missing',
-      reference: 'cards/missing.md',
-      due: 0,
-    });
+    const rowNoFile = {
+      ...makeCardRow({
+        id: 'missing',
+        reference: 'cards/missing.md',
+        due: 0,
+      }),
+      note_mtime: WRITTEN_AT,
+    };
     const rowWithFile = makeCardRow({
       id: 'present',
       reference: 'cards/present.md',
@@ -2315,10 +2333,13 @@ describe('getDue', () => {
       );
     });
 
-    it('leaves out a row whose note is another item’s and fetches on, however many were seen', async () => {
+    it('leaves out a row whose note proves it gone and fetches on, however many were seen', async () => {
       replaceCards(db, [
         makeCardRow({ id: 'claimed', state: State.Review, due: NOON - 2 }),
         makeCardRow({ id: 'own', state: State.Review, due: NOON - 1 }),
+      ]);
+      db.exec(`UPDATE srs_card SET note_mtime = $1 WHERE id = 'claimed'`, [
+        WRITTEN_AT,
       ]);
       vi.spyOn(Obsidian, 'getNote').mockImplementation(noteAt);
       const repo = makeRealRepo(db);
@@ -2381,8 +2402,12 @@ describe('countDueLaterToday', () => {
   /** The end of {@link NOON}'s review day under a 4-hour rollover. */
   const END_OF_DAY = new Date(2026, 0, 16, 4).getTime();
 
-  /** What is at a card's reference: its own note, none, or another item's. */
-  type NoteAtReference = 'own' | 'missing' | 'claimed';
+  /**
+   * What is at a card's reference: its own note, none, or one claiming
+   * another item's id, which is still the card's to show unless it is the
+   * note the card was written into, which proves the card gone (`gone`).
+   */
+  type NoteAtReference = 'own' | 'missing' | 'claimed' | 'gone';
 
   /**
    * `countDueLaterToday` at `now`, with `rows` as the only cards in the
@@ -2400,6 +2425,13 @@ describe('countDueLaterToday', () => {
     // Per property case, not per `it`
     vi.restoreAllMocks();
     replaceCards(db, rows);
+    for (const [id, note] of Object.entries(notes)) {
+      if (note !== 'gone') continue;
+      db.exec('UPDATE srs_card SET note_mtime = $1 WHERE id = $2', [
+        WRITTEN_AT,
+        id,
+      ]);
+    }
     const noteOf = (path: string) =>
       notes[/^cards\/(.*)\.md$/.exec(path)![1]] ?? 'own';
     vi.spyOn(Obsidian, 'getNote').mockImplementation((reference) =>
@@ -2408,7 +2440,7 @@ describe('countDueLaterToday', () => {
     const plugin = makePlugin({
       metadataCache: {
         getFileCache: (file: TFile) =>
-          noteOf(file.path) === 'claimed'
+          noteOf(file.path) === 'claimed' || noteOf(file.path) === 'gone'
             ? { frontmatter: { 'ir-id': 'another-item', tags: [CARD_TAG] } }
             : {},
       },
@@ -2432,12 +2464,12 @@ describe('countDueLaterToday', () => {
     dueFromEndOfDay: fc.boolean(),
     dismissed: fc.boolean(),
     deleted: fc.boolean(),
-    note: fc.constantFrom<NoteAtReference>('own', 'missing', 'claimed'),
+    note: fc.constantFrom<NoteAtReference>('own', 'missing', 'claimed', 'gone'),
   });
 
   // #endregion
 
-  it('counts exactly the live Learning and Relearning cards with a note of their own due after now and before the review day ends', async () => {
+  it('counts exactly the live Learning and Relearning cards with a note review shows for them due after now and before the review day ends', async () => {
     await fc.assert(
       fc.asyncProperty(
         // A review day, by its calendar date, and an instant inside it
@@ -2492,7 +2524,7 @@ describe('countDueLaterToday', () => {
               row.due < end &&
               !row.dismissed &&
               !row.deleted &&
-              notes[row.id] === 'own'
+              (notes[row.id] === 'own' || notes[row.id] === 'claimed')
           ).length;
           expect(count).toBe(expected);
         }

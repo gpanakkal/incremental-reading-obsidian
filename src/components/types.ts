@@ -45,6 +45,12 @@ export interface QueueRow {
   /** Null while the item is missing: no file is at its `reference`. */
   file: TFile | null;
   /**
+   * Whether the note at `reference` is there without claiming this row's id
+   * (see `unlinkedFrom`): its `ir-id` taken off or typed over. Never for a
+   * missing item, nor for a PDF.
+   */
+  unlinked: boolean;
+  /**
    * The fuzzed due date (`due + due_fuzz`); cards have no fuzz (treated as 0).
    * Null when the row has no due time — never coerce that to the epoch.
    */

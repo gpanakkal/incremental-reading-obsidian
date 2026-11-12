@@ -1803,15 +1803,18 @@ body:not(.is-mobile) .ir-grade-row {
    property is substituted against the element the property is declared on,
    and Obsidian puts `--color-*-rgb` on `body`. See the `--ir-transclusion-*`
    block at the top of this file. */
-.ir-type-filter-row[data-type='article'] {
+.ir-type-filter-row[data-type='article'],
+.ir-damaged-note-icon[data-type='article'] {
   --ir-type-tint-rgb: var(--color-blue-rgb);
 }
 
-.ir-type-filter-row[data-type='snippet'] {
+.ir-type-filter-row[data-type='snippet'],
+.ir-damaged-note-icon[data-type='snippet'] {
   --ir-type-tint-rgb: var(--color-yellow-rgb);
 }
 
-.ir-type-filter-row[data-type='card'] {
+.ir-type-filter-row[data-type='card'],
+.ir-damaged-note-icon[data-type='card'] {
   --ir-type-tint-rgb: var(--color-green-rgb);
 }
 
@@ -2851,6 +2854,16 @@ body:not(.is-mobile) .ir-review-interface .ir-card-editor .ir-review-scroller {
   color: var(--text-muted);
 }
 
+/* A row whose note is at its path without claiming its ir-id: flagged as a
+   missing row is, in the warning accent, its path left as it is since the
+   note is there and opens */
+.ir-queue-unlinked-badge {
+  flex: none;
+  color: var(--text-warning);
+  font-size: var(--font-ui-smaller);
+  font-weight: var(--font-semibold);
+}
+
 /* Both path columns truncate rather than introducing horizontal scroll; how
    they truncate differs per column below. */
 .ir-queue-reference .ir-queue-cell-value {
@@ -3767,8 +3780,10 @@ input.ir-queue-page-input {
 }
 
 /* The notice listing notes whose ir-id was removed or changed
-   (ir-id-warning-notice.ts): a row per note, its name and what became of its
-   id beside Open and Restore */
+   (ir-id-warning-notice.ts): a row per note, its type icon and name (in the
+   message instead for a lone note), then a block per row it could be
+   re-associated with where two or more or a blocked one need telling apart,
+   each with its own row of buttons (else one bare row: Open, Re-associate) */
 /* Scrolled on its own once the rows outgrow most of the screen, as ten of
    them stacked for a phone do: Obsidian's notice container clips whatever
    runs past the bottom (`overflow: hidden`), and the message and Restore all
@@ -3781,46 +3796,132 @@ input.ir-queue-page-input {
   overflow-y: auto;
 }
 
+/* Restore all, while two or more notes can be restored */
 .ir-damaged-notes-all {
   display: flex;
   justify-content: flex-end;
+  gap: var(--size-4-1);
 }
 
-/* Held empty while fewer than two notes can be restored */
 .ir-damaged-notes-all:empty {
   display: none;
 }
 
 .ir-damaged-note {
   display: flex;
-  align-items: center;
-  gap: var(--size-4-2);
+  flex-direction: column;
+  gap: var(--size-4-1);
 }
 
-.ir-damaged-note-info {
-  flex: 1 1 auto;
+/* Spaced well apart, and from the message above, so that each block reads
+   as its own with the buttons under it */
+.ir-damaged-note-candidates {
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-4-3);
+  margin-top: var(--size-4-1);
+}
+
+.ir-damaged-note-candidate {
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-2-2);
   min-width: 0;
 }
 
-/* One line, the full path on hover: notes can have long names */
-.ir-damaged-note-name {
-  overflow: hidden;
+/* A small heading saying how the row matches the note */
+.ir-damaged-note-candidate-heading {
+  font-size: var(--font-ui-smaller);
   font-weight: var(--font-semibold);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.8;
+}
+
+/* Names and paths can be long, and the notice is narrow: wrapped anywhere */
+.ir-damaged-note-candidate-name,
+.ir-damaged-note-candidate-path {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.ir-damaged-note-candidate-name {
+  font-weight: var(--font-semibold);
+}
+
+.ir-damaged-note-candidate-path {
+  font-size: var(--font-ui-smaller);
+  opacity: 0.8;
+}
+
+/* The block's buttons stand a little apart from the lines naming its row */
+.ir-damaged-note-candidate > .ir-damaged-note-actions {
+  margin-top: var(--size-2-1);
+}
+
+/* The icon and the name as one unit, so the icon sits beside the name's
+   first line rather than stranded at the end of the line before it when the
+   name wraps; in the message it is an inline unit, so it wraps as a whole
+   under "the ir-id of" and the name wraps inside it */
+.ir-damaged-note-label,
+.ir-damaged-note-title {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--size-2-2);
+}
+
+.ir-damaged-note-label {
+  display: inline-flex;
+  vertical-align: top;
+}
+
+/* The full path on hover; a long name wraps anywhere, as on a phone */
+.ir-damaged-note-name {
+  min-width: 0;
+  font-weight: var(--font-semibold);
+  overflow-wrap: anywhere;
+}
+
+/* The type icon on the tint the type filter gives that type (see
+   `.ir-type-filter-row-icon`). Its stroke takes the notice's own text colour
+   (`--notice-color`, read from obsidian.asar: near-white on a dark notice in
+   either theme) rather than `--text-normal`, which is dark in the light
+   theme and vanished against the notice. */
+.ir-damaged-note-icon {
+  display: inline-flex;
+  flex: none;
+  padding: var(--size-2-1);
+  border-radius: var(--radius-s);
+  background-color: rgba(var(--ir-type-tint-rgb), 0.2);
+  color: inherit;
+}
+
+.ir-damaged-note-icon svg {
+  width: var(--icon-xs);
+  height: var(--icon-xs);
+  stroke-width: var(--icon-xs-stroke-width);
 }
 
 /* Dimmed rather than recoloured: the notice's own colours are the theme's */
-.ir-damaged-note-kind,
+.ir-damaged-note-blocked,
 .ir-damaged-notes-more {
   font-size: var(--font-ui-smaller);
   opacity: 0.8;
 }
 
-.ir-damaged-note-buttons {
+/* Wrapped onto more lines when it outgrows the notice, as on a phone */
+.ir-damaged-note-actions {
   display: flex;
-  flex-shrink: 0;
-  gap: var(--size-4-1);
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--size-4-2);
+}
+
+/* What blocks a row can be long; it wraps inside the row of buttons */
+.ir-damaged-note-blocked {
+  flex: 1 1 12em;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 /* Obsidian's buttons take `--cursor`, `default` unless the user changes it */
@@ -3835,18 +3936,12 @@ input.ir-queue-page-input {
 
 /* On a phone Obsidian lays a notice out as a row (`.is-phone .notice`, read
    from obsidian.asar), which would squeeze the list beside the message:
-   stacked instead, each note's buttons under its name, sharing the width */
+   stacked instead, Restore all taking the width */
 .is-phone .notice.ir-damaged-notes-notice {
   flex-direction: column;
   align-items: stretch;
 }
 
-.is-phone .ir-damaged-note {
-  flex-direction: column;
-  align-items: stretch;
-}
-
-.is-phone .ir-damaged-note-buttons > button,
 .is-phone .ir-damaged-notes-all > button {
   flex: 1 1 0;
 }

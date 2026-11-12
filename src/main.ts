@@ -85,6 +85,7 @@ import {
 } from './lib/extensions/SnippetHighlightPostProcessor';
 import { registerTransclusionHostPostProcessor } from './lib/extensions/TransclusionHostPostProcessor';
 import {
+  type DamagedNotesNotice,
   type IrIdWarning,
   type NoticeTarget,
   type Timer,
@@ -374,6 +375,12 @@ export default class IncrementalReadingPlugin extends Plugin {
    * Unset until the database it reads is up.
    */
   leftovers?: LeftoverWatch;
+  /**
+   * The notice listing item notes no row holds by both path and `ir-id`,
+   * told of each as it is damaged on screen or comes in front of the user
+   * (see {@link watchIrIdFrontmatter}). Unset until the database is up.
+   */
+  damagedNotes?: DamagedNotesNotice;
   /**
    * Gathers item files arriving at paths that break links into one notice
    * (see `createArrivalWarning`): those the vault brings, and notes the user
@@ -1041,8 +1048,11 @@ export default class IncrementalReadingPlugin extends Plugin {
   /**
    * Tell the user about item notes whose `ir-id` was taken off or changed
    * outside the plugin. See {@link createIrIdWatch}, which used to put ids and
-   * tags back and now only reports a lost id (0166). A type tag taken off is
-   * no damage, and goes untold.
+   * tags back and now only reports a lost id. A type tag taken off is no
+   * damage, and goes untold. A note damaged where no write on this device was
+   * seen (over Sync, or while the plugin was off) is told of as it comes in
+   * front of the user instead: opened, its tab brought to the front, or shown
+   * in review (see `ReviewView.announceFile`).
    *
    * Registered here rather than in {@link onload} for two reasons. The check
    * reads the database, which does not exist until {@link initReviewManager}
@@ -1062,9 +1072,16 @@ export default class IncrementalReadingPlugin extends Plugin {
         metadataCache: this.app.metadataCache,
         fileManager: this.app.fileManager,
         workspace: this.app.workspace,
+        reassociateNote: (...args) =>
+          this.reviewManager.articles.reassociateNote(...args),
+        onRepaired: () => this.refreshAfterRepair(),
       })
     );
-    this.register(() => notice.dispose());
+    this.damagedNotes = notice;
+    this.register(() => {
+      notice.dispose();
+      this.damagedNotes = undefined;
+    });
 
     const watch = createIrIdWatch({
       repo: this.reviewManager.repo,
@@ -1079,8 +1096,41 @@ export default class IncrementalReadingPlugin extends Plugin {
       this.app.metadataCache.on('changed', (file) => {
         if (!this.reviewManager) return;
         watch.handleChange(file);
+        // A listed note mended by hand leaves the notice, and a note that
+        // came in front before the cache read it is looked at now it has
+        void notice.recheck([file.path]);
       })
     );
+    // As does one mended by a row another device moved
+    this.register(
+      this.reviewManager.repo.onDataChange(() => void notice.recheck())
+    );
+    // Fired as a note opens, as a tab showing another comes to the front, and
+    // as review moves to another item while its tab holds the active file
+    // (ReviewView.announceFile), which is what the bars learn the active note
+    // by too
+    this.registerEvent(
+      this.app.workspace.on('file-open', (file) => {
+        if (file) void notice.opened(file.path);
+      })
+    );
+    const active = this.app.workspace.getActiveFile();
+    if (active) void notice.opened(active.path);
+  }
+
+  /**
+   * Refresh what shows items and notes once the damaged-notes notice made a
+   * note its row's note again: the queue's flag, the note bars, the item
+   * review shows, and the leftovers asked about. A frontmatter write alone
+   * reaches none of them as a change to a row.
+   */
+  private async refreshAfterRepair() {
+    this.resyncLeafActionBars?.();
+    void this.leftovers?.refresh();
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['queue'] }),
+      invalidateCurrentItemQuery(),
+    ]);
   }
 
   /** Watch for notes left without review data in `repo` (see `LeftoverWatch`). */

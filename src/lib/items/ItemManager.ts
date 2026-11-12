@@ -654,8 +654,8 @@ export class ItemManager {
   /**
    * The item `data` belongs to as a missing one, when no file is at its
    * `reference`, or `null` when one is. A row that fails to become a review
-   * item with its file right there was refused for some other reason (a note
-   * claiming another item's id), and is not missing.
+   * item with its file right there was refused for some other reason (its
+   * note proves it gone, see `reconcileNote`), and is not missing.
    */
   asMissing<D extends MissingItem['data']>(data: D): MissingItem<D> | null {
     if (Obsidian.getNote(data.reference, this.app)) return null;
@@ -677,6 +677,14 @@ export class ItemManager {
    * device can still be here only because Sync has yet to delete it (see
    * `reconcileAction`).
    *
+   * Short of that, the note at a row's reference is the one review shows for
+   * it, whatever `ir-id` it claims: one claiming another id, an edited one or
+   * another row's, is shown as one claiming none is. The row is still at that
+   * path, the queue flags it as unlinked from its note, and opening the note
+   * raises the notice offering to re-associate the two. Refusing it left a
+   * click on that queue row with nothing to show, and the row out of every
+   * review, with no word why.
+   *
    * A note lacking the row's `ir-id` or tag is left as it is, matching
    * fingerprint or not: no identity frontmatter is written from a fetch. A note
    * stripped by an un-import on another device reaches this one over Sync
@@ -697,8 +705,10 @@ export class ItemManager {
    * A file with no frontmatter, a PDF say, has no id or tag to square: the
    * file at a row's reference is that row's file by its path alone. Its
    * tombstone is left to the vault events that track such files.
-   * @returns false when the note claims another item's id: the row has no
-   * note to review, whether or not it could be tombstoned for it.
+   * @returns false when the note proves the row gone (it claims another
+   * item's id, and is provably the note the row's was written into), whether
+   * or not this read may tombstone the row for it: the row has no note to
+   * review.
    */
   protected reconcileNote(
     row: {
@@ -731,8 +741,9 @@ export class ItemManager {
     // the notes it delivers as separate files may not have landed yet: what
     // they say is no grounds to change the row then. A later read decides.
     const repair = !this.repo.refetchingAfterReload;
-    if (repair && action === 'tombstone') void this.markDeleted(row.id, type);
-    return relation !== 'other';
+    if (action !== 'tombstone') return true;
+    if (repair) void this.markDeleted(row.id, type);
+    return false;
   }
 
   /**

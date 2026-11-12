@@ -119,7 +119,11 @@ async function seedLostItem(
 
 /** A snippet of `parent`'s, due well after the parent, with its own note. */
 async function seedChild(parent: string) {
-  await writeVaultFile('snippets/child.md', 'A snippet\n');
+  // Carrying its id, as the plugin writes the note
+  await writeVaultFile(
+    'snippets/child.md',
+    '---\nir-id: child\n---\nA snippet\n'
+  );
   await mutate(
     `INSERT INTO snippet (id, reference, parent, context, due, interval, priority)
      VALUES ('child', 'snippets/child.md', $1, $1, $2, 86400000, 30)`,

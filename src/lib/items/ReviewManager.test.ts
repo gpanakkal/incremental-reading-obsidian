@@ -1371,6 +1371,44 @@ describe('ReviewManager.getQueue', () => {
     expect(item.file?.path).toBe('articles/a1.md');
   });
 
+  it('flags each row of every type whose note is at its reference without claiming its id, and no missing one or PDF', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom('md', 'pdf'),
+        fc.boolean(),
+        fc.constantFrom<unknown>('own', 'other', undefined, 7, ['own']),
+        async (extension, present, claim) => {
+          vi.restoreAllMocks();
+          const manager = wireQueue({
+            articles: [
+              makeArticleRow({ id: 'own', reference: `a.${extension}` }),
+            ],
+            snippets: [
+              makeSnippetRow({ id: 'own', reference: `s.${extension}` }),
+            ],
+            cards: [makeCardRow({ id: 'own', reference: `c.${extension}` })],
+          });
+          vi.spyOn(Obsidian, 'getNote').mockImplementation(
+            (reference: string) =>
+              present ? ({ path: reference, extension } as TFile) : null
+          );
+          vi.spyOn(manager.app.metadataCache, 'getFileCache').mockReturnValue(
+            claim === undefined ? {} : { frontmatter: { 'ir-id': claim } }
+          );
+
+          const { rows: queue } = await manager.getQueue();
+
+          expect(queue).toHaveLength(3);
+          for (const row of queue) {
+            expect(row.unlinked).toBe(
+              present && extension === 'md' && claim !== 'own'
+            );
+          }
+        }
+      )
+    );
+  });
+
   it('omits redacted fields (due_fuzz, scroll_top, offsets, dismissed, deleted) from every QueueRow', async () => {
     const manager = wireQueue({
       articles: [makeArticleRow({ id: 'a1', reference: 'articles/a1.md' })],
@@ -3124,6 +3162,54 @@ describe('ReviewManager.getItemOrMissingFromId', () => {
   it('answers null for an id no table holds', async () => {
     const wired = wirePaths([]);
     expect(await wired.manager.getItemOrMissingFromId('nothing')).toBeNull();
+  });
+
+  // What the queue's Unlinked row opens on a click: the note at the row's
+  // reference, whatever it claims, as one claiming nothing always was
+  it("resolves a live row with the note at its reference, whatever id the note claims, and flags the row's queue entry whenever that id isn't the row's", async () => {
+    // Every way a note's `ir-id` can fail to be the row's, and the row's own
+    const claimArb = fc.oneof(
+      fc.constant<unknown>('x'),
+      // Another live row's id
+      fc.constant<unknown>('y'),
+      // The row's id, edited
+      fc.string({ minLength: 1 }).map<unknown>((typed) => `x${typed}`),
+      fc.string().filter((id) => id !== 'x'),
+      fc.constantFrom<unknown>(7, true, ['x'], { id: 'x' }, null, '', 0)
+    );
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom(...ITEM_ROW_KINDS),
+        fc.option(claimArb, { nil: undefined }),
+        async (kind, claim) => {
+          vi.restoreAllMocks();
+          const wired = wirePaths([kind.reference, 'articles/y.md']);
+          insertItemRow(wired.repo, kind, false);
+          wired.insertArticle('y', 'articles/y.md');
+          const note = wired.files.get(kind.reference)!;
+          vi.spyOn(
+            wired.manager.app.metadataCache,
+            'getFileCache'
+          ).mockImplementation((file) =>
+            file === note
+              ? { frontmatter: claim === undefined ? {} : { 'ir-id': claim } }
+              : { frontmatter: { 'ir-id': 'y' } }
+          );
+
+          const item = await wired.manager.getItemOrMissingFromId('x');
+
+          expect(item?.file).toBe(note);
+          expect(item?.data).toMatchObject({ id: 'x', type: kind.type });
+          expect(
+            wired.repo.rows(kind.table).filter(({ id }) => id === 'x')
+          ).toEqual([{ id: 'x', reference: kind.reference, deleted: false }]);
+          const claimsOwnId = claim === 'x';
+          expect((await wired.manager.getQueueRow('x'))?.unlinked).toBe(
+            !claimsOwnId
+          );
+        }
+      )
+    );
   });
 });
 

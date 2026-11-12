@@ -1761,6 +1761,23 @@ describe('LeftoverWatch', () => {
     );
   });
 
+  it("looks again on refresh, dropping a leftover made a row's note elsewhere, and opens nothing", async () => {
+    const wired = await wireWatch(ONE_LEFTOVER);
+    await wired.watch.startupScan();
+    const listener = vi.fn();
+    wired.watch.subscribe(listener);
+    wired.repo.mutate(
+      `INSERT INTO article (id, reference, due, interval, priority) VALUES ('x', 'notes/a.md', 0, 1, 30)`
+    );
+
+    expect(await wired.watch.refresh()).toBe(true);
+
+    expect(wired.watch.current).toEqual([]);
+    expect(listener).toHaveBeenCalledOnce();
+    expect(wired.open).not.toHaveBeenCalled();
+    expect(Notice.instances).toEqual([]);
+  });
+
   it('holds the leftovers the last look found, and tells its listeners each time it looks', async () => {
     const wired = await wireWatch(ONE_LEFTOVER);
     const listener = vi.fn();

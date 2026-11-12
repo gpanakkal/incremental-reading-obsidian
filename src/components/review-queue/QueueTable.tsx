@@ -195,6 +195,7 @@ export function QueueTable({
             className="ir-queue-row"
             data-type={row.type}
             data-missing={row.file === null ? '' : undefined}
+            data-unlinked={row.unlinked ? '' : undefined}
             role="row"
             tabIndex={0}
             onClick={() => {
