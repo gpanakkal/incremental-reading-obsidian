@@ -21,6 +21,8 @@ import {
   openFileInActiveLeaf,
   openNote,
   openPluginSettings,
+  PDF_FIXTURE_FOLDER,
+  PDF_FIXTURE_PATH,
   pendingSaves,
   readSnippetState,
   REVIEW_VIEW_DEFAULT_TITLE,
@@ -36,6 +38,7 @@ import {
   toggleReviewSourceMode,
   waitForReviewItem,
   type RepoWindow,
+  type ShownItem,
 } from './helpers';
 import { test } from './setup/fixtures';
 import {
@@ -1067,6 +1070,7 @@ test.describe('File explorer', () => {
           `.workspace-leaf-content[data-type="${REVIEW_VIEW_TYPE}"]`
         )
       ).toHaveCount(1);
+      await expect(activeRow()).toHaveAttribute('data-path', firstPath);
     });
 
     test('opens the item review moved to in a new tab when its row is clicked', async () => {
@@ -1113,6 +1117,249 @@ test.describe('File explorer', () => {
           { timeout: 1000 }
         );
       }).toPass();
+    });
+
+    /**
+     * The folder the seeded notes go in: the PDF fixture's, so one reveal
+     * opens the rows of both.
+     */
+    const SEED_FOLDER = PDF_FIXTURE_FOLDER;
+
+    /**
+     * What the page-side seeding below reaches on Obsidian and the plugin.
+     * `window.app` and `app.plugins` are unofficial Obsidian API: stable in
+     * practice, but undocumented.
+     */
+    type SeedApp = RepoWindow['app'] & {
+      vault: { getFileByPath(path: string): unknown };
+      metadataCache: {
+        getFileCache(file: unknown): { frontmatter?: unknown } | null;
+      };
+      workspace: {
+        detachLeavesOfType(type: string): void;
+        getRightLeaf(split: boolean): {
+          setViewState(state: { type: string; active: boolean }): Promise<void>;
+        } | null;
+        revealLeaf(leaf: unknown): Promise<void>;
+      };
+    };
+
+    /** Write a note into {@link SEED_FOLDER} and wait for Obsidian to index it. */
+    async function writeSeedNote(name: string, text: string) {
+      const at = `${SEED_FOLDER}/${name}.md`;
+      await fs.writeFile(path.join(vaultPath, at), text);
+      await expect
+        .poll(() =>
+          window.evaluate((p) => {
+            const { app } = window as unknown as { app: SeedApp };
+            const file = app.vault.getFileByPath(p);
+            return (
+              file !== null && app.metadataCache.getFileCache(file) !== null
+            );
+          }, at)
+        )
+        .toBe(true);
+      return at;
+    }
+
+    /** Give the database a due article row for the file at `reference`. */
+    const addArticleRow = (id: string, reference: string) =>
+      window.evaluate(
+        async ([id, reference]) => {
+          const { app } = window as unknown as { app: SeedApp };
+          await app.plugins.plugins[
+            'incremental-reading'
+          ].reviewManager.repo.mutate(
+            `INSERT INTO article (id, reference, due, interval, priority)
+             VALUES ($1, $2, $3, 86400000, 30)`,
+            [id, reference, Date.now() - 60_000]
+          );
+        },
+        [id, reference] as const
+      );
+
+    /**
+     * Put a due article straight into the vault and the database: a note no
+     * tab has opened, so only review can make it the active file, and nothing
+     * but review puts it among the recent files.
+     */
+    async function seedArticle(name: string, body = `Text of ${name}.`) {
+      const id = name.toLowerCase().replace(/\s+/g, '-');
+      const at = await writeSeedNote(
+        name,
+        `---\ntags:\n  - ${ARTICLE_TAG}\nir-id: ${id}\n---\n${body}\n`
+      );
+      await addArticleRow(id, at);
+      return at;
+    }
+
+    /** Open review on the queued item named `name`, from the home screen. */
+    async function reviewFromQueue(name: string) {
+      await executeCommandById(window, 'incremental-reading:learn');
+      await expectReviewHome(window);
+      await window.locator('.ir-queue-row', { hasText: name }).click();
+      const shown = await waitForReviewItem(window);
+      expect(shown.title).toContain(name);
+      return shown;
+    }
+
+    /** Skip the item on screen, and wait until review shows another. */
+    async function skipOn(from: ShownItem) {
+      await executeCommandById(window, 'incremental-reading:skip-item');
+      // Bounded well inside `CURRENT_ITEM_REFETCH_TIME`: a move review missed
+      // must not pass by the five-second poll making it instead
+      await expect(async () => {
+        const shown = await waitForReviewItem(window);
+        expect(shown.id).not.toBe(from.id);
+      }).toPass({ timeout: 3_000 });
+      return waitForReviewItem(window);
+    }
+
+    test('marks the row of a PDF item review moved onto, as a PDF tab marks it', async () => {
+      await seedArticle('Row alpha');
+      await addArticleRow('row-pdf', PDF_FIXTURE_PATH);
+      await reviewFromQueue('Row alpha');
+      await executeCommandById(window, 'file-explorer:reveal-active-file');
+      await expect(activeRow()).toHaveAttribute(
+        'data-path',
+        `${SEED_FOLDER}/Row alpha.md`
+      );
+      await window
+        .locator(`.workspace-tab-header[data-type="${REVIEW_VIEW_TYPE}"]`)
+        .click();
+
+      await executeCommandById(window, 'incremental-reading:skip-item');
+
+      // Bounded well inside `CURRENT_ITEM_REFETCH_TIME`: a move review missed
+      // must not pass by the five-second poll making it instead
+      await expect(
+        window.locator(
+          `.workspace-tab-header.is-active[data-type="${REVIEW_VIEW_TYPE}"]`
+        )
+      ).toContainText(path.posix.basename(PDF_FIXTURE_PATH, '.pdf'), {
+        timeout: 3_000,
+      });
+      await expect(activeRow()).toHaveCount(1);
+      await expect(activeRow()).toHaveAttribute('data-path', PDF_FIXTURE_PATH);
+    });
+
+    test('has the backlinks and outgoing links panes and the recent files follow review from item to item, and the panes show nothing on the home screen', async () => {
+      // A note created counts as opened among the recent files, so the one
+      // review ends on is made first: only review can bring it to the top
+      await seedArticle('Side beta', 'Links to [[Target beta]].');
+      await seedArticle('Side alpha', 'Links to [[Target alpha]].');
+      await writeSeedNote('Target alpha', 'Alpha target.');
+      await writeSeedNote('Target beta', 'Beta target.');
+      await writeSeedNote('Ref alpha', 'See [[Side alpha]].');
+      await writeSeedNote('Ref beta', 'See [[Side beta]].');
+
+      /**
+       * The quick switcher's suggestions with nothing typed: the recent
+       * files, the latest first.
+       */
+      async function recentSuggestions() {
+        await executeCommandById(window, 'switcher:open');
+        const prompt = window.locator('.prompt');
+        await expect(prompt.locator('.suggestion-item').first()).toBeVisible();
+        const names = await prompt
+          .locator('.suggestion-item')
+          .allTextContents();
+        await window.keyboard.press('Escape');
+        await expect(prompt).toHaveCount(0);
+        return names;
+      }
+      expect((await recentSuggestions())[0]).not.toContain('Side beta');
+
+      // Both panes on screen at once, in the right sidebar, each following
+      // whatever file the workspace reports open. Opened before review moves,
+      // and never clicked after: activating one would make it look the active
+      // file up afresh, which would hide whether review reported its move.
+      await window.evaluate(async () => {
+        const { workspace } = (window as unknown as { app: SeedApp }).app;
+        for (const [type, split] of [
+          ['backlink', false],
+          ['outgoing-link', true],
+        ] as const) {
+          workspace.detachLeavesOfType(type);
+          const leaf = workspace.getRightLeaf(split);
+          await leaf?.setViewState({ type, active: false });
+          // Brought to the front of its tab group, the sidebar opened, and
+          // the active leaf left alone
+          await workspace.revealLeaf(leaf);
+        }
+      });
+      const backlinks = window.locator(
+        '.workspace-leaf-content[data-type="backlink"]'
+      );
+      const outgoing = window.locator(
+        '.workspace-leaf-content[data-type="outgoing-link"]'
+      );
+      await expect(backlinks).toBeVisible();
+      await expect(outgoing).toBeVisible();
+
+      const first = await reviewFromQueue('Side alpha');
+      await expect(backlinks).toContainText('Ref alpha');
+      await expect(outgoing).toContainText('Target alpha');
+
+      await skipOn(first);
+
+      await expect(backlinks).toContainText('Ref beta');
+      await expect(outgoing).toContainText('Target beta');
+      await expect(backlinks).not.toContainText('Ref alpha');
+      await expect(outgoing).not.toContainText('Target alpha');
+
+      // Learn with the review tab focused takes it back to its home screen
+      await executeCommandById(window, 'incremental-reading:learn');
+      await expectReviewHome(window);
+      await expect(backlinks).not.toContainText('Ref beta');
+      await expect(outgoing).not.toContainText('Target beta');
+      await expect(activeRow()).toHaveCount(0);
+
+      const recent = await recentSuggestions();
+      expect(recent[0]).toContain('Side beta');
+      expect(recent[1]).toContain('Side alpha');
+    });
+
+    test('leaves focus where it is as review moves on, and puts it back in the tab when the tab is switched back to', async () => {
+      await seedArticle('Focus alpha');
+      await seedArticle('Focus beta');
+      await seedArticle('Focus gamma');
+      const first = await reviewFromQueue('Focus alpha');
+      // A skip to undo, so the undo button can take focus: it stays the same
+      // button from item to item, unlike the fields an item's bar renders anew
+      const second = await skipOn(first);
+      const view = window
+        .locator(
+          `.workspace-leaf-content[data-type="${REVIEW_VIEW_TYPE}"] > .view-content`
+        )
+        .first();
+      const undo = view.locator('#undo-button');
+      await expect(undo).toBeEnabled();
+      await undo.focus();
+      await expect(undo).toBeFocused();
+      await undo.blur();
+      await expect(undo).not.toBeFocused();
+
+      // Moving on re-announces the review tab as the active leaf, which used
+      // to refocus whatever the tab last focused
+      await skipOn(second);
+
+      await expect(undo).toHaveCount(1);
+      await expect(undo).not.toBeFocused();
+
+      // Away to another tab and back: focus goes back into the review tab
+      await executeCommandById(window, 'workspace:new-tab');
+      await expect(
+        window.locator(
+          `.workspace-leaf.mod-active .workspace-leaf-content[data-type="${REVIEW_VIEW_TYPE}"]`
+        )
+      ).toHaveCount(0);
+      await window
+        .locator(`.workspace-tab-header[data-type="${REVIEW_VIEW_TYPE}"]`)
+        .click();
+      // Back to the element focused in the tab last, not merely into the tab:
+      // nothing in it has taken focus since the undo button
+      await expect(undo).toBeFocused();
     });
   });
 });

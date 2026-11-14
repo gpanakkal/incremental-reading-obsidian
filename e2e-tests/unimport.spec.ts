@@ -20,6 +20,7 @@ import {
   pluginMenuEntries,
   setNativeMenus,
   setPluginSetting,
+  setShowViewHeader,
   waitForReviewItem,
 } from './helpers';
 import { test } from './setup/fixtures';
@@ -868,6 +869,77 @@ test.describe("The review tab's own menu", () => {
         hasText: 'Unimport me',
       })
     ).toHaveCount(0);
+    await expect.poll(noteText).not.toMatch(/ir-id/);
+    expect(await articleCount()).toBe(before);
+    await executeCommandById(window, 'incremental-reading:learn');
+    await expect(snippetRow()).toHaveCount(1);
+    await expect(articleRow()).toHaveCount(0);
+  });
+
+  test("offers the un-import in the action bar's stand-in for the ⋮ while the tab title bar is off, under Delete, for an article alone", async () => {
+    await setShowViewHeader(window, false);
+    const before = await articleCount();
+    await importFromFiles();
+    await extractSnippet();
+    await executeCommandById(window, 'incremental-reading:learn');
+    await expect(articleRow()).toHaveCount(1);
+    await expect(snippetRow()).toHaveCount(1);
+    await expect(
+      window.locator('.workspace-leaf.mod-active .view-header')
+    ).toBeHidden();
+
+    /**
+     * Open the menu of the action bar's ⋮, which stands in for the hidden
+     * header's, once it offers Delete. Retried as {@link openReviewTabMenu} is.
+     */
+    async function openStandInMenu() {
+      const menu = window.locator('.menu');
+      await expect(async () => {
+        if ((await menu.count()) > 0) await closeMenu(window);
+        await window
+          .locator('.workspace-leaf.mod-active #more-options-button')
+          .click();
+        await expect(
+          menu.locator('.menu-item.is-warning:has(.lucide-trash-2)')
+        ).toBeVisible({ timeout: 2_000 });
+      }).toPass();
+      return menu;
+    }
+
+    await snippetRow().click();
+    await expect.poll(currentItemId).not.toBeNull();
+    let menu = await openStandInMenu();
+    await expect(menu.locator('.menu-item:has(.lucide-file-x)')).toHaveCount(0);
+    await closeMenu(window);
+
+    await executeCommandById(window, 'incremental-reading:learn');
+    await articleRow().click();
+    const article = await waitForReviewItem(window);
+    menu = await openStandInMenu();
+    const entries = await menu
+      .locator('.menu-item')
+      .evaluateAll((items) =>
+        items.map((item) =>
+          item.querySelector('.lucide-trash-2')
+            ? 'delete'
+            : item.querySelector('.lucide-file-x')
+              ? 'unimport'
+              : 'other'
+        )
+      );
+    expect(entries.filter((entry) => entry === 'unimport')).toHaveLength(1);
+    expect(entries.indexOf('unimport')).toBe(entries.indexOf('delete') + 1);
+    await menu.locator('.menu-item.is-warning:has(.lucide-file-x)').click();
+    await expect(menu).toHaveCount(0);
+    const confirm = confirmation().locator('.mod-cta');
+    await expect(async () => {
+      if (await confirm.isVisible()) await confirm.click();
+      await expect(confirmation()).toHaveCount(0, { timeout: 2_000 });
+    }).toPass();
+
+    // Bounded well inside `CURRENT_ITEM_REFETCH_TIME`: the five-second poll
+    // would move review off a gone item on its own, late
+    await expect.poll(currentItemId, { timeout: 1_500 }).not.toBe(article.id);
     await expect.poll(noteText).not.toMatch(/ir-id/);
     expect(await articleCount()).toBe(before);
     await executeCommandById(window, 'incremental-reading:learn');
