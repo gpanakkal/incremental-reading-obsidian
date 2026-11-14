@@ -1253,6 +1253,16 @@ export class SQLJSRepository implements SQLiteRepository {
     return this.#writeBlock;
   }
 
+  /**
+   * This device's id and the write stamp of the database in memory (see
+   * {@link SQLiteRepository.writeStamp}), or null before it is open or where
+   * it has no `write_stamp` table.
+   */
+  writeStamp(): { device: string; seen: WriteVector } | null {
+    const seen = this.db && readWriteVector(this.db);
+    return seen ? { device: this.#device(), seen } : null;
+  }
+
   /** @throws if writes are refused (see {@link writeRefusal}) */
   #assertWritable() {
     const refusal = this.writeRefusal();

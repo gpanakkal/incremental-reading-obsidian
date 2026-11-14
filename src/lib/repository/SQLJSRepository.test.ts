@@ -4415,6 +4415,43 @@ describe('writeRefusal', () => {
   });
 });
 
+describe('writeStamp', () => {
+  beforeEach(() => {
+    stubWasm();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('is null before the database is open', () => {
+    // Made as `start` makes it, before it opens the database
+    const repo = new (SQLJSRepository as unknown as new (params: {
+      app: App;
+      dbFilePath: string;
+      schema: string;
+    }) => SQLJSRepository)({
+      app: makeVault(INDEXED, new Map()).app,
+      dbFilePath: DATABASE_FILE_PATH,
+      schema: '',
+    });
+
+    expect(repo.writeStamp()).toBeNull();
+  });
+
+  it('names this device, with the saves of each device the database in memory holds', async () => {
+    const { repo, app } = await startOver(['a']);
+    insertArticleRow(repo, 'b');
+    await vi.waitFor(() => expect(repo.writeStamp()?.seen).not.toEqual({}));
+
+    expect(repo.writeStamp()).toEqual({
+      device: getDeviceId(app),
+      seen: readWriteVector(repo.db!),
+    });
+  });
+});
+
 describe('skipping saves that change nothing (0174)', () => {
   beforeEach(() => {
     // bulkMutate yields through `window.setTimeout`, which node lacks

@@ -13,6 +13,7 @@ import {
 } from '#/lib/pdf/pdf-selection';
 import type IncrementalReadingPlugin from '#/main';
 import { promptForCardAnswer } from '#/views/CardAnswerModal';
+import { promptForConfirmation } from '#/views/ConfirmModal';
 import type ReviewView from '#/views/ReviewView';
 import {
   type Editor,
@@ -45,6 +46,7 @@ import type { CardSelection } from './items/CardManager';
 import { NO_SNIPPET_FROM_CARD } from './items/SnippetManager';
 import { getMimeType } from './mime';
 import { computeMinimalChange } from './minimal-change';
+import type { ItemTable } from './moved-note-scan';
 import type { NoticeAction } from './notices';
 import { ObsidianHelpers as Obsidian } from './ObsidianHelpers';
 import {
@@ -80,6 +82,15 @@ import {
   isReviewArticle,
   isReviewSnippet,
 } from './types';
+import {
+  type ChangesElsewhere,
+  type UndoFootprint,
+  changedWhere,
+  changesSince,
+  describeChanges,
+  sameChanges,
+  takeFootprint,
+} from './undo-recheck';
 import { refreshAfterImportUndo } from './unimport-article';
 import { getContentSlice, getEndOfDay } from './utils';
 
@@ -130,7 +141,7 @@ function selectFirst(kind: SelectionKind): string {
 }
 
 /** Why an undo took nothing back: see `ActionStackEntry.undo`. */
-type UndoMiss = 'retry' | 'failed';
+type UndoMiss = 'retry' | 'kept' | 'failed';
 
 /** What a delete an undo makes means for the undo: see `UndoMiss`. */
 function undoMiss(outcome: DeleteOutcome): UndoMiss {
@@ -145,9 +156,17 @@ export type ActionStackEntry = {
    * Take the action back. Answers how it went when it took nothing back,
    * leaving things as they were: `retry` when the user turned down a prompt
    * on the way or writes were refused, which can go otherwise next time, so
-   * the entry stays to try again; `failed` for anything else, which drops it.
+   * the entry stays to try again; `kept` when the user chose to keep what it
+   * would discard, which stays too, needing no telling; `failed` for anything
+   * else, which drops it.
    */
   undo: () => void | UndoMiss | Promise<void | UndoMiss>;
+  /**
+   * For an undo that discards items the action made or brought back: what
+   * they were like when it was taken, to tell whether another device has
+   * changed them since (see `undo-recheck.ts`).
+   */
+  footprint?: Promise<readonly UndoFootprint[]>;
   /**
    * False for an undo that writes nothing to the database, which can run
    * while writes are refused; any other is held until they aren't.
@@ -580,10 +599,16 @@ export class Actions {
     );
 
     if (snippet !== null) {
+      const description = `creating snippet "${snippet.file.basename}"`;
+      const footprint = this._footprint('snippet', [snippet.data.id]);
       this._pushUndo({
         item: snippet,
-        description: `creating snippet "${snippet.file.basename}"`,
+        description,
+        footprint,
         undo: async () => {
+          if (!(await this._confirmDiscard(footprint, description))) {
+            return 'kept';
+          }
           const outcome = await this.plugin.reviewManager.snippets.delete(
             snippet.data.id
           );
@@ -622,10 +647,16 @@ export class Actions {
     });
     if (snippet) {
       const pdf = originFile(read.origin);
+      const description = `creating snippet "${snippet.file.basename}"`;
+      const footprint = this._footprint('snippet', [snippet.data.id]);
       this._pushUndo({
         item: snippet,
-        description: `creating snippet "${snippet.file.basename}"`,
+        description,
+        footprint,
         undo: async () => {
+          if (!(await this._confirmDiscard(footprint, description))) {
+            return 'kept';
+          }
           const { snippets } = this.plugin.reviewManager;
           const { id } = snippet.data;
           const paths = await this._pdfsHighlighting(
@@ -697,10 +728,16 @@ export class Actions {
     });
     if (card) {
       const pdf = originFile(origin);
+      const description = `creating card "${card.file.basename}"`;
+      const footprint = this._footprint('srs_card', [card.data.id]);
       this._pushUndo({
         item: card,
-        description: `creating card "${card.file.basename}"`,
+        description,
+        footprint,
         undo: async () => {
+          if (!(await this._confirmDiscard(footprint, description))) {
+            return 'kept';
+          }
           const { cards } = this.plugin.reviewManager;
           const { id } = card.data;
           const paths = await this._pdfsHighlighting(
@@ -826,10 +863,16 @@ export class Actions {
         Obsidian.findEmbeds(this.plugin.app, sourceFile, reviewCard.file)
           ?.original ?? null;
 
+      const description = `creating card "${reviewCard.file.basename}"`;
+      const footprint = this._footprint('srs_card', [reviewCard.data.id]);
       this._pushUndo({
         item: result.reviewCard,
-        description: `creating card "${result.reviewCard.file.basename}"`,
+        description,
+        footprint,
         undo: async () => {
+          if (!(await this._confirmDiscard(footprint, description))) {
+            return 'kept';
+          }
           // Where the embed was, and what it said, once the line is back in
           // its place: to put it back if the card can't be deleted after all
           let restored: { at: number; embed: string } | null = null;
@@ -1363,11 +1406,14 @@ export class Actions {
       });
       throw error;
     }
-    if (miss === 'retry') {
+    if (miss === 'retry' || miss === 'kept') {
       // Where it was: on top, when what was above it has gone meanwhile
       this.undoStack.splice(at, 0, actionEntry);
       this.emitter.emit();
-      Obsidian.notify(`Didn't undo ${actionEntry.description}`);
+      // Kept by the user's own choice, which needs no telling
+      if (miss === 'retry') {
+        Obsidian.notify(`Didn't undo ${actionEntry.description}`);
+      }
       return;
     }
     if (miss === 'failed') {
@@ -1398,10 +1444,18 @@ export class Actions {
       'result' in summary
         ? `importing "${getContentSlice(summary.name, CONTENT_TITLE_SLICE_LENGTH, true)}"`
         : `importing ${imports.length} article${imports.length === 1 ? '' : 's'} from ${summary.from}`;
+    const footprint = this._footprint(
+      'article',
+      imports.map(({ articleId }) => articleId)
+    );
     const entry: ActionStackEntry = {
       description,
       writes: true,
+      footprint,
       undo: async () => {
+        if (!(await this._confirmDiscard(footprint, description))) {
+          return 'kept';
+        }
         const undone = await this.plugin.reviewManager.undoImports(imports);
         await refreshAfterImportUndo(undone);
         // Those it couldn't take back were logged as it went
@@ -1608,6 +1662,57 @@ export class Actions {
     entry.restoreEpoch = this.plugin.reviewManager.repo.restoreEpoch();
     this.undoStack.push(entry);
     this.emitter.emit();
+  };
+
+  /**
+   * Note what the `table` items `ids`, which an action just made or brought
+   * back, are like now: for the undo that discards them to tell whether
+   * another device has changed them since (see {@link _confirmDiscard}).
+   * Taken at once, as the action is recorded.
+   */
+  private _footprint = (
+    table: ItemTable,
+    ids: readonly string[]
+  ): Promise<readonly UndoFootprint[]> => {
+    const { repo } = this.plugin.reviewManager;
+    return Promise.all(ids.map((id) => takeFootprint(repo, table, id))).then(
+      (taken) => taken.filter((noted): noted is UndoFootprint => noted !== null)
+    );
+  };
+
+  /**
+   * Whether an undo of `description`, which discards the items `footprint`
+   * notes, may go ahead: at once, unless another device has changed them
+   * since (see `changesSince`); then only once the user says so, asked again
+   * if more came in while they chose. Nothing is written meanwhile. Each
+   * undo calls this before it writes anything, answering `kept` when false.
+   */
+  private _confirmDiscard = async (
+    footprint: Promise<readonly UndoFootprint[]>,
+    description: string
+  ): Promise<boolean> => {
+    const footprints = await footprint;
+    if (footprints.length === 0) return true;
+    const { repo } = this.plugin.reviewManager;
+    let accepted: ChangesElsewhere | null = null;
+    for (;;) {
+      const changes = await changesSince(repo, footprints);
+      if (!changes || sameChanges(changes, accepted)) return true;
+      const said = describeChanges(changes);
+      const undoAnyway = await promptForConfirmation(this.plugin.app, {
+        title: `Undo ${description}?`,
+        paragraphs: [
+          said.length === 1
+            ? `Undoing will revert this change from ${changedWhere(changes)}:`
+            : `Undoing will revert these changes from ${changedWhere(changes)}:`,
+          said,
+        ],
+        confirmText: 'Undo anyway',
+        destructive: true,
+      });
+      if (!undoAnyway) return false;
+      accepted = changes;
+    }
   };
   // #endregion
 }
