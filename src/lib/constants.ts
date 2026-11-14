@@ -7,6 +7,7 @@ export const PLUGIN_ICON = 'incremental-reading';
 
 /** Stroke for the dismiss and restore icons, on every bar that shows them. */
 export const DISMISS_ICON_STROKE = '#f7b500';
+export const UN_DISMISS_ICON_STROKE = '#007afc';
 
 // TODO: move to settings
 export const DATA_DIRECTORY = 'incremental-reading';
