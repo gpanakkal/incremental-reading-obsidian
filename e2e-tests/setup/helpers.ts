@@ -366,7 +366,18 @@ async function announceObsidianVersion() {
   console.log(`[e2e] Testing against Obsidian ${await obsidianVersion()}`);
 }
 
-export async function launchElectron(vaultPath: string) {
+/**
+ * Launch Obsidian for `vaultPath`, as a device of its own: `profile` is the
+ * Electron user-data dir, which holds everything an install keeps outside the
+ * vault (the vault list and its `appId`, localStorage, IndexedDB). Two launches
+ * on one vault with different profiles are two devices to the plugin. Kept
+ * inside the vault copy by default, so deleting the copy deletes it, and the
+ * orphan sweep (./global-cleanup.ts) finds the process by its path.
+ */
+export async function launchElectron(
+  vaultPath: string,
+  profile = userDataDir(vaultPath)
+) {
   // Before the launch, not after: a build that fails to start is exactly when
   // the version matters most, and this way it is on the log either way.
   await announceObsidianVersion();
@@ -376,7 +387,7 @@ export async function launchElectron(vaultPath: string) {
       ...sandboxArg,
       ...hideWindowsArg,
       ...noThrottlingArgs,
-      `--user-data-dir=${userDataDir(vaultPath)}`,
+      `--user-data-dir=${profile}`,
       appPath,
       'open',
     ],
