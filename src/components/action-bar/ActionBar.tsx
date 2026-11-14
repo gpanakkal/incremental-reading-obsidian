@@ -18,6 +18,7 @@ import type { ActionStackEntry } from '#/lib/Actions';
 import {
   DISMISS_ICON_STROKE,
   QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE,
+  UN_DISMISS_ICON_STROKE,
 } from '#/lib/constants';
 import type { NoteSource } from '#/lib/item-context';
 import { routeSource } from '#/lib/item-source';
@@ -832,7 +833,7 @@ function DismissAction({ item }: { item: MaybeMissingItem }) {
       tooltip="Restore item to queue"
       handleClick={async () => await actions.unDismissItem(item)}
     >
-      <ArchiveRestore stroke={DISMISS_ICON_STROKE} />
+      <ArchiveRestore stroke={UN_DISMISS_ICON_STROKE} />
     </ButtonWithIcon>
   ) : (
     <ButtonWithIcon
