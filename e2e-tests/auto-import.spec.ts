@@ -40,6 +40,7 @@ type PageApp = {
   loadLocalStorage(key: string): unknown;
   vault: {
     getFileByPath(path: string): unknown;
+    getAbstractFileByPath(path: string): unknown;
     getFiles(): { path: string }[];
     createFolder(path: string): Promise<unknown>;
     create(path: string, data: string): Promise<unknown>;
@@ -115,42 +116,37 @@ async function writeVaultFile(at: string, content: string) {
 /**
  * Write `content` to `at` from outside while Obsidian runs, as a script would,
  * its folder first when the vault has none yet, and wait for the vault to
- * have the note (see {@link probeVaultSaw}).
+ * have the note (see {@link probeVaultSaw}), failing here when it never does:
+ * a test that goes on to check what was not imported would otherwise pass
+ * without the note ever having been in the vault.
  *
- * The folder goes in on its own, and the vault is seen to know it, before the
- * note does: a new folder is listed once its creation comes through Obsidian's
- * file watcher, and a note written in the same moment can be missing from
- * that listing and leave no event of its own behind (seen on macOS, where the
- * watcher is FSEvents), keeping the note out of the vault for good.
+ * The folder goes in on its own, and the vault is given time to know it,
+ * before the note does: a new folder is listed once its creation comes
+ * through Obsidian's file watcher, and a note written in the same moment can
+ * be missing from that listing and leave no event of its own behind (seen on
+ * macOS, where the watcher is FSEvents), keeping the note out of the vault
+ * for good. The folder's own event can go missing too (seen on CI on every
+ * operating system, on the first launch of a run), so it gets the same
+ * fallback as the note rather than failing the test here.
  */
 async function writeIntoOpenVault(at: string, content: string) {
   const slash = at.lastIndexOf('/');
   if (slash > 0) {
     const folder = at.slice(0, slash);
     await fs.mkdir(path.join(vaultPath, folder), { recursive: true });
-    await expect
-      .poll(
-        () =>
-          window.evaluate(
-            (folderPath) =>
-              (
-                window as unknown as {
-                  app: { vault: { getFolderByPath(path: string): unknown } };
-                }
-              ).app.vault.getFolderByPath(folderPath) !== null,
-            folder
-          ),
-        { message: `the vault knows the folder ${folder} made from outside` }
-      )
-      .toBe(true);
+    await probeVaultSaw(folder);
   }
   await fs.writeFile(path.join(vaultPath, at), content);
-  await probeVaultSaw(at);
+  expect(
+    await probeVaultSaw(at),
+    `the vault has ${at}, written from outside (see the vault-saw-external-write attachment)`
+  ).toBe(true);
 }
 
 /**
- * Wait for Obsidian's vault to pick up the note at `notePath`, written from
- * outside, and attach what happened to the test as `vault-saw-external-write`.
+ * Wait for Obsidian's vault to pick up the note or folder at `target`, written
+ * from outside, and attach what happened to the test as
+ * `vault-saw-external-write`. Resolves to whether the vault has it.
  *
  * Polled for `timeoutMs`. Should the vault still not have it, the change is
  * handed to Obsidian's adapter where its file watcher hands every change it
@@ -163,10 +159,10 @@ async function writeIntoOpenVault(at: string, content: string) {
  * Unofficial: `app.vault.adapter.watchers`, the desktop adapter's map of
  * watched folder paths ("/" for the vault root) to their `fs.watch` handles,
  * and `app.vault.adapter.onFileChange(path)`, what its watcher calls with
- * each changed path (both read from obsidian.asar 1.15.0). Shape-checked:
- * reported as "unknown", and not called, when missing.
+ * each changed path (both read from obsidian.asar 1.15.0 and 1.15.1).
+ * Shape-checked: reported as "unknown", and not called, when missing.
  */
-async function probeVaultSaw(notePath: string, timeoutMs = 10_000) {
+async function probeVaultSaw(target: string, timeoutMs = 10_000) {
   const read = () =>
     window
       .evaluate((at) => {
@@ -184,14 +180,14 @@ async function probeVaultSaw(notePath: string, timeoutMs = 10_000) {
         const folder = slash < 0 ? '/' : at.slice(0, slash);
         return {
           // A boolean only: a TFile does not survive the trip out of the page
-          seen: vault.getFileByPath(at) !== null,
+          seen: vault.getAbstractFileByPath(at) !== null,
           rootWatched: watched ? watched.includes('/') : 'unknown',
           // Desktop watches the root recursively on macOS and Windows, so a
           // folder of its own is only expected on Linux
           folderWatched: watched ? watched.includes(folder) : 'unknown',
           watched: watched ?? 'unknown',
         };
-      }, notePath)
+      }, target)
       .catch((error: unknown) => ({ error: String(error) }));
   const isSeen = (state: Awaited<ReturnType<typeof read>>) =>
     'seen' in state && state.seen;
@@ -217,7 +213,7 @@ async function probeVaultSaw(notePath: string, timeoutMs = 10_000) {
         if (typeof adapter?.onFileChange !== 'function') return 'unavailable';
         (adapter.onFileChange as (path: string) => void).call(adapter, at);
         return true;
-      }, notePath)
+      }, target)
       .catch(() => 'unavailable' as const);
     state = await pollUntilSeen(Date.now() + 5_000);
   }
@@ -225,13 +221,14 @@ async function probeVaultSaw(notePath: string, timeoutMs = 10_000) {
     .info()
     .attach('vault-saw-external-write', {
       body: JSON.stringify(
-        { notePath, afterMs: Date.now() - started, nudged, ...state },
+        { path: target, afterMs: Date.now() - started, nudged, ...state },
         null,
         2
       ),
       contentType: 'application/json',
     })
     .catch(() => {});
+  return isSeen(state);
 }
 
 /**
