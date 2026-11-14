@@ -1,5 +1,6 @@
 // Card, Snippet, ReviewLog, FSRSParameters
 import type { BackupFile } from '#/lib/repository/retention';
+import type { WriteVector } from '#/lib/repository/write-stamp';
 import type { Primitive, SafeOmit } from '#/lib/utility-types';
 import type { TAbstractFile, TFile } from 'obsidian';
 import type { Card, ReviewLog, StateType } from 'ts-fsrs';
@@ -310,6 +311,14 @@ export interface SQLiteRepository {
    * disposed — or null when it would not be.
    */
   writeRefusal(): Error | null;
+  /**
+   * This device's id (see `getDeviceId`), and the write stamp of the
+   * database as it is in memory now (see `readWriteVector`): which saves of
+   * each device it holds. Absent, or null, where there are no stamps, as for
+   * a database without the table: then nothing can tell another device's
+   * rows from this one's.
+   */
+  writeStamp?(): { device: string; seen: WriteVector } | null;
   /**
    * True while the reads that follow a reload of the database file run: they
    * must not write repairs then. Absent counts as false.

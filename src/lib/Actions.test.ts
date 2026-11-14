@@ -9,6 +9,7 @@ import { CONTENT_TITLE_SLICE_LENGTH, MS_PER_DAY } from '#/lib/constants';
 import * as contextFlash from '#/lib/context-flash';
 import * as itemContext from '#/lib/item-context';
 import * as itemSource from '#/lib/item-source';
+import type { DeleteOutcome } from '#/lib/items/ItemManager';
 import ReviewManager from '#/lib/items/ReviewManager';
 import { configureSuccessNotices } from '#/lib/notices';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
@@ -43,6 +44,7 @@ import {
   type ReviewSnippet,
   type ReviewText,
 } from '#/lib/types';
+import * as undoRecheck from '#/lib/undo-recheck';
 import * as unimportArticle from '#/lib/unimport-article';
 import { getContentSlice, getEndOfDay } from '#/lib/utils';
 import * as webViewer from '#/lib/web-viewer';
@@ -56,6 +58,7 @@ import { runOutMergeWait, TestRepository } from '#/test/item-vault';
 import { makeLinkVault } from '#/test/link-vault';
 import { showSuccessNotices } from '#/test/success-notices';
 import * as CardAnswerModal from '#/views/CardAnswerModal';
+import * as ConfirmModal from '#/views/ConfirmModal';
 import type ReviewView from '#/views/ReviewView';
 import { EditorState } from '@codemirror/state';
 import {
@@ -986,6 +989,96 @@ function epochRepo(epoch: number) {
 const restoredEpochsArb = fc
   .tuple(fc.nat(), fc.nat())
   .filter(([before, after]) => before !== after);
+
+/**
+ * What another device did to an undo's items since, as each check of it
+ * finds: `checks` in turn, then the last again. Every item has a footprint,
+ * as in a database with write stamps. The user answers each ask with
+ * `answers` in turn, and keeps the item at any after.
+ */
+function builtOnElsewhere(
+  checks: readonly (undoRecheck.ChangesElsewhere | null)[],
+  answers: readonly boolean[] = []
+) {
+  const takeFootprint = vi
+    .spyOn(undoRecheck, 'takeFootprint')
+    .mockImplementation(async (_repo, table, id) => ({
+      table,
+      id,
+      device: 'this-device',
+      seen: {},
+      snapshot: {},
+    }));
+  const changesSince = vi.spyOn(undoRecheck, 'changesSince');
+  for (const found of checks) changesSince.mockResolvedValueOnce(found);
+  changesSince.mockResolvedValue(checks.at(-1) ?? null);
+  const ask = vi.spyOn(ConfirmModal, 'promptForConfirmation');
+  for (const answer of answers) ask.mockResolvedValueOnce(answer);
+  ask.mockResolvedValue(false);
+  return { takeFootprint, changesSince, ask };
+}
+
+/** Another device reviewed the item once. */
+const ELSEWHERE: undoRecheck.ChangesElsewhere = {
+  devices: ['other-device'],
+  edits: [],
+  reviews: 1,
+  grades: 0,
+  relinked: false,
+};
+
+const changesElsewhereArb: fc.Arbitrary<undoRecheck.ChangesElsewhere> =
+  fc.record({
+    devices: fc
+      .uniqueArray(fc.uuid(), { minLength: 1, maxLength: 3 })
+      .map((devices) => devices.sort()),
+    edits: fc.subarray<undoRecheck.ItemEdit>([
+      'dismissed',
+      'edited',
+      'fixed interval changed',
+      'moved to the trash',
+      'priority changed',
+      'restored from the trash',
+      'un-dismissed',
+    ]),
+    reviews: fc.nat(4),
+    grades: fc.nat(4),
+    relinked: fc.boolean(),
+  });
+
+/** All the `call`th ask told the user, title and paragraphs, as one text. */
+function told(
+  ask: MockInstance<typeof ConfirmModal.promptForConfirmation>,
+  call = 0
+): string {
+  const [, { title, paragraphs }] = ask.mock.calls[call];
+  return [title, ...paragraphs.flat()].join('\n');
+}
+
+/**
+ * A snippet made from a note, as `Actions.createSnippet` makes one, whose
+ * delete, to undo it, answers `outcome`.
+ */
+function wireNoteSnippet(outcome: DeleteOutcome = 'deleted') {
+  const plugin = makePlugin();
+  const snippet = { data: { id: 'snippet-1' }, file: makeTFile('snippet') };
+  const deleteSnippet = vi.fn().mockResolvedValue(outcome);
+  Object.assign(plugin.reviewManager, {
+    createSnippet: vi.fn().mockResolvedValue(snippet),
+    snippets: {
+      delete: deleteSnippet,
+      offsetTracker: { removeHighlight() {} },
+    },
+  });
+  Object.assign(plugin.app.workspace, {
+    activeEditor: { editor: {} },
+    getActiveViewOfType: () => ({ file: makeTFile('source') }),
+    trigger: vi.fn(),
+  });
+  Object.assign(plugin, { getActiveReviewView: () => null });
+  const notify = vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
+  return { plugin, actions: new Actions(plugin), deleteSnippet, notify };
+}
 
 // #endregion
 
@@ -3575,6 +3668,28 @@ describe('Actions.createPdfSnippet', () => {
     expect(wired.actions.undoStack).toHaveLength(1);
   });
 
+  it('notes the snippet it makes, and takes nothing back when the user keeps what another device built on it', async () => {
+    const { takeFootprint } = builtOnElsewhere([ELSEWHERE], [false]);
+    const snippet = { data: { id: 'snippet-1' }, file: { basename: 'A' } };
+    const wired = wirePdfSnippet({
+      read: { start: 1e10, end: 1e10 + 1, text: 'a', subpath: '#page=1' },
+      snippet,
+    });
+    await wired.actions.createPdfSnippet(wired.reviewView);
+
+    expect(takeFootprint).toHaveBeenCalledExactlyOnceWith(
+      wired.actions.plugin.reviewManager.repo,
+      'snippet',
+      'snippet-1'
+    );
+
+    await wired.actions.undo();
+
+    expect(wired.deleteSnippet).not.toHaveBeenCalled();
+    expect(wired.removeHighlight).not.toHaveBeenCalled();
+    expect(wired.actions.undoStack).toHaveLength(1);
+  });
+
   it('records nothing to undo when the snippet could not be saved', async () => {
     const wired = wirePdfSnippet({
       read: { start: 1e10, end: 1e10 + 1, text: 'a', subpath: '#page=1' },
@@ -4089,6 +4204,29 @@ describe('Actions.createPdfCard', () => {
     // The selection was the card's input all the same, so it stays dropped
     expect(wired.viewer!.clearSelection).toHaveBeenCalledOnce();
     expect(Notice.messages).toEqual([]);
+  });
+
+  it('notes the card it makes, and takes nothing back when the user keeps what another device built on it', async () => {
+    const { takeFootprint } = builtOnElsewhere([ELSEWHERE], [false]);
+    const card = { data: { id: 'card-1' }, file: { basename: 'A' } };
+    const wired = wirePdfCard({
+      read: { start: 1e10, end: 1e10 + 1, text: 'a', subpath: '#page=1' },
+      answer: [0, 1],
+      card,
+    });
+    await wired.actions.createPdfCard(wired.reviewView);
+
+    expect(takeFootprint).toHaveBeenCalledExactlyOnceWith(
+      wired.plugin.reviewManager.repo,
+      'srs_card',
+      'card-1'
+    );
+
+    await wired.actions.undo();
+
+    expect(wired.deleteCard).not.toHaveBeenCalled();
+    expect(wired.trigger).not.toHaveBeenCalled();
+    expect(wired.actions.undoStack).toHaveLength(1);
   });
 
   it('records nothing to undo when the card could not be saved', async () => {
@@ -4756,6 +4894,30 @@ describe('Actions — undo of a card made from a note', () => {
         expect(text()).toBe(note.before + note.line + note.after);
       }),
       { numRuns: 60 }
+    );
+  });
+
+  it('notes the card it makes, and leaves the note and the card alone when the user keeps what another device built on it', async () => {
+    await fc.assert(
+      fc.asyncProperty(cardNoteArb, async (note) => {
+        vi.restoreAllMocks();
+        const { takeFootprint } = builtOnElsewhere([ELSEWHERE], [false]);
+
+        const { text, deleteCard, actions } = await makeCardThenUndo(
+          note,
+          true
+        );
+
+        expect(takeFootprint).toHaveBeenCalledExactlyOnceWith(
+          actions.plugin.reviewManager.repo,
+          'srs_card',
+          'card-1'
+        );
+        expect(deleteCard).not.toHaveBeenCalled();
+        expect(text()).toBe(note.before + note.embed + note.after);
+        expect(actions.undoStack).toHaveLength(1);
+      }),
+      { numRuns: 20 }
     );
   });
 
@@ -5441,6 +5603,43 @@ describe('Actions.recordImport', () => {
     );
   });
 
+  it('property: notes every article an import made or brought back, and takes none back when the user keeps what another device built on them', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(
+          importedArb.filter(({ effect }) => effect !== 'linked'),
+          { minLength: 1, maxLength: 4 }
+        ),
+        async (imports) => {
+          vi.restoreAllMocks();
+          const { takeFootprint } = builtOnElsewhere([ELSEWHERE], [false]);
+          const { actions, undoImports } = wireImports();
+          const outcomes = imports.map((imported) => ({
+            file: makeTFile('f'),
+            status: 'imported' as const,
+            ...imported,
+          }));
+
+          const entry = actions.recordImport({ from: 'x', outcomes })!;
+
+          expect(takeFootprint.mock.calls).toEqual(
+            imports.map(({ articleId }) => [
+              actions.plugin.reviewManager.repo,
+              'article',
+              articleId,
+            ])
+          );
+
+          await actions.undo();
+
+          expect(undoImports).not.toHaveBeenCalled();
+          expect(actions.undoStack).toEqual([entry]);
+        }
+      ),
+      { numRuns: 20 }
+    );
+  });
+
   it('is held while writes are refused, as every undo that writes is', async () => {
     const { actions, undoImports } = wireImports();
     Object.assign(actions.plugin.reviewManager, {
@@ -5782,5 +5981,165 @@ describe('Actions.undoImport and undoAction', () => {
     }
     expect(undoImports).not.toHaveBeenCalled();
     expect(actions.undoStack).toHaveLength(1);
+  });
+});
+
+describe('Actions — undo of an item another device built on', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('notes the snippet it makes as it makes it, for its undo to check', async () => {
+    const { takeFootprint } = builtOnElsewhere([null]);
+    const { plugin, actions } = wireNoteSnippet();
+
+    await actions.createSnippet();
+
+    expect(takeFootprint).toHaveBeenCalledExactlyOnceWith(
+      plugin.reviewManager.repo,
+      'snippet',
+      'snippet-1'
+    );
+  });
+
+  it('property: asks before discarding what another device built on, telling where and what changed there, and discards it only when told to', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        changesElsewhereArb,
+        fc.boolean(),
+        async (changes, undoAnyway) => {
+          vi.restoreAllMocks();
+          const { ask } = builtOnElsewhere([changes], [undoAnyway]);
+          const { plugin, actions, deleteSnippet, notify } = wireNoteSnippet();
+          await actions.createSnippet();
+          const [entry] = actions.undoStack;
+
+          await actions.undo();
+
+          expect(ask).toHaveBeenCalledOnce();
+          expect(ask.mock.calls[0][0]).toBe(plugin.app);
+          // What it discards is gone for good: styled as Obsidian styles a delete
+          expect(ask.mock.calls[0][1].destructive).toBe(true);
+          const text = told(ask);
+          expect(text).toContain(undoRecheck.changedWhere(changes));
+          const phrases = undoRecheck.describeChanges(changes);
+          // One change is spoken of in the singular
+          expect(text).toMatch(
+            phrases.length === 1 ? /\bthis change\b/ : /\bthese changes\b/
+          );
+          for (const phrase of phrases) {
+            expect(text).toContain(phrase);
+          }
+          if (undoAnyway) {
+            expect(deleteSnippet).toHaveBeenCalledExactlyOnceWith('snippet-1');
+            expect(actions.undoStack).toEqual([]);
+            expect(notify).toHaveBeenCalledExactlyOnceWith(
+              expect.stringContaining('snippet'),
+              { kind: 'success', category: 'undo' }
+            );
+          } else {
+            expect(deleteSnippet).not.toHaveBeenCalled();
+            expect(actions.undoStack).toEqual([entry]);
+            expect(notify).not.toHaveBeenCalled();
+          }
+        }
+      ),
+      { numRuns: 30 }
+    );
+  });
+
+  it('keeps a kept entry where it was on the stack, under what came after it', async () => {
+    builtOnElsewhere([ELSEWHERE], [false]);
+    const { actions, notify } = wireNoteSnippet();
+    await actions.createSnippet();
+    const [entry] = actions.undoStack;
+    const later = plainEntry('later');
+    actions._pushUndo(later);
+    const listener = vi.fn();
+    actions.subscribe(listener);
+
+    await actions.undoEntry(entry);
+
+    expect(actions.undoStack).toEqual([entry, later]);
+    expect(later.undo).not.toHaveBeenCalled();
+    expect(notify).not.toHaveBeenCalled();
+    // Taken off the stack, and put back
+    expect(listener).toHaveBeenCalledTimes(2);
+  });
+
+  it('asks again when more changed while the user chose, and goes ahead once nothing more has', async () => {
+    const more = { ...ELSEWHERE, reviews: 2 };
+    const { ask, changesSince } = builtOnElsewhere(
+      [ELSEWHERE, more, more],
+      [true, true]
+    );
+    const { actions, deleteSnippet } = wireNoteSnippet();
+    await actions.createSnippet();
+
+    await actions.undo();
+
+    expect(ask).toHaveBeenCalledTimes(2);
+    expect(told(ask, 1)).toContain(undoRecheck.describeChanges(more)[0]);
+    expect(changesSince).toHaveBeenCalledTimes(3);
+    expect(deleteSnippet).toHaveBeenCalledOnce();
+    expect(actions.undoStack).toEqual([]);
+  });
+
+  it('takes nothing back when kept at the second ask', async () => {
+    const { ask } = builtOnElsewhere(
+      [ELSEWHERE, { ...ELSEWHERE, edits: ['dismissed'] }],
+      [true, false]
+    );
+    const { actions, deleteSnippet, notify } = wireNoteSnippet();
+    await actions.createSnippet();
+    const [entry] = actions.undoStack;
+
+    await actions.undo();
+
+    expect(ask).toHaveBeenCalledTimes(2);
+    expect(deleteSnippet).not.toHaveBeenCalled();
+    expect(actions.undoStack).toEqual([entry]);
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it('undoes as before, without asking, when no other device changed anything since', async () => {
+    const { ask, changesSince } = builtOnElsewhere([null]);
+    const { actions, deleteSnippet } = wireNoteSnippet();
+    await actions.createSnippet();
+
+    await actions.undo();
+
+    expect(changesSince).toHaveBeenCalledOnce();
+    expect(ask).not.toHaveBeenCalled();
+    expect(deleteSnippet).toHaveBeenCalledOnce();
+    expect(actions.undoStack).toEqual([]);
+  });
+
+  it('undoes as before, without checking, when nothing could be noted of the item', async () => {
+    const { takeFootprint, changesSince, ask } = builtOnElsewhere([ELSEWHERE]);
+    takeFootprint.mockResolvedValue(null);
+    const { actions, deleteSnippet } = wireNoteSnippet();
+    await actions.createSnippet();
+
+    await actions.undo();
+
+    expect(changesSince).not.toHaveBeenCalled();
+    expect(ask).not.toHaveBeenCalled();
+    expect(deleteSnippet).toHaveBeenCalledOnce();
+  });
+
+  it('still says it did not undo when the delete is turned down after the user said to go ahead', async () => {
+    builtOnElsewhere([ELSEWHERE], [true]);
+    const { actions, deleteSnippet, notify } = wireNoteSnippet('declined');
+    await actions.createSnippet();
+    const [entry] = actions.undoStack;
+
+    await actions.undo();
+
+    expect(deleteSnippet).toHaveBeenCalledOnce();
+    expect(actions.undoStack).toEqual([entry]);
+    expect(notify).toHaveBeenCalledExactlyOnceWith(
+      expect.stringContaining('snippet')
+    );
   });
 });
