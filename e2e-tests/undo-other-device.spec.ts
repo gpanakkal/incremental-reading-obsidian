@@ -11,85 +11,18 @@ import {
   launchElectron,
   openVault,
 } from './setup/helpers';
+import {
+  confirmation,
+  highlights,
+  openNote,
+  select,
+  snippetIds,
+  type PageRepo,
+} from './setup/item-steps';
 
 let app: ElectronApplication;
 let window: Page;
 let vaultPath: string;
-
-// #region HELPERS
-
-/** The page-side Obsidian these tests reach. Unofficial: `window.app`. */
-type PageApp = {
-  vault: {
-    create(path: string, data: string): Promise<unknown>;
-  };
-  workspace: {
-    getLeaf(newLeaf: 'tab'): {
-      openFile(file: unknown, state?: unknown): Promise<void>;
-    };
-    setActiveLeaf(leaf: unknown, params: { focus: boolean }): void;
-    activeEditor: {
-      editor?: {
-        cm: {
-          state: { doc: { toString(): string } };
-          dispatch(spec: { selection: { anchor: number; head: number } }): void;
-        };
-      };
-    } | null;
-  };
-};
-
-type PageRepo = {
-  query(sql: string): Promise<Record<string, unknown>[]>;
-  mutate(sql: string, params: unknown[]): unknown;
-};
-
-/** Open a new note of `text` at `path` in a tab of its own, active. */
-const openNote = (page: Page, path: string, text: string) =>
-  page.evaluate(
-    async ([path, text]) => {
-      const { app } = window as unknown as { app: PageApp };
-      const file = await app.vault.create(path, text);
-      const leaf = app.workspace.getLeaf('tab');
-      await leaf.openFile(file, { active: true });
-      app.workspace.setActiveLeaf(leaf, { focus: true });
-    },
-    [path, text] as const
-  );
-
-/** Select `text` in the active editor. */
-const select = (page: Page, text: string) =>
-  page.evaluate((text) => {
-    const { app } = window as unknown as { app: PageApp };
-    const { cm } = app.workspace.activeEditor!.editor!;
-    const at = cm.state.doc.toString().indexOf(text);
-    cm.dispatch({ selection: { anchor: at, head: at + text.length } });
-  }, text);
-
-/** The ids of the snippets not deleted for good, once there are `count`. */
-async function snippetIds(page: Page, count: number) {
-  const read = () =>
-    page.evaluate(async () => {
-      const rows = await (
-        (window as unknown as RepoWindow).app.plugins.plugins[
-          'incremental-reading'
-        ].reviewManager.repo as unknown as PageRepo
-      ).query(
-        "SELECT id FROM snippet WHERE reference NOT LIKE '/ir-deleted/%'"
-      );
-      return rows.map(({ id }) => String(id));
-    });
-  await expect.poll(async () => (await read()).length).toBe(count);
-  return read();
-}
-
-const highlights = (page: Page) =>
-  page.locator('.workspace-leaf.mod-active .cm-line .ir-snippet-highlight');
-
-const confirmation = (page: Page) =>
-  page.locator('.modal-container.mod-confirmation');
-
-// #endregion
 
 test.beforeEach(async () => {
   vaultPath = await createVaultCopy('undo-elsewhere');
