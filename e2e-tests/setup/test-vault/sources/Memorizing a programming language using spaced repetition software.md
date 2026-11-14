@@ -94,8 +94,6 @@ You test it out yourself, play around with it, and understand it. Then make two 
 
   An empty array with a length of 5.
 
-![[When the program quizzes - 2025-10-23T19H40M - rtjva|ir-hide-title]]
-
 You can also try to trick yourself with more complicated examples, to keep these gotchas fresh in your mind:
 
   var a = [20, 10, 5, 1];
