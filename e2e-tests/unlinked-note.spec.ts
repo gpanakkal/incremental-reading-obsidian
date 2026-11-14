@@ -1,10 +1,12 @@
-import { ARTICLE_TAG } from '#/lib/constants';
+import { ARTICLE_TAG, SNIPPET_TAG } from '#/lib/constants';
 import { expect, type ElectronApplication, type Page } from '@playwright/test';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import {
   executeCommandById,
+  leafSnapshot,
   openFileInActiveLeaf,
+  REVIEW_VIEW_TYPE,
   setNativeMenus,
   waitForReviewItem,
 } from './helpers';
@@ -69,6 +71,32 @@ const mutate = (sql: string, params: unknown[] = []) =>
     [sql, params] as const
   );
 
+/** Where the database records the article `id`. */
+const articleReference = (id: string) =>
+  window.evaluate(async (id) => {
+    const { app } = window as unknown as {
+      app: {
+        plugins: {
+          plugins: Record<
+            string,
+            {
+              reviewManager: {
+                repo: {
+                  query(sql: string): Promise<Record<string, unknown>[]>;
+                };
+              };
+            }
+          >;
+        };
+      };
+    };
+    const { repo } = app.plugins.plugins['incremental-reading'].reviewManager;
+    const [row] = await repo.query(
+      `SELECT reference FROM article WHERE id = '${id}'`
+    );
+    return row ? String(row.reference) : null;
+  }, id);
+
 /** The `ir-id` the metadata cache holds for the note at `at`. */
 const cachedIrId = (at: string) =>
   window.evaluate((at) => {
@@ -108,11 +136,21 @@ async function seedDamagedArticle(irIdLine: string) {
   );
 }
 
-/** The row the damaged-notes notice lists for {@link NOTE}. */
-const noticeRow = () =>
+/** The row the damaged-notes notice lists for the note at `at`. */
+const noticeRow = (at = NOTE) =>
   window
     .locator('.notice.ir-damaged-notes-notice .ir-damaged-note')
-    .and(window.locator(`[data-path="${NOTE}"]`));
+    .and(window.locator(`[data-path="${at}"]`));
+
+/**
+ * The button the notice's row for the note at `at` offers for the row `id`,
+ * found `by` its path or its id: Re-associate, as a row the note can be given
+ * back to offers nothing else.
+ */
+const offer = (at: string, by: 'path' | 'id', id: string) =>
+  noticeRow(at).locator(
+    `.ir-damaged-note-actions button[data-by="${by}"][data-id="${id}"]`
+  );
 
 /**
  * The Re-associate the notice's row of buttons for {@link NOTE} offers for
@@ -125,9 +163,49 @@ const reassociateButton = () =>
 const actionBar = () =>
   window.locator('.mod-root .markdown-source-view .ir-action-bar-panel');
 
-/** The queue row of {@link NOTE}. */
-const queueRow = () =>
-  window.locator('.ir-queue-row').filter({ hasText: 'Unlinked article' });
+/** The queue row of the note named `name`, {@link NOTE}'s by default. */
+const queueRow = (name = 'Unlinked article') =>
+  window.locator('.ir-queue-row').filter({ hasText: name });
+
+/** Write a note of `text` at `at`, and wait for the vault to list it. */
+async function writeNote(at: string, text: string) {
+  await fs.writeFile(path.join(vaultPath, at), text);
+  await expect
+    .poll(() =>
+      window.evaluate(
+        (at) =>
+          (window as unknown as { app: PageApp }).app.vault.getFileByPath(
+            at
+          ) !== null,
+        at
+      )
+    )
+    .toBe(true);
+}
+
+/**
+ * Wait for the metadata cache to have read every note once, after which the
+ * plugin's startup scan for notes moved while it was off has begun, and with
+ * it read the rows it could follow. A row written after this is one the scan
+ * never follows. Undocumented: `MetadataCache.onCleanCache`.
+ */
+const cacheClean = () =>
+  window.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        (
+          window as unknown as {
+            app: { metadataCache: { onCleanCache(done: () => void): void } };
+          }
+        ).app.metadataCache.onCleanCache(resolve)
+      )
+  );
+
+/** Which item the review tab in front shows, once it shows a note. */
+const reviewed = async () => {
+  const { viewType, file, currentItemId } = await leafSnapshot(window);
+  return viewType === REVIEW_VIEW_TYPE && file ? currentItemId : null;
+};
 
 // #endregion
 
@@ -236,4 +314,115 @@ test("opens in review the queue row of an article whose note claims another's id
   await block('art').locator('button.mod-cta').click();
   await expect(noticeRow()).toHaveCount(0);
   await expect.poll(() => cachedIrId(NOTE)).toBe('art');
+});
+
+test('offers a note claiming the id of an article recorded where no file is to take that article over, which moves its row there, children and all', async () => {
+  const moved = 'Moved.md';
+  const snippet = 'Snip.md';
+  await cacheClean();
+  // A row whose note moved while nothing followed it, and a snippet of it
+  await mutate(
+    `INSERT INTO article (id, reference, due, interval, priority)
+     VALUES ('art', 'old/Gone.md', $1, 86400000, 30)`,
+    [Date.now() - 60_000]
+  );
+  await writeNote(
+    snippet,
+    `---\nir-id: snip\ntags:\n  - ${SNIPPET_TAG}\n---\nA snippet.\n`
+  );
+  await mutate(
+    `INSERT INTO snippet (id, reference, parent, context, due, interval, priority)
+     VALUES ('snip', $1, 'art', 'art', $2, 86400000, 30)`,
+    [snippet, Date.now() + 1e9]
+  );
+  await writeNote(
+    moved,
+    `---\nir-id: art\ntags:\n  - ${ARTICLE_TAG}\n---\nMoved text.\n`
+  );
+  await expect.poll(() => cachedIrId(moved)).toBe('art');
+  await executeCommandById(window, 'incremental-reading:learn');
+  await expect(queueRow('Snip')).toContainText('old/Gone.md');
+  expect(await articleReference('art')).toBe('old/Gone.md');
+
+  await openFileInActiveLeaf(window, moved);
+  const offered = noticeRow(moved).locator(
+    '.ir-damaged-note-actions [data-id]'
+  );
+  await expect(offered).toHaveCount(1);
+  await expect(offer(moved, 'id', 'art')).toBeVisible();
+
+  await offer(moved, 'id', 'art').click();
+
+  await expect(noticeRow(moved)).toHaveCount(0);
+  await expect.poll(() => articleReference('art')).toBe(moved);
+  await expect(actionBar()).toBeVisible();
+  // The snippet stays the article's, now named by where its note is
+  await executeCommandById(window, 'incremental-reading:learn');
+  await expect(queueRow('Snip')).toContainText(moved);
+  await expect(queueRow('Snip')).not.toContainText('old/Gone.md');
+});
+
+test('opens each unlinked queue row in review, whatever its note claims, offers to re-associate it, and serves all of them when due', async () => {
+  const other = 'Other article.md';
+  await writeNote(
+    other,
+    `---\nir-id: other\ntags:\n  - ${ARTICLE_TAG}\n---\nOther text.\n`
+  );
+  await expect.poll(() => cachedIrId(other)).toBe('other');
+  await mutate(
+    `INSERT INTO article (id, reference, due, interval, priority)
+     VALUES ('other', $1, $2, 86400000, 30)`,
+    [other, Date.now() + 86_400_000]
+  );
+  // Three article notes, due now: one claiming the other article's id, one
+  // whose own id was cut short, one whose id was taken off
+  const damaged = [
+    { id: 'oid', name: 'Claims other', claim: 'ir-id: other\n' },
+    { id: 'edited', name: 'Cut short', claim: 'ir-id: edit\n' },
+    { id: 'noid', name: 'No id', claim: '' },
+  ];
+  for (const { id, name, claim } of damaged) {
+    await writeNote(
+      `${name}.md`,
+      `---\n${claim}tags:\n  - ${ARTICLE_TAG}\n---\nText of ${name}.\n`
+    );
+    await mutate(
+      `INSERT INTO article (id, reference, due, interval, priority)
+       VALUES ($1, $2, $3, 86400000, 30)`,
+      [id, `${name}.md`, Date.now() - 60_000]
+    );
+  }
+
+  const pane = window.locator('.workspace-leaf.mod-active');
+  for (const { id, name } of damaged) {
+    await executeCommandById(window, 'incremental-reading:learn');
+    await expect(queueRow(name)).toHaveAttribute('data-unlinked', '');
+    await queueRow(name).click();
+    // Bounded inside `CURRENT_ITEM_REFETCH_TIME`, so only the click's own
+    // fetch can pass it
+    await expect(pane.locator('.ir-title')).toContainText(name, {
+      timeout: 3_000,
+    });
+    await expect(pane.locator('.ir-review-summary')).toHaveCount(0);
+    await expect(pane).toContainText(`Text of ${name}.`);
+    expect((await waitForReviewItem(window)).id).toBe(id);
+    await expect(offer(`${name}.md`, 'path', id)).toBeVisible();
+  }
+
+  // Due review brings each of them up in turn, and nothing else. Each step
+  // bounded inside `CURRENT_ITEM_REFETCH_TIME`, as above
+  await executeCommandById(window, 'incremental-reading:learn');
+  await window.locator('css=#begin-review-button').click();
+  const served: string[] = [];
+  for (let i = 0; i < damaged.length; i++) {
+    let current: string | null = null;
+    await expect
+      .poll(async () => (current = await reviewed()), { timeout: 3_000 })
+      .not.toBeNull();
+    served.push(current!);
+    await executeCommandById(window, 'incremental-reading:skip-item');
+    await expect.poll(() => reviewed(), { timeout: 3_000 }).not.toBe(current);
+  }
+  expect(served.sort()).toEqual(damaged.map(({ id }) => id).sort());
+  await expect(pane.locator('.ir-review-summary')).toBeVisible();
 });

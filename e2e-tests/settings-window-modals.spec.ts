@@ -326,3 +326,35 @@ test("opens the leftover modal from the notice's Manage button in the main windo
   await expect(leftoverModalIn(window)).toBeVisible();
   await expect(modalsIn(settings)).toHaveCount(0);
 });
+
+test('opens the leftover modal from the Manage button of a review tab moved to a window of its own, and the question it asks, in that window', async () => {
+  // A row at the leftover's path holding another id, which Confirm asks about
+  await mutate(
+    `INSERT INTO snippet (id, reference, due, interval, priority, deleted)
+     VALUES ('held-snippet', $1, $2, 86400000, 25, 1)`,
+    [LEFTOVER_PATH, Date.now() - 1_000]
+  );
+  await writeLeftover();
+  await executeCommandById(window, 'incremental-reading:learn');
+  await expect(window.locator('#manage-leftovers-button')).toBeVisible();
+  // Unofficial: Obsidian's "Move current tab to new window" command id
+  const opened = app.waitForEvent('window');
+  await executeCommandById(window, 'workspace:move-to-new-window');
+  const popout = await opened;
+  await popout.waitForLoadState('domcontentloaded');
+  const manage = popout.locator('#manage-leftovers-button');
+  await expect(manage).toBeVisible();
+  await expect(window.locator('#manage-leftovers-button')).toHaveCount(0);
+
+  await manage.click();
+
+  await expect(leftoverModalIn(popout)).toBeVisible();
+  await expect(modalsIn(window)).toHaveCount(0);
+  await leftoverModalIn(popout)
+    .locator('.modal-button-container .mod-cta')
+    .click();
+  await expect(
+    popout.locator('.modal-container.mod-confirmation')
+  ).toBeVisible();
+  await expect(modalsIn(window)).toHaveCount(0);
+});

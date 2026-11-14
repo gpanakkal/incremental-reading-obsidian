@@ -107,6 +107,27 @@ async function openPage(page: Page) {
   await expect(activeTabTitle(page)).toHaveText(PAGE_TITLE);
 }
 
+/**
+ * Turn the web viewer's own "Open external links in web viewer" option on or
+ * off, as its settings do, telling nothing else. Undocumented:
+ * `options.openExternalURLs` on its instance.
+ */
+const setOpensLinks = (page: Page, on: boolean) =>
+  page.evaluate((value) => {
+    const { app } = window as unknown as {
+      app: {
+        internalPlugins: {
+          getEnabledPluginById(id: string): {
+            options: { openExternalURLs: boolean };
+          };
+        };
+      };
+    };
+    app.internalPlugins.getEnabledPluginById(
+      'webviewer'
+    ).options.openExternalURLs = value;
+  }, on);
+
 /** Assert the review queue lists the article named for the page. */
 async function expectQueued(page: Page) {
   await executeCommandById(page, 'incremental-reading:learn');
@@ -251,29 +272,12 @@ test.describe('Go to source', () => {
       path.posix.basename(snippet, '.md')
     );
 
-    // Undocumented: the web viewer's own "Open external links in web viewer"
-    // option, `options.openExternalURLs` on its instance
-    const setOpensLinks = (on: boolean) =>
-      window.evaluate((value) => {
-        const { app } = window as unknown as {
-          app: {
-            internalPlugins: {
-              getEnabledPluginById(id: string): {
-                options: { openExternalURLs: boolean };
-              };
-            };
-          };
-        };
-        app.internalPlugins.getEnabledPluginById(
-          'webviewer'
-        ).options.openExternalURLs = value;
-      }, on);
-    await setOpensLinks(false);
+    await setOpensLinks(window, false);
     await expect(await openSourceEntry(window)).toHaveText(
       /in system browser$/
     );
     await closeMenu(window);
-    await setOpensLinks(true);
+    await setOpensLinks(window, true);
     const entry = await openSourceEntry(window);
     await expect(entry).not.toHaveText(/in system browser$/);
 
@@ -318,5 +322,57 @@ test.describe('Go to source', () => {
       });
     // The original, not the article copied from it
     await expect.poll(activeFile).toBe(VAULT_NOTE);
+  });
+
+  test("names and draws the review bar's Go to source for where it goes as the pointer comes over it, though the web viewer's choice to open links changed under it", async () => {
+    await reviewImportedPage(window);
+    const button = window.locator(
+      `.workspace-leaf.mod-active [data-type="${REVIEW_VIEW_TYPE}"] .ir-action-bar button.ir-go-to-source-button`
+    );
+    await expect(button).toBeVisible();
+    const tooltip = window.locator('.tooltip');
+    const elsewhere = window.locator('.workspace-leaf.mod-active .cm-content');
+
+    /**
+     * Bring the pointer over the button from elsewhere, and read the tooltip
+     * Obsidian shows for it and the icon the button draws then. Nothing else
+     * draws the bar again in between: only the pointer coming over it can
+     * have told it of the change.
+     */
+    async function hoverButton() {
+      await elsewhere.hover();
+      await expect(tooltip).toHaveCount(0);
+      await button.hover();
+      await expect(tooltip).toBeVisible();
+      return {
+        tooltip: (await tooltip.textContent()) ?? '',
+        icon: (await button.locator('svg').getAttribute('class')) ?? '',
+      };
+    }
+
+    /** The text of Go to source's entry in the ⋮ menu, named for where it goes. */
+    async function menuEntryText() {
+      const text = await (await openSourceEntry(window)).textContent();
+      await closeMenu(window);
+      return text;
+    }
+
+    await setOpensLinks(window, false);
+    const outside = await hoverButton();
+    expect(outside.tooltip).toBe(await menuEntryText());
+
+    await setOpensLinks(window, true);
+    const inside = await hoverButton();
+    expect(inside.tooltip).toBe(await menuEntryText());
+    expect(inside.tooltip).not.toBe(outside.tooltip);
+    expect(inside.icon).not.toBe(outside.icon);
+
+    // And it goes where it says: into a web viewer tab
+    await button.click();
+    await expect(
+      window.locator(
+        '.workspace-leaf.mod-active .workspace-leaf-content[data-type="webviewer"]'
+      )
+    ).toBeVisible();
   });
 });
