@@ -292,8 +292,8 @@ const reassociateOf = (notice: NoticeTarget, path: string, i: number) => {
 
 /** The type icon and name a notice or row names a note by, under `el`. */
 const labelIn = (el: Element | null | undefined) => ({
-  icon: el?.querySelector<HTMLElement>('.ir-damaged-note-icon') ?? null,
-  name: el?.querySelector<HTMLElement>('.ir-damaged-note-name') ?? null,
+  icon: el?.querySelector<HTMLElement>('.ir-item-icon') ?? null,
+  name: el?.querySelector<HTMLElement>('.ir-item-name') ?? null,
 });
 
 /** Whether a note's candidate lines are shown, which tell its buttons apart. */
@@ -1110,7 +1110,7 @@ describe('createDamagedNotesNotice', () => {
           // The full path on hover, for two notes of the same name
           expect(nameEl?.getAttribute('aria-label')).toBe(path);
           // Named once only, and with no line telling what became of its id
-          expect(row.querySelectorAll('.ir-damaged-note-name')).toHaveLength(
+          expect(row.querySelectorAll('.ir-item-name')).toHaveLength(
             lone ? 0 : 1
           );
           expect(row.querySelector('.ir-damaged-note-kind')).toBeNull();

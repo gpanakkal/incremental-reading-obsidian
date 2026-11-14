@@ -13,6 +13,7 @@ import {
 } from '#/lib/pdf/pdf-selection';
 import type IncrementalReadingPlugin from '#/main';
 import { promptForCardAnswer } from '#/views/CardAnswerModal';
+import { type RemovedItems, promptForChildren } from '#/views/ChildrenPrompt';
 import { promptForConfirmation } from '#/views/ConfirmModal';
 import type ReviewView from '#/views/ReviewView';
 import {
@@ -43,6 +44,7 @@ import {
   routeSource,
 } from './item-source';
 import type { CardSelection } from './items/CardManager';
+import { type ItemChild, childrenOf } from './items/item-children';
 import { NO_SNIPPET_FROM_CARD } from './items/SnippetManager';
 import { getMimeType } from './mime';
 import { computeMinimalChange } from './minimal-change';
@@ -263,6 +265,17 @@ function undoableImports(summary: ImportSummary): ImportedArticle[] {
             : []
         );
   return done.filter(({ effect }) => effect !== 'linked');
+}
+
+/** The titles of the articles `ids` of `summary`, in its order. */
+function importTitles(
+  summary: ImportSummary,
+  ids: ReadonlySet<string>
+): string[] {
+  if ('result' in summary) return [summary.name];
+  return summary.outcomes
+    .filter(({ articleId }) => articleId !== undefined && ids.has(articleId))
+    .map(({ file }) => file.basename);
 }
 
 /**
@@ -609,6 +622,11 @@ export class Actions {
           if (!(await this._confirmDiscard(footprint, description))) {
             return 'kept';
           }
+          const settled = await this._settleChildren([snippet.data.id], {
+            description,
+            removing: { kind: 'snippet', titles: [snippet.file.basename] },
+          });
+          if (settled) return settled;
           const outcome = await this.plugin.reviewManager.snippets.delete(
             snippet.data.id
           );
@@ -657,6 +675,11 @@ export class Actions {
           if (!(await this._confirmDiscard(footprint, description))) {
             return 'kept';
           }
+          const settled = await this._settleChildren([snippet.data.id], {
+            description,
+            removing: { kind: 'snippet', titles: [snippet.file.basename] },
+          });
+          if (settled) return settled;
           const { snippets } = this.plugin.reviewManager;
           const { id } = snippet.data;
           const paths = await this._pdfsHighlighting(
@@ -738,6 +761,11 @@ export class Actions {
           if (!(await this._confirmDiscard(footprint, description))) {
             return 'kept';
           }
+          const settled = await this._settleChildren([card.data.id], {
+            description,
+            removing: { kind: 'card', titles: [card.file.basename] },
+          });
+          if (settled) return settled;
           const { cards } = this.plugin.reviewManager;
           const { id } = card.data;
           const paths = await this._pdfsHighlighting(
@@ -873,6 +901,11 @@ export class Actions {
           if (!(await this._confirmDiscard(footprint, description))) {
             return 'kept';
           }
+          const settled = await this._settleChildren([reviewCard.data.id], {
+            description,
+            removing: { kind: 'card', titles: [reviewCard.file.basename] },
+          });
+          if (settled) return settled;
           // Where the embed was, and what it said, once the line is back in
           // its place: to put it back if the card can't be deleted after all
           let restored: { at: number; embed: string } | null = null;
@@ -1448,6 +1481,14 @@ export class Actions {
       'article',
       imports.map(({ articleId }) => articleId)
     );
+    // The articles it made. One it brought back from the trash its undo puts
+    // back there, with what hangs under it, as deleting it from the queue
+    // would: none of that is removed, so there is nothing to ask about
+    const madeIds = new Set(
+      imports
+        .filter(({ effect }) => effect !== 'restored')
+        .map(({ articleId }) => articleId)
+    );
     const entry: ActionStackEntry = {
       description,
       writes: true,
@@ -1456,6 +1497,16 @@ export class Actions {
         if (!(await this._confirmDiscard(footprint, description))) {
           return 'kept';
         }
+        const settled = await this._settleChildren([...madeIds], {
+          description,
+          removing: {
+            kind: 'article',
+            titles: importTitles(summary, madeIds),
+          },
+          // Those gone since it passes over, leaving what hangs under them
+          liveRoots: true,
+        });
+        if (settled) return settled;
         const undone = await this.plugin.reviewManager.undoImports(imports);
         await refreshAfterImportUndo(undone);
         // Those it couldn't take back were logged as it went
@@ -1678,6 +1729,71 @@ export class Actions {
     return Promise.all(ids.map((id) => takeFootprint(repo, table, id))).then(
       (taken) => taken.filter((noted): noted is UndoFootprint => noted !== null)
     );
+  };
+
+  /**
+   * Before an undo of `description` removes `removing`, the items `ids`: ask
+   * what to do with the snippets and cards under them, as the database holds
+   * them now, so those another device made and this one merged since count
+   * too (see `childrenOf`). With none, it asks nothing. Kept, they are left
+   * to the drop the undo's own delete runs, which moves them up a level (see
+   * `deleteRowStatements`). Removed, each goes as deleting it does, its note
+   * trashed and its highlight taken off, deepest first, so that no drop moves
+   * one up just before it goes too. Removed children stay removed whatever
+   * the undo does next: there is no redo.
+   * @returns null for the undo to go ahead; otherwise how it took nothing
+   *   back: `kept` when the user cancelled, `retry` when the children
+   *   couldn't be read, or how removing one of them went
+   */
+  private _settleChildren = async (
+    ids: readonly string[],
+    {
+      description,
+      removing,
+      liveRoots = false,
+    }: {
+      description: string;
+      removing: RemovedItems;
+      /** Whether the undo removes only those of `ids` still live (see `childrenOf`). */
+      liveRoots?: boolean;
+    }
+  ): Promise<UndoMiss | null> => {
+    if (ids.length === 0) return null;
+    const { repo, snippets, cards } = this.plugin.reviewManager;
+    let children: ItemChild[];
+    try {
+      children = await childrenOf(repo, ids, { liveRoots });
+    } catch (error) {
+      // Undone without asking, it could take a whole subtree with it unseen
+      console.error(error);
+      return 'retry';
+    }
+    if (children.length === 0) return null;
+    const choice = await promptForChildren(this.plugin.app, {
+      description,
+      removing,
+      children,
+    });
+    if (choice === 'cancel') return 'kept';
+    if (choice === 'keep') return null;
+    for (const child of children) {
+      // Without a prompt: the user has chosen, and Obsidian's would offer to
+      // delete the PDF a child's note links to as its source as well
+      const outcome = await (
+        child.table === 'snippet' ? snippets : cards
+      ).delete(child.id, { prompt: false });
+      if (outcome !== 'deleted') return undoMiss(outcome);
+      // Its row is deleted outright, which the repository reports no change
+      // for: take the highlight off by hand
+      if (child.highlightedIn !== null) {
+        snippets.offsetTracker.removeHighlight(child.highlightedIn, child.id);
+        this.plugin.app.workspace.trigger(
+          'ir-highlights-changed',
+          child.highlightedIn
+        );
+      }
+    }
+    return null;
   };
 
   /**

@@ -5,9 +5,15 @@ export interface ConfirmOptions {
   title: string;
   /**
    * The question and anything the user should know first, one per paragraph;
-   * one given as several lines is shown as a list of them.
+   * one given as several lines is shown as a list of them, and one given as
+   * a function is drawn by it, into an element of its own in that place, for
+   * what plain text can't show.
    */
-  paragraphs: readonly (string | readonly string[])[];
+  paragraphs: readonly (
+    | string
+    | readonly string[]
+    | ((el: HTMLElement) => void)
+  )[];
   /** The text of the button that goes ahead, such as "Delete". */
   confirmText: string;
   /** Style the confirm button as Obsidian styles one that deletes. */
@@ -115,6 +121,10 @@ export class ConfirmModal extends Modal {
           text: paragraph,
           parent: this.contentEl,
         });
+        continue;
+      }
+      if (typeof paragraph === 'function') {
+        paragraph(createDiv({ parent: this.contentEl }));
         continue;
       }
       const list = createEl('ul', { parent: this.contentEl });

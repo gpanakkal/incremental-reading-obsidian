@@ -1,12 +1,10 @@
-import { TYPE_ICONS } from '#/components/icons/typeIcons';
-import type { NoteType } from '#/lib/types';
-import { h, render as renderVNode } from 'preact';
 import { NOTICE_MIN_DURATION_MS } from './constants';
 import type {
   Candidate,
   DamagedNote,
   DamagedNoteActions,
 } from './damaged-note-actions';
+import { appendItemLabel, KIND_BY_TABLE, noteName } from './item-label';
 import type { ItemTable } from './moved-note-scan';
 import { notify } from './notices';
 
@@ -274,12 +272,6 @@ export function createIrIdWarning({
  */
 export const DAMAGED_NOTES_LISTED = 10;
 
-/** A note's name as the user sees it: its file name, less a `.md`. */
-function noteName(path: string): string {
-  const file = path.slice(path.lastIndexOf('/') + 1);
-  return file.endsWith('.md') ? file.slice(0, -'.md'.length) : file;
-}
-
 /**
  * Where a row points, said without the note's name, which the line above it
  * already gives: its folder, or the vault's root.
@@ -288,16 +280,6 @@ function noteWhere(path: string): string {
   const cut = path.lastIndexOf('/');
   return cut === -1 ? 'at the vault root' : `in ${path.slice(0, cut)}/`;
 }
-
-/**
- * The kind of item each table holds, as a row of the notice names it, and as
- * the type its icon and tint are drawn for.
- */
-const KIND_BY_TABLE: Readonly<Record<ItemTable, NoteType>> = {
-  article: 'article',
-  snippet: 'snippet',
-  srs_card: 'card',
-};
 
 /**
  * What the notice says above its rows, about `count` notes whose `ir-id` was
@@ -311,25 +293,6 @@ export function damagedNotesHeading(count: number): string {
 }
 
 /**
- * Name the note at `path` under `parent` as the queue would: its type's icon
- * on its type's tint, then its name, the full path on hover for two notes of
- * the same name.
- */
-function appendNoteLabel(parent: HTMLElement, path: string, table: ItemTable) {
-  const type = KIND_BY_TABLE[table];
-  const icon = parent.createSpan({
-    cls: 'ir-damaged-note-icon',
-    attr: { 'data-type': type },
-  });
-  renderVNode(h(TYPE_ICONS[type], {}), icon);
-  parent.createSpan({
-    cls: 'ir-damaged-note-name',
-    text: noteName(path),
-    attr: { 'aria-label': path },
-  });
-}
-
-/**
  * The notice's message for `notes`: a lone note named in it, by its icon and
  * name; several counted, each named on its own row instead.
  */
@@ -340,7 +303,7 @@ function damagedNotesMessage(
   const [{ path, table }] = notes;
   return createFragment((message) => {
     message.append('Incremental reading: the ID of ');
-    appendNoteLabel(message.createSpan('ir-damaged-note-label'), path, table);
+    appendItemLabel(message, path, table);
     message.append(' was removed or changed in the note');
   });
 }
@@ -696,7 +659,7 @@ export function createDamagedNotesNotice(
       });
       // A lone note is named in the message above
       if (notes.length > 1) {
-        appendNoteLabel(
+        appendItemLabel(
           row.createDiv('ir-damaged-note-title'),
           note.path,
           note.table
