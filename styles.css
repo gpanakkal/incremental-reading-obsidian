@@ -1804,17 +1804,17 @@ body:not(.is-mobile) .ir-grade-row {
    and Obsidian puts `--color-*-rgb` on `body`. See the `--ir-transclusion-*`
    block at the top of this file. */
 .ir-type-filter-row[data-type='article'],
-.ir-damaged-note-icon[data-type='article'] {
+.ir-item-icon[data-type='article'] {
   --ir-type-tint-rgb: var(--color-blue-rgb);
 }
 
 .ir-type-filter-row[data-type='snippet'],
-.ir-damaged-note-icon[data-type='snippet'] {
+.ir-item-icon[data-type='snippet'] {
   --ir-type-tint-rgb: var(--color-yellow-rgb);
 }
 
 .ir-type-filter-row[data-type='card'],
-.ir-damaged-note-icon[data-type='card'] {
+.ir-item-icon[data-type='card'] {
   --ir-type-tint-rgb: var(--color-green-rgb);
 }
 
@@ -3859,35 +3859,32 @@ input.ir-queue-page-input {
   margin-top: var(--size-2-1);
 }
 
-/* The icon and the name as one unit, so the icon sits beside the name's
-   first line rather than stranded at the end of the line before it when the
-   name wraps; in the message it is an inline unit, so it wraps as a whole
-   under "the ir-id of" and the name wraps inside it */
-.ir-damaged-note-label,
-.ir-damaged-note-title {
-  display: flex;
+/* An item named as the queue names it (`appendItemLabel`): the icon and the
+   name as one unit, so the icon sits beside the name's first line rather
+   than stranded at the end of the line before it when the name wraps. Inline
+   in running text, it wraps as a whole and the name wraps inside it. */
+.ir-item-label {
+  display: inline-flex;
   align-items: flex-start;
   gap: var(--size-2-2);
-}
-
-.ir-damaged-note-label {
-  display: inline-flex;
   vertical-align: top;
+  max-width: 100%;
 }
 
 /* The full path on hover; a long name wraps anywhere, as on a phone */
-.ir-damaged-note-name {
+.ir-item-name {
   min-width: 0;
   font-weight: var(--font-semibold);
   overflow-wrap: anywhere;
 }
 
 /* The type icon on the tint the type filter gives that type (see
-   `.ir-type-filter-row-icon`). Its stroke takes the notice's own text colour
-   (`--notice-color`, read from obsidian.asar: near-white on a dark notice in
-   either theme) rather than `--text-normal`, which is dark in the light
-   theme and vanished against the notice. */
-.ir-damaged-note-icon {
+   `.ir-type-filter-row-icon`). Its stroke takes the text colour around it:
+   in a notice, the notice's own (`--notice-color`, read from obsidian.asar:
+   near-white on a dark notice in either theme), which `--text-normal`, dark
+   in the light theme, would vanish against; in a modal, `--text-normal`, as
+   the type filter's enabled rows draw it on the same tint. */
+.ir-item-icon {
   display: inline-flex;
   flex: none;
   padding: var(--size-2-1);
@@ -3896,10 +3893,15 @@ input.ir-queue-page-input {
   color: inherit;
 }
 
-.ir-damaged-note-icon svg {
+.ir-item-icon svg {
   width: var(--icon-xs);
   height: var(--icon-xs);
   stroke-width: var(--icon-xs-stroke-width);
+}
+
+/* A row's title holds its label alone, on a line of its own */
+.ir-damaged-note-title {
+  display: flex;
 }
 
 /* Dimmed rather than recoloured: the notice's own colours are the theme's */
@@ -3953,6 +3955,34 @@ input.ir-queue-page-input {
 /* Obsidian's buttons take `--cursor`, `default` unless the user changes it */
 .ir-confirm-button:not(:disabled) {
   cursor: pointer;
+}
+
+/* The children an undo would remove (ChildrenPrompt.ts), a row each. An
+   import's undo can list dozens: the list scrolls rather than pushing the
+   buttons off the screen, on a phone too. */
+.ir-children-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-4-2);
+  max-height: min(40vh, 20em);
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.ir-children-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--size-2-1) var(--size-4-2);
+  min-width: 0;
+}
+
+/* A trashed child, still restorable: said beside its name, muted */
+.ir-children-trashed {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
 }
 
 /* #endregion */

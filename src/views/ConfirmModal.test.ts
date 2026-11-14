@@ -234,6 +234,59 @@ describe('ConfirmModal', () => {
     );
   });
 
+  it('property: renders each paragraph given as a function into an element of its own, in place among the text and lists', () => {
+    fc.assert(
+      fc.property(
+        fc.array(
+          fc.oneof(
+            fc.string(),
+            fc.array(fc.string(), { maxLength: 3 }),
+            fc.string().map((mark) => ({ mark }))
+          ),
+          { maxLength: 5 }
+        ),
+        (given) => {
+          const rendered: HTMLElement[] = [];
+          const paragraphs = given.map((paragraph) =>
+            typeof paragraph === 'object' && 'mark' in paragraph
+              ? (el: HTMLElement) => {
+                  rendered.push(el);
+                  el.dataset.mark = paragraph.mark;
+                }
+              : paragraph
+          );
+          const modal = new ConfirmModal(
+            APP,
+            { title: 't', paragraphs, confirmText: 'c' },
+            () => {}
+          );
+          modal.open();
+
+          expect(
+            [...modal.contentEl.children].map((el) =>
+              el instanceof HTMLDivElement ? el.dataset.mark : el.tagName
+            )
+          ).toStrictEqual(
+            given.map((paragraph) =>
+              typeof paragraph === 'string'
+                ? 'P'
+                : 'mark' in paragraph
+                  ? paragraph.mark
+                  : 'UL'
+            )
+          );
+          expect(
+            rendered.every((el) => el.parentElement === modal.contentEl)
+          ).toBe(true);
+          expect(rendered).toHaveLength(
+            given.filter((p) => typeof p === 'object' && 'mark' in p).length
+          );
+          modal.close();
+        }
+      )
+    );
+  });
+
   it.each([
     ['confirm button', [[true]], 0, 2],
     ['alternative', [], 1, 1],

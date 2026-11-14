@@ -78,6 +78,28 @@ test('asks before undoing a snippet another device reviewed: Cancel keeps it, an
   await executeCommandById(window, 'incremental-reading:undo');
   await expect(confirmation(window)).toBeVisible();
   await confirmation(window).locator('button.mod-cta').click();
+  // The card made there hangs under the snippet: what to do with it is asked
+  // next, in a prompt of its own, and removing it too takes it with the snippet
+  const choices = confirmation(window).locator(
+    '.modal-button-container > button'
+  );
+  await expect(choices).toHaveCount(3);
+  await choices.and(window.locator('.mod-destructive')).click();
+  await expect(confirmation(window)).toHaveCount(0);
   await expect(highlights(window)).toHaveCount(0);
   await snippetIds(window, 0);
+  await expect
+    .poll(() =>
+      window.evaluate(async () => {
+        const rows = await (
+          (window as unknown as RepoWindow).app.plugins.plugins[
+            'incremental-reading'
+          ].reviewManager.repo as unknown as PageRepo
+        ).query(
+          "SELECT id FROM srs_card WHERE reference NOT LIKE '/ir-deleted/%'"
+        );
+        return rows.length;
+      })
+    )
+    .toBe(0);
 });

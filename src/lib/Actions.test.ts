@@ -9,6 +9,7 @@ import { CONTENT_TITLE_SLICE_LENGTH, MS_PER_DAY } from '#/lib/constants';
 import * as contextFlash from '#/lib/context-flash';
 import * as itemContext from '#/lib/item-context';
 import * as itemSource from '#/lib/item-source';
+import * as itemChildren from '#/lib/items/item-children';
 import type { DeleteOutcome } from '#/lib/items/ItemManager';
 import ReviewManager from '#/lib/items/ReviewManager';
 import { configureSuccessNotices } from '#/lib/notices';
@@ -58,6 +59,7 @@ import { runOutMergeWait, TestRepository } from '#/test/item-vault';
 import { makeLinkVault } from '#/test/link-vault';
 import { showSuccessNotices } from '#/test/success-notices';
 import * as CardAnswerModal from '#/views/CardAnswerModal';
+import * as ChildrenPrompt from '#/views/ChildrenPrompt';
 import * as ConfirmModal from '#/views/ConfirmModal';
 import type ReviewView from '#/views/ReviewView';
 import { EditorState } from '@codemirror/state';
@@ -103,10 +105,12 @@ function makePlugin() {
     reviewManager: {
       dismissItem: vi.fn().mockResolvedValue(undefined),
       unDismissItem: vi.fn().mockResolvedValue(true),
+      // A database holding nothing an undo finds under its items
       repo: {
         writeRefusal: () => null,
         readiness: 'ready',
         restoreEpoch: () => 0,
+        query: async () => [],
       },
     },
     app: {
@@ -6141,5 +6145,582 @@ describe('Actions — undo of an item another device built on', () => {
     expect(notify).toHaveBeenCalledExactlyOnceWith(
       expect.stringContaining('snippet')
     );
+  });
+});
+
+// #region HELPERS
+
+/** Each kind of undo entry that removes an item, as the user made it. */
+const REMOVING_KINDS = [
+  'note snippet',
+  'PDF snippet',
+  'PDF card',
+  'note card',
+  'import',
+] as const;
+type RemovingKind = (typeof REMOVING_KINDS)[number];
+
+/** The item each kind's undo removes, and how the user is told of it. */
+const REMOVED: Record<
+  RemovingKind,
+  { id: string; removing: ChildrenPrompt.RemovedItems }
+> = {
+  'note snippet': {
+    id: 'snippet-1',
+    removing: { kind: 'snippet', titles: ['A snippet'] },
+  },
+  'PDF snippet': {
+    id: 'snippet-1',
+    removing: { kind: 'snippet', titles: ['A snippet'] },
+  },
+  'PDF card': {
+    id: 'card-1',
+    removing: { kind: 'card', titles: ['A card'] },
+  },
+  'note card': {
+    id: 'card-1',
+    removing: { kind: 'card', titles: ['A card'] },
+  },
+  import: {
+    id: 'article-1',
+    removing: { kind: 'article', titles: ['An article'] },
+  },
+};
+
+/**
+ * Snippets and cards under an item, deepest first as `childrenOf` lists them:
+ * any mix, of ids no root holds, trashed or not, highlighted somewhere or not.
+ */
+const itemChildrenArb: fc.Arbitrary<itemChildren.ItemChild[]> = fc.uniqueArray(
+  fc.record({
+    table: fc.constantFrom<itemChildren.ItemChild['table']>(
+      'snippet',
+      'srs_card'
+    ),
+    id: fc.uuid(),
+    trashed: fc.boolean(),
+    reference: fc.constantFrom('cards/c.md', 'snippets/t.md', 'u.md'),
+    highlightedIn: fc.option(
+      fc.constantFrom('notes/a.md', 'papers/paper.pdf', 'snippets/s.md')
+    ),
+  }),
+  { minLength: 1, maxLength: 5, selector: ({ id }) => id }
+);
+
+/**
+ * Actions whose undo of a `kind` entry finds `children` under its item, read
+ * as the undo runs, and whose user answers the question about them with
+ * `choice`. Every delete, the item's and its children's, goes into `deleted`
+ * in turn, answering `outcome` for a child and `deleted` for the item.
+ */
+function wireChildren(
+  kind: RemovingKind,
+  {
+    children = [],
+    choice = 'cancel',
+    outcome = 'deleted',
+  }: {
+    children?: itemChildren.ItemChild[] | Error;
+    choice?: ChildrenPrompt.ChildrenChoice;
+    outcome?: DeleteOutcome;
+  } = {}
+) {
+  const plugin = makePlugin();
+  const { id } = REMOVED[kind];
+  const deleted: [string, unknown][] = [];
+  const deleteOf = (table: string) =>
+    vi.fn(async (deleting: string, options?: unknown) => {
+      deleted.push([`${table}:${deleting}`, options]);
+      return deleting === id ? 'deleted' : outcome;
+    });
+  const removeHighlight = vi.fn();
+  const trigger = vi.fn();
+  const pdf = pdfFile('pdf', 'paper');
+  const snippet = { data: { id: 'snippet-1' }, file: makeTFile('A snippet') };
+  const card = { data: { id: 'card-1' }, file: makeTFile('A card') };
+  Object.assign(plugin.reviewManager, {
+    createSnippet: vi.fn().mockResolvedValue(snippet),
+    createCard: vi.fn().mockResolvedValue({
+      reviewCard: card,
+      embed: '![[c]]',
+      line: 'line',
+      lineNumber: 0,
+      before: '',
+      after: '',
+    }),
+    getReviewItemFromId: vi.fn().mockResolvedValue(null),
+    undoImports: vi.fn(async (imports: readonly ImportedArticle[]) => {
+      for (const { articleId } of imports) {
+        deleted.push([`article:${articleId}`, undefined]);
+      }
+      return imports.map(({ articleId }) => articleId);
+    }),
+    snippets: {
+      createFromPdf: vi.fn().mockResolvedValue(snippet),
+      fetch: vi.fn(async (fetched: string) => ({ data: { id: fetched } })),
+      delete: deleteOf('snippet'),
+      offsetTracker: { removeHighlight },
+    },
+    cards: {
+      createFromPdf: vi.fn().mockResolvedValue(card),
+      fetch: vi.fn(async (fetched: string) => ({ data: { id: fetched } })),
+      delete: deleteOf('srs_card'),
+    },
+  });
+  Object.assign(plugin.app, {
+    vault: { read: vi.fn(async () => ''), process: vi.fn() },
+  });
+  Object.assign(plugin.app.workspace, {
+    activeEditor: { editor: {} },
+    getActiveViewOfType: () => ({ file: makeTFile('source') }),
+    trigger,
+  });
+  Object.assign(plugin, { getActiveReviewView: () => null });
+  vi.spyOn(Obsidian, 'findEmbeds').mockReturnValue(null);
+  vi.spyOn(Obsidian, 'editNote').mockResolvedValue(undefined as never);
+  vi.spyOn(CardAnswerModal, 'promptForCardAnswer').mockResolvedValue(
+    'answer' as never
+  );
+  vi.spyOn(unimportArticle, 'refreshAfterImportUndo').mockResolvedValue(
+    undefined
+  );
+  const notify = vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
+  const error = vi.spyOn(console, 'error').mockReturnValue(undefined);
+  const childrenOf = vi.spyOn(itemChildren, 'childrenOf');
+  if (children instanceof Error) childrenOf.mockRejectedValue(children);
+  else childrenOf.mockResolvedValue(children);
+  const prompt = vi
+    .spyOn(ChildrenPrompt, 'promptForChildren')
+    .mockResolvedValue(choice);
+  const actions = new Actions(plugin);
+  // Read off the PDF on screen, as `_readPdfSelection` reads it
+  Object.assign(actions, {
+    _readPdfSelection: async () => ({
+      origin: { pdf },
+      selection: { start: 1, end: 2, text: 'text', subpath: '#page=1' },
+    }),
+  });
+  const host = { pdfViewer: null, currentItemFile: () => pdf };
+  const make = async () => {
+    switch (kind) {
+      case 'note snippet':
+        await actions.createSnippet();
+        break;
+      case 'PDF snippet':
+        await actions.createPdfSnippet(host);
+        break;
+      case 'PDF card':
+        await actions.createPdfCard(host);
+        break;
+      case 'note card':
+        await actions.createCard();
+        break;
+      case 'import':
+        actions.recordImport({
+          name: 'An article',
+          result: { articleId: 'article-1', effect: 'created' },
+        });
+        break;
+    }
+    expect(actions.undoStack).toHaveLength(1);
+    return actions.undoStack[0];
+  };
+  return {
+    plugin,
+    actions,
+    make,
+    deleted,
+    removeHighlight,
+    trigger,
+    notify,
+    error,
+    childrenOf,
+    prompt,
+  };
+}
+
+/** What `deleted` holds for the deletes of `children`, in turn, each without a prompt. */
+const childDeletes = (children: readonly itemChildren.ItemChild[]) =>
+  children.map(({ table, id }) => [`${table}:${id}`, { prompt: false }]);
+
+/** The delete of the item a `kind` entry's undo removes, by its own path. */
+const ownDelete = (kind: RemovingKind) => {
+  const { id } = REMOVED[kind];
+  if (kind === 'import') return `article:${id}`;
+  return `${kind.endsWith('card') ? 'srs_card' : 'snippet'}:${id}`;
+};
+
+// #endregion
+describe.each(REMOVING_KINDS)(
+  'Actions — undo of a %s whose item has children',
+  (kind) => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('undoes as before, asking nothing, when nothing hangs under the item', async () => {
+      const wired = wireChildren(kind, { children: [] });
+      await wired.make();
+
+      await wired.actions.undo();
+
+      // An import's undo passes over an article gone since, so what hangs
+      // under one is not its to remove
+      expect(wired.childrenOf).toHaveBeenCalledExactlyOnceWith(
+        wired.plugin.reviewManager.repo,
+        [REMOVED[kind].id],
+        { liveRoots: kind === 'import' }
+      );
+      expect(wired.prompt).not.toHaveBeenCalled();
+      expect(wired.deleted.map(([what]) => what)).toEqual([ownDelete(kind)]);
+      expect(wired.actions.undoStack).toEqual([]);
+    });
+
+    it('property: tells the user what the undo removes and what hangs under it, read as it runs', async () => {
+      await fc.assert(
+        fc.asyncProperty(itemChildrenArb, async (children) => {
+          vi.restoreAllMocks();
+          const wired = wireChildren(kind, { children });
+          const entry = await wired.make();
+          // Read at undo time, not as the entry was made
+          expect(wired.childrenOf).not.toHaveBeenCalled();
+
+          await wired.actions.undo();
+
+          expect(wired.prompt).toHaveBeenCalledExactlyOnceWith(
+            wired.plugin.app,
+            {
+              description: entry.description,
+              removing: REMOVED[kind].removing,
+              children,
+            }
+          );
+        }),
+        { numRuns: 20 }
+      );
+    });
+
+    it('property: takes nothing back, keeping the entry and saying nothing, when the user cancels', async () => {
+      await fc.assert(
+        fc.asyncProperty(itemChildrenArb, async (children) => {
+          vi.restoreAllMocks();
+          const wired = wireChildren(kind, { children, choice: 'cancel' });
+          const entry = await wired.make();
+
+          await wired.actions.undo();
+
+          expect(wired.deleted).toEqual([]);
+          expect(wired.removeHighlight).not.toHaveBeenCalled();
+          expect(wired.actions.undoStack).toEqual([entry]);
+          expect(wired.notify).not.toHaveBeenCalled();
+        }),
+        { numRuns: 20 }
+      );
+    });
+
+    it('property: removes the item alone when the user keeps the children, consuming the entry', async () => {
+      await fc.assert(
+        fc.asyncProperty(itemChildrenArb, async (children) => {
+          vi.restoreAllMocks();
+          const wired = wireChildren(kind, { children, choice: 'keep' });
+          await wired.make();
+
+          await wired.actions.undo();
+
+          expect(wired.deleted.map(([what]) => what)).toEqual([
+            ownDelete(kind),
+          ]);
+          for (const { id } of children) {
+            expect(wired.removeHighlight).not.toHaveBeenCalledWith(
+              expect.anything(),
+              id
+            );
+          }
+          expect(wired.actions.undoStack).toEqual([]);
+          expect(wired.notify).toHaveBeenCalledExactlyOnceWith(
+            expect.any(String),
+            { kind: 'success', category: 'undo' }
+          );
+        }),
+        { numRuns: 20 }
+      );
+    });
+
+    it('property: removes the children deepest first, highlights and all, and then the item, when the user removes them too', async () => {
+      await fc.assert(
+        fc.asyncProperty(itemChildrenArb, async (children) => {
+          vi.restoreAllMocks();
+          const wired = wireChildren(kind, { children, choice: 'remove' });
+          await wired.make();
+
+          await wired.actions.undo();
+
+          expect(wired.deleted.slice(0, children.length)).toEqual(
+            childDeletes(children)
+          );
+          expect(
+            wired.deleted.slice(children.length).map(([what]) => what)
+          ).toEqual([ownDelete(kind)]);
+          for (const { id, highlightedIn } of children) {
+            if (highlightedIn === null) {
+              expect(wired.removeHighlight).not.toHaveBeenCalledWith(
+                expect.anything(),
+                id
+              );
+              continue;
+            }
+            expect(wired.removeHighlight).toHaveBeenCalledWith(
+              highlightedIn,
+              id
+            );
+            expect(wired.trigger).toHaveBeenCalledWith(
+              'ir-highlights-changed',
+              highlightedIn
+            );
+          }
+          expect(wired.actions.undoStack).toEqual([]);
+          expect(wired.notify).toHaveBeenCalledExactlyOnceWith(
+            expect.any(String),
+            { kind: 'success', category: 'undo' }
+          );
+        }),
+        { numRuns: 20 }
+      );
+    });
+  }
+);
+
+describe('Actions — undo of an item with children, past the choice', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const CHILDREN: itemChildren.ItemChild[] = [
+    {
+      table: 'srs_card',
+      id: 'card-2',
+      trashed: false,
+      reference: 'cards/card-2.md',
+      highlightedIn: null,
+    },
+    {
+      table: 'snippet',
+      id: 'snippet-2',
+      trashed: true,
+      reference: 'snippets/snippet-2.md',
+      highlightedIn: 'notes/a.md',
+    },
+  ];
+
+  it.each([
+    ['refused', 1, undefined],
+    ['failed', 0, { kind: 'error' }],
+  ] as const)(
+    'stops at a child whose delete is %s, leaving the item, and keeps the entry only for another try',
+    async (outcome, left, notice) => {
+      const wired = wireChildren('note snippet', {
+        children: CHILDREN,
+        choice: 'remove',
+        outcome,
+      });
+      await wired.make();
+
+      await wired.actions.undo();
+
+      expect(wired.deleted).toEqual(childDeletes(CHILDREN.slice(0, 1)));
+      expect(wired.actions.undoStack).toHaveLength(left);
+      if (notice) {
+        expect(wired.notify).toHaveBeenCalledExactlyOnceWith(
+          expect.stringContaining('snippet'),
+          notice
+        );
+      } else {
+        expect(wired.notify).toHaveBeenCalledExactlyOnceWith(
+          expect.stringContaining('snippet')
+        );
+      }
+    }
+  );
+
+  it('takes nothing back, asking nothing and keeping the entry, when what hangs under the item cannot be read', async () => {
+    const failure = new Error('unreadable');
+    const wired = wireChildren('note snippet', { children: failure });
+    const entry = await wired.make();
+
+    await wired.actions.undo();
+
+    expect(wired.prompt).not.toHaveBeenCalled();
+    expect(wired.deleted).toEqual([]);
+    expect(wired.actions.undoStack).toEqual([entry]);
+    expect(wired.error).toHaveBeenCalledWith(failure);
+    expect(wired.notify).toHaveBeenCalledExactlyOnceWith(
+      expect.stringContaining('snippet')
+    );
+  });
+
+  it('asks about the children only once the user said to undo what another device built on', async () => {
+    const { ask } = builtOnElsewhere([ELSEWHERE], [true]);
+    const wired = wireChildren('note snippet', {
+      children: CHILDREN,
+      choice: 'keep',
+    });
+    await wired.make();
+
+    await wired.actions.undo();
+
+    expect(ask).toHaveBeenCalledOnce();
+    expect(wired.prompt).toHaveBeenCalledOnce();
+    expect(ask.mock.invocationCallOrder[0]).toBeLessThan(
+      wired.prompt.mock.invocationCallOrder[0]
+    );
+  });
+
+  it('asks nothing about the children when the user keeps what another device built on', async () => {
+    builtOnElsewhere([ELSEWHERE], [false]);
+    const wired = wireChildren('note snippet', {
+      children: CHILDREN,
+      choice: 'remove',
+    });
+    const entry = await wired.make();
+
+    await wired.actions.undo();
+
+    expect(wired.childrenOf).not.toHaveBeenCalled();
+    expect(wired.prompt).not.toHaveBeenCalled();
+    expect(wired.deleted).toEqual([]);
+    expect(wired.actions.undoStack).toEqual([entry]);
+  });
+
+  it('property: asks once about everything under the articles a bulk import made, naming each, and nothing about those it brought back from the trash', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        // Files it imported, and others it skipped or failed on, which say
+        // no article, or no effect
+        fc.uniqueArray(
+          fc.record({
+            articleId: fc.option(fc.uuid(), { nil: undefined }),
+            effect: fc.option(
+              fc.constantFrom<ImportEffect>('created', 'restored', 'linked'),
+              { nil: undefined }
+            ),
+            basename: fc.string(),
+          }),
+          {
+            minLength: 1,
+            maxLength: 5,
+            selector: ({ articleId, basename }) => articleId ?? basename,
+          }
+        ),
+        async (made) => {
+          vi.restoreAllMocks();
+          const wired = wireChildren('import', {
+            children: CHILDREN,
+            choice: 'keep',
+          });
+          const outcomes = made.map(({ articleId, effect, basename }) => ({
+            file: makeTFile(basename),
+            status: 'imported' as const,
+            articleId,
+            effect,
+          }));
+          const taken = made.filter(
+            ({ articleId, effect }) =>
+              articleId !== undefined &&
+              effect !== undefined &&
+              effect !== 'linked'
+          );
+          const entry = wired.actions.recordImport({ from: 'notes', outcomes });
+          if (taken.length === 0) {
+            expect(entry).toBeNull();
+            return;
+          }
+
+          // Brought back, its undo puts it back in the trash, where what
+          // hangs under it stays with it
+          const fresh = taken.filter(({ effect }) => effect !== 'restored');
+
+          await wired.actions.undo();
+
+          // Each taken back all the same, by the undo's own path
+          expect(wired.deleted.map(([what]) => what)).toEqual(
+            taken.map(({ articleId }) => `article:${articleId}`)
+          );
+          if (fresh.length === 0) {
+            expect(wired.childrenOf).not.toHaveBeenCalled();
+            expect(wired.prompt).not.toHaveBeenCalled();
+            return;
+          }
+          expect(wired.childrenOf).toHaveBeenCalledExactlyOnceWith(
+            wired.plugin.reviewManager.repo,
+            fresh.map(({ articleId }) => articleId),
+            { liveRoots: true }
+          );
+          expect(wired.prompt.mock.calls[0][1].removing).toEqual({
+            kind: 'article',
+            titles: fresh.map(({ basename }) => basename),
+          });
+        }
+      ),
+      { numRuns: 30 }
+    );
+  });
+
+  it('asks nothing and removes no child when undoing an import that brought an article back from the trash', async () => {
+    const wired = wireChildren('import', {
+      children: CHILDREN,
+      choice: 'remove',
+    });
+    wired.actions.recordImport({
+      name: 'An article',
+      result: { articleId: 'article-1', effect: 'restored' },
+    });
+
+    await wired.actions.undo();
+
+    expect(wired.childrenOf).not.toHaveBeenCalled();
+    expect(wired.prompt).not.toHaveBeenCalled();
+    expect(wired.deleted).toEqual([['article:article-1', undefined]]);
+    expect(wired.removeHighlight).not.toHaveBeenCalled();
+    expect(wired.actions.undoStack).toEqual([]);
+  });
+
+  it('asks only about what hangs under the articles a bulk import made, not one it brought back', async () => {
+    const wired = wireChildren('import', {
+      children: CHILDREN,
+      choice: 'keep',
+    });
+    wired.actions.recordImport({
+      from: 'notes',
+      outcomes: [
+        {
+          file: makeTFile('Back'),
+          status: 'imported',
+          articleId: 'back',
+          effect: 'restored',
+        },
+        {
+          file: makeTFile('New'),
+          status: 'imported',
+          articleId: 'new',
+          effect: 'created',
+        },
+      ],
+    });
+
+    await wired.actions.undo();
+
+    expect(wired.childrenOf).toHaveBeenCalledExactlyOnceWith(
+      wired.plugin.reviewManager.repo,
+      ['new'],
+      { liveRoots: true }
+    );
+    expect(wired.prompt.mock.calls[0][1].removing).toEqual({
+      kind: 'article',
+      titles: ['New'],
+    });
+    expect(wired.deleted.map(([what]) => what)).toEqual([
+      'article:back',
+      'article:new',
+    ]);
   });
 });
