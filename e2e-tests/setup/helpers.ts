@@ -343,6 +343,12 @@ function answerRendererDialogs(app: ElectronApplication) {
  * thrown `ENOENT` from a logging helper would.
  */
 async function obsidianVersion() {
+  if (asarOverride)
+    return `${await asarVersion(asarOverride).catch(() => 'unknown')} (E2E_OBSIDIAN_ASAR, over the unpacked ${await unpackedVersion()})`;
+  return await unpackedVersion();
+}
+
+async function unpackedVersion() {
   try {
     const manifest = await fs.readFile(
       path.join(path.dirname(appPath), 'package.json'),
@@ -352,6 +358,70 @@ async function obsidianVersion() {
   } catch {
     return 'unknown';
   }
+}
+
+/**
+ * An Obsidian app bundle to test instead of the unpacked one: the path in
+ * `E2E_OBSIDIAN_ASAR` to an `obsidian.asar`, such as the
+ * `obsidian-<version>.asar` files Obsidian's updater saves in its user-data
+ * folder (`%APPDATA%\obsidian` on Windows). For reproducing a failure that only
+ * a newer release shows, such as CI's, without replacing `.obsidian-unpacked`,
+ * which other checkouts may share.
+ */
+const asarOverride = process.env.E2E_OBSIDIAN_ASAR || undefined;
+
+/**
+ * The name the {@link asarOverride} copy takes in each launch's profile.
+ * Obsidian's loader (`.obsidian-unpacked/main.js`) runs the highest-versioned
+ * `obsidian-<version>.asar` in the user-data dir instead of its own bundle, but
+ * only when that version is at least `app.getVersion()`, which is Electron's
+ * own version here, not Obsidian's, since the harness launches the loader
+ * script directly. A real version name like `obsidian-1.15.1.asar` loses to
+ * Electron 39 and is skipped without a word. The loader also takes this for the
+ * running version, so its updater finds nothing newer to fetch.
+ */
+const OVERRIDE_ASAR_NAME = 'obsidian-999.0.0.asar';
+
+/**
+ * The version in an asar's own `package.json`, read from the archive's header
+ * (a little-endian pickle: the JSON index of its files, then their bytes).
+ */
+async function asarVersion(asar: string) {
+  const file = await fs.open(asar, 'r');
+  try {
+    const read = async (length: number, position: number) => {
+      const buffer = Buffer.alloc(length);
+      await file.read(buffer, 0, length, position);
+      return buffer;
+    };
+    const prefix = await read(16, 0);
+    const headerSize = prefix.readUInt32LE(4);
+    const index = JSON.parse(
+      (await read(prefix.readUInt32LE(12), 16)).toString('utf8')
+    ) as { files: Record<string, { offset: string; size: number }> };
+    const manifest = index.files['package.json'];
+    const { version } = JSON.parse(
+      (
+        await read(manifest.size, 8 + headerSize + Number(manifest.offset))
+      ).toString('utf8')
+    ) as { version?: string };
+    return version ?? 'unknown';
+  } finally {
+    await file.close();
+  }
+}
+
+/** Put the {@link asarOverride} copy where Obsidian's loader looks for it. */
+async function placeAsarOverride(profile: string) {
+  if (!asarOverride) return;
+  await fs.mkdir(profile, { recursive: true });
+  const target = path.join(profile, OVERRIDE_ASAR_NAME);
+  // A copy rather than a link: Obsidian's updater prunes that folder, and
+  // nothing it does there may reach the install the file came from. A profile
+  // launched before (a relaunch, a second device) has it already.
+  await fs.copyFile(asarOverride, target).catch(async (error: unknown) => {
+    if (!(await fs.stat(target).catch(() => null))) throw error;
+  });
 }
 
 /** Guard so the version is announced once per worker, not once per launch. */
@@ -381,6 +451,7 @@ export async function launchElectron(
   // Before the launch, not after: a build that fails to start is exactly when
   // the version matters most, and this way it is on the log either way.
   await announceObsidianVersion();
+  await placeAsarOverride(profile);
 
   const app = await electron.launch({
     args: [

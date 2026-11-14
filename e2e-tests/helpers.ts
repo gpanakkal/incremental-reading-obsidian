@@ -1521,7 +1521,11 @@ export function expectPlainText(readings: MarkdownReadings, text: string) {
   expect(squashed(readings.live.text)).toBe(squashed(text));
   expect(readings.live.classes).toEqual([]);
   expect(readings.live.colours).toEqual([]);
-  expect(readings.cache.found).toEqual({});
+  // `v` is the cache's format version, which Obsidian 1.15.1 added to every
+  // entry; it says nothing about the text. Any other key is something found in
+  // it (links, tags, headings, ...), including kinds a later version adds.
+  const { v: _formatVersion, ...found } = readings.cache.found;
+  expect(found).toEqual({});
   expect(readings.cache.sections).toEqual(
     readings.cache.sections.map(() => 'paragraph')
   );
