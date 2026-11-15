@@ -227,6 +227,15 @@ async function readWellDown(id: string) {
 }
 
 test('a pane split off right after a scroll opens there, and the note reopens there from the database', async () => {
+  // Wide enough that each half of the split still fits the readable line
+  // width. In a narrower window the split rewraps the pane that was already
+  // open, and CodeMirror's new layout leaves that pane's top edge a few lines
+  // higher; the scroll that does it is the last one kept, so the database
+  // holds the higher place, not the reader's, and the reopen restores that
+  // place faithfully. That is the panes' shared last-write-wins rule at work
+  // on a resize-driven scroll, not a restore fault, and not what this test is
+  // about. CI's ~1024px window put the reopened line 85px off.
+  await window.setViewportSize({ width: 1920, height: 1080 });
   const { path, id } = await openImportedArticle();
   const position = await readWellDown(id);
 

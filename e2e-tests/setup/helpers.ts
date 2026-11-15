@@ -895,6 +895,34 @@ const VAULT_WINDOW_TIMEOUT_MS = 10_000;
 const HEADLESS_VIEWPORT = { width: 1920, height: 1080 };
 
 /**
+ * `E2E_WINDOW=<width>x<height>` sizes the vault window's page to exactly this,
+ * in place of maximizing it (headed) or `HEADLESS_VIEWPORT` (headless).
+ *
+ * CI runs headed on runners whose desktops maximize the page to about
+ * 1024x720, so a test that measures layout without pinning its own viewport
+ * sees a different width there than on a developer's screen. This reproduces
+ * the runner's size locally, in either mode.
+ */
+const forcedWindowSize = parseWindowSize(process.env.E2E_WINDOW);
+
+/**
+ * Read `E2E_WINDOW`: null when unset or empty, else its size. Anything else
+ * throws, so a typo fails the run instead of quietly testing at the default
+ * size.
+ */
+function parseWindowSize(value: string | undefined) {
+  const trimmed = value?.trim() ?? '';
+  if (trimmed === '') return null;
+  const match = /^([1-9]\d*)x([1-9]\d*)$/.exec(trimmed);
+  if (!match) {
+    throw new Error(
+      `E2E_WINDOW must be <width>x<height> in pixels, e.g. 1024x720; got "${value}"`
+    );
+  }
+  return { width: Number(match[1]), height: Number(match[2]) };
+}
+
+/**
  * Resolve the live vault window, waiting for it to appear if necessary.
  *
  * Window handles captured during startup go stale: Obsidian creates and
@@ -1009,9 +1037,12 @@ export async function openVault(app: ElectronApplication, vaultPath: string) {
   // letting it throw here would replace the test's real failure with a
   // "Target page, context or browser has been closed" pointing at this line.
   if (isHeadless) {
-    await window.setViewportSize(HEADLESS_VIEWPORT).catch(() => {});
+    await window
+      .setViewportSize(forcedWindowSize ?? HEADLESS_VIEWPORT)
+      .catch(() => {});
   } else {
-    await maximizeVaultWindow(app);
+    if (forcedWindowSize) await sizeVaultWindow(app, forcedWindowSize);
+    else await maximizeVaultWindow(app);
 
     // Guarantee the vault window is the one receiving keyboard input. On a
     // relaunch no settings window is created, but the vault window is not
@@ -1058,6 +1089,31 @@ async function maximizeVaultWindow(app: ElectronApplication) {
     }, VAULT_WINDOW_URL);
   } catch {
     // See above
+  }
+}
+
+/**
+ * Give the vault window a page of exactly `size`, as `E2E_WINDOW` asks.
+ *
+ * Best-effort, like maximizing.
+ */
+async function sizeVaultWindow(
+  app: ElectronApplication,
+  size: { width: number; height: number }
+) {
+  try {
+    await app.evaluate(
+      ({ BrowserWindow }, [urlFragment, width, height]) => {
+        const win = BrowserWindow.getAllWindows().find((candidate) =>
+          candidate.webContents.getURL().includes(urlFragment)
+        );
+        win?.unmaximize();
+        win?.setContentSize(width, height);
+      },
+      [VAULT_WINDOW_URL, size.width, size.height] as const
+    );
+  } catch {
+    // See maximizeVaultWindow
   }
 }
 

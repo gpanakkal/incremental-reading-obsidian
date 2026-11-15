@@ -111,7 +111,10 @@ const cachedIrId = (at: string) =>
  * An article due now, `art`, at {@link NOTE}, whose note carries `irIdLine`
  * (nothing, for an id taken off): the note as it arrives over Sync, or as an
  * edit made while the plugin was off leaves it, with no write here to see.
- * The note is written first, so the row finds it there.
+ * The note is written first, and read by the metadata cache, so the row finds
+ * it there: until the cache holds a note, nothing tells what id it claims, so
+ * the queue takes it for its row's, and the cache reading it later does not
+ * make the queue look again.
  */
 async function seedDamagedArticle(irIdLine: string) {
   await fs.writeFile(
@@ -120,13 +123,11 @@ async function seedDamagedArticle(irIdLine: string) {
   );
   await expect
     .poll(() =>
-      window.evaluate(
-        (at) =>
-          (window as unknown as { app: PageApp }).app.vault.getFileByPath(
-            at
-          ) !== null,
-        NOTE
-      )
+      window.evaluate((at) => {
+        const { app } = window as unknown as { app: PageApp };
+        const file = app.vault.getFileByPath(at);
+        return file !== null && app.metadataCache.getFileCache(file) !== null;
+      }, NOTE)
     )
     .toBe(true);
   await mutate(
