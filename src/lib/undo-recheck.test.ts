@@ -305,6 +305,10 @@ describe('changesSince', () => {
         async (changed) => {
           sync = new FakeSync();
           const [a, b] = await twoDevices();
+          // The parent the edit moves `s` under must be a live row: a merge
+          // re-homes a child whose parent names no item, which would undo
+          // the move before the re-check could see it.
+          await insertArticle(a, 'elsewhere');
           await insertSnippet(a, 's');
           const footprint = await footprintOf(a, 'snippet', 's');
           await sync.deliver(a, b);
