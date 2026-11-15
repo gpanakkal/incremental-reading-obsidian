@@ -8,6 +8,7 @@ import IRScheduler from '#/lib/IRScheduler';
 import { supportsFrontmatter } from '#/lib/mime';
 import type { ItemTable } from '#/lib/moved-note-scan';
 import {
+  cacheLagsNote,
   noteFingerprint,
   reconcileAction,
   type IrIdRelation,
@@ -702,6 +703,13 @@ export class ItemManager {
    * note just as readily. The item is still the row's to show: the note is at
    * its reference, and the next fetch after the parse judges it properly.
    *
+   * So is one the cache has yet to begin re-reading (see `cacheLagsNote`): its
+   * parse is of the note before the last write, which on a slow machine can
+   * outlast the write by seconds. Read then, a note given a fresh id over the
+   * one it held, as "Erase and import fresh" does, claimed its old id, while
+   * its mtime was the one the row recorded: the new row was tombstoned as
+   * review first fetched it.
+   *
    * A file with no frontmatter, a PDF say, has no id or tag to square: the
    * file at a row's reference is that row's file by its path alone. Its
    * tombstone is left to the vault events that track such files.
@@ -721,7 +729,9 @@ export class ItemManager {
     type: NoteType
   ): boolean {
     if (!supportsFrontmatter(file)) return true;
-    if (!this.app.metadataCache.getFileCache(file)) return true;
+    const { metadataCache } = this.app;
+    if (!metadataCache.getFileCache(file)) return true;
+    if (cacheLagsNote(file, metadataCache)) return true;
 
     const frontmatter = Obsidian.getFrontMatter(file, this.app);
     const fileId = claimedId(frontmatter?.['ir-id']);

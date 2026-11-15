@@ -61,13 +61,15 @@ function makeRepo() {
 
 /**
  * A manager whose metadata cache answers `cache` for every note, with the
- * writes it can make spied on and stubbed out.
+ * writes it can make spied on and stubbed out. `fileCache`, if given, is the
+ * cache's internal record of the stat each note was parsed at (unofficial
+ * Obsidian API), by path.
  */
-function wire(cache: CachedMetadata | null) {
+function wire(cache: CachedMetadata | null, fileCache?: object) {
   const { repo, mutate } = makeRepo();
   const manager = new TestManager(
     {
-      app: { metadataCache: { getFileCache: vi.fn(() => cache) } },
+      app: { metadataCache: { getFileCache: vi.fn(() => cache), fileCache } },
     } as never,
     repo
   );
@@ -595,6 +597,60 @@ describe('reconcileNote', () => {
     ).toBe(true);
     expect(markDeleted).not.toHaveBeenCalled();
     expect(markUndeleted).not.toHaveBeenCalled();
+  });
+
+  // Obsidian re-reads a note some time after a write lands: until it does,
+  // the cache answers its parse of the note as it was before
+  it('leaves the row alone while the cache holds a parse of the note from before its last write', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        settledArb,
+        fc.integer({ min: 0 }),
+        fc.integer({ min: 0 }),
+        async ({ row, type, tag, frontmatter }, mtime, parsedAt) => {
+          fc.pre(parsedAt !== mtime);
+          const { manager, mutate, writeNote, markDeleted, markUndeleted } =
+            wire(
+              { frontmatter: structuredClone(frontmatter) } as CachedMetadata,
+              {
+                [FILE.path]: { mtime: parsedAt, size: 0, hash: 'older' },
+              }
+            );
+          // Provably the note the row was written with, so that only the
+          // stale parse keeps one claiming another id from tombstoning it
+          const proven = { ...row, note_mtime: mtime };
+
+          expect(manager.reconcile(proven, noteAt(mtime), type, tag)).toBe(
+            true
+          );
+
+          expect(markDeleted).not.toHaveBeenCalled();
+          expect(markUndeleted).not.toHaveBeenCalled();
+          expect(mutate).not.toHaveBeenCalled();
+          expect(writeNote).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+
+  it('judges the note once the cache has parsed it as it is now', () => {
+    const { manager, markDeleted } = wire(
+      {
+        frontmatter: { 'ir-id': 'b2', tags: ['ir-article'] },
+      } as unknown as CachedMetadata,
+      { [FILE.path]: { mtime: 1_000, size: 0, hash: 'current' } }
+    );
+    const row = {
+      id: 'a1',
+      deleted: false,
+      reference: FILE.path,
+      note_mtime: 1_000,
+    };
+
+    expect(manager.reconcile(row, noteAt(1_000), 'article', 'ir-article')).toBe(
+      false
+    );
+    expect(markDeleted.mock.calls).toStrictEqual([['a1', 'article']]);
   });
 
   it('judges the note once its parse lands', () => {
