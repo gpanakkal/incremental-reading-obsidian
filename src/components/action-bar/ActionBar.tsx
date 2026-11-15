@@ -78,9 +78,10 @@ import { TextScheduler } from './TextScheduler';
  *
  * Leading zone: the actions that act on the review session rather than on the
  * item in it — the tab's history, home, the type filter, undo — with bulk
- * import and the notes not found in the database in place of home and undo on
- * the home screen. Middle: the item's own
- * actions. Trailing: the ⋮, which belongs to the view.
+ * import in place of home on the home screen. Middle: the item's own actions.
+ * Trailing: the ⋮, which belongs to the view; on the home screen, which has no
+ * item for one, the upkeep instead — the notes not found in the database, then
+ * restoring a backup, at the bar's far end.
  *
  * A card's grades lead the middle zone while they fit there, and take a row of
  * their own after the bar where they don't (see {@link useGradePlacement}),
@@ -142,12 +143,7 @@ export function ActionBar() {
           {/* On both pages, in the same slot: it filters the queue on home
               and what review draws from, which are one setting */}
           <ReviewTypeFilter />
-          {page === 'home' ? (
-            <>
-              <LeftoverAction />
-              <RestoreBackupAction />
-            </>
-          ) : (
+          {page !== 'home' && (
             <>
               <UndoAction />
               {itemActions && <Separator className={JOINT_SEPARATOR_CLASS} />}
@@ -189,6 +185,12 @@ export function ActionBar() {
         </div>
         <div className="ir-bar-trail">
           {itemActions && <MoreOptionsAction />}
+          {page === 'home' && (
+            <>
+              <LeftoverAction />
+              <RestoreBackupAction />
+            </>
+          )}
         </div>
         {gradedCard && (
           <div className={GRADE_GHOST_CLASS}>
@@ -342,7 +344,7 @@ function HomeActions() {
  * Opens the bulk-import modal. Shown whatever is due: importing is how an
  * empty queue fills.
  *
- * In the leading zone, ahead of the leftover button, so the begin-review
+ * In the leading zone, where home stands in review, so the begin-review
  * button keeps the bar's midpoint to itself.
  */
 function BulkImportAction() {
@@ -362,8 +364,9 @@ function BulkImportAction() {
 
 /**
  * Opens the picker of backups to restore in place of the database. Upkeep,
- * like the leftover button it follows, so it leads the bar rather than
- * standing among the review buttons.
+ * like the leftover button it follows, so it closes the bar at the trailing
+ * end rather than standing among the review buttons. Last there, so the bar's
+ * end edge stays put as the leftover button comes and goes beside it.
  */
 function RestoreBackupAction() {
   const { plugin, reviewView } = useReviewContext();
@@ -394,8 +397,16 @@ const MAX_SHOWN_LEFTOVERS = 99;
  * count sits on its bottom-right corner, capped at "99+", and is read out
  * through its label instead.
  *
- * In the leading zone, which grows as wide as the trailing one whatever it
+ * In the trailing zone, which grows as wide as the leading one whatever it
  * holds, so the begin-review button stays on the bar's midpoint.
+ *
+ * Mounted for as long as the home screen is up, count or none, it tells the
+ * watch so (`LeftoverWatch.homeShown`), which keeps the leftover notice off
+ * the bar's right end, where it would cover this button and say the same.
+ * Told on mounting rather than on the count, so leftovers found or resolved
+ * while home is up neither bring the notice back nor tell it twice; in a
+ * layout effect, so a review tab opening onto home has told it before the
+ * tab asks for the notice.
  */
 function LeftoverAction() {
   const { plugin, reviewView } = useReviewContext();
@@ -404,6 +415,7 @@ function LeftoverAction() {
     leftovers?.subscribe ?? subscribeToNothing,
     () => leftovers?.current ?? NO_LEFTOVERS
   );
+  useLayoutEffect(() => leftovers?.homeShown(), [leftovers]);
   const count = current.length;
   if (count === 0) return null;
 

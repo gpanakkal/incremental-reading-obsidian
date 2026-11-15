@@ -9,6 +9,7 @@ import {
   openPluginSettings,
   selectParagraph,
   setNativeMenus,
+  setPluginSetting,
   waitForReviewItem,
 } from './helpers';
 import { test } from './setup/fixtures';
@@ -298,6 +299,13 @@ test("opens the leftover modal from the review home's Manage button, and the que
   await executeCommandById(window, 'incremental-reading:learn');
   const manage = window.locator('#manage-leftovers-button');
   await expect(manage).toBeVisible();
+  // The notice keeps out of the way of the home's own button, which it would
+  // cover at the bar's right end
+  await expect(
+    window
+      .locator('.notice')
+      .filter({ has: window.locator('.ir-notice-action') })
+  ).toHaveCount(0);
   const settings = await openSettingsBehind();
 
   await manage.click();
@@ -315,6 +323,9 @@ test("opens the leftover modal from the review home's Manage button, and the que
 
 test("opens the leftover modal from the notice's Manage button in the main window while Settings is open", async () => {
   await writeLeftover();
+  // Past the home screen, whose own leftover button the notice keeps out of
+  // the way of
+  await setPluginSetting(window, 'skipHomeScreen', true);
   // The notice waits for a review tab, and shows in the window in front then
   await executeCommandById(window, 'incremental-reading:learn');
   const manage = window.locator('.notice .ir-notice-action');
