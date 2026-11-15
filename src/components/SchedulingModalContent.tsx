@@ -9,7 +9,11 @@ import type { SchedulingStrategy } from '#/lib/types';
 import { useRef, useState } from 'react';
 import { FixedIntervalField } from './action-bar/FixedIntervalField';
 import { PriorityField } from './action-bar/PriorityField';
-import { SegmentGroup, STRATEGY_SEGMENTS } from './SegmentGroup';
+import {
+  confirmsOnEnter,
+  SegmentGroup,
+  STRATEGY_SEGMENTS,
+} from './SegmentGroup';
 import type { SchedulingModalProps } from './types';
 
 export function SchedulingModalContent({
@@ -75,11 +79,7 @@ export function SchedulingModalContent({
     <div
       className="ir-scheduling-modal"
       onKeyDown={(e) => {
-        // A focused button's own Enter activation clicks it, so Enter on
-        // Cancel cancels. Tag check, not instanceof: a popout window has its
-        // own HTMLButtonElement.
-        const onButton = (e.target as HTMLElement).tagName === 'BUTTON';
-        if (e.key === 'Enter' && !onButton) {
+        if (confirmsOnEnter(e)) {
           e.preventDefault();
           handleEnter();
         }

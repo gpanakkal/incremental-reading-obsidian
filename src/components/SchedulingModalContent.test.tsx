@@ -670,22 +670,88 @@ describe('SchedulingModalContent', () => {
       );
     });
 
-    it('leaves Enter on a segment to the segment, never confirming', () => {
+    it("confirms the pressed segment's strategy on Enter at any segment", () => {
       fc.assert(
         fc.property(
+          anyPriority,
           fc.option(anyInterval, { nil: null }),
           fc.constantFrom(0, 1),
-          (intervalDays, index) => {
+          (priority, intervalDays, index) => {
             const onClose = vi.fn<OnClose>();
-            const container = mount({ type: 'article', intervalDays, onClose });
+            const container = mount({
+              type: 'article',
+              priority,
+              intervalDays,
+              onClose,
+            });
 
             const event = press(strategySegments(container)[index], 'Enter');
 
-            expect(event.defaultPrevented).toBe(false);
-            expect(onClose).not.toHaveBeenCalled();
+            expect(event.defaultPrevented).toBe(true);
+            expect(onClose.mock.calls).toEqual([
+              [
+                intervalDays === null
+                  ? { strategy: 'priority', value: priority }
+                  : { strategy: 'fixed-interval', value: intervalDays },
+              ],
+            ]);
           }
         ),
-        { numRuns: 10 }
+        { numRuns: 20 }
+      );
+    });
+
+    it('confirms the strategy Space cycles to, once however often Enter repeats', () => {
+      const strategies = ['priority', 'fixed-interval'] as const;
+      fc.assert(
+        fc.property(
+          anyPriority,
+          fc.option(anyInterval, { nil: null }),
+          fc.integer({ min: 0, max: 5 }),
+          fc.integer({ min: 1, max: 4 }),
+          (priority, intervalDays, spaces, enters) => {
+            const onClose = vi.fn<OnClose>();
+            const container = mount({
+              type: 'article',
+              priority,
+              intervalDays,
+              onClose,
+            });
+            const start = intervalDays === null ? 0 : 1;
+            void act(() => {
+              strategySegments(container)[start].focus();
+            });
+
+            for (let i = 0; i < spaces; i += 1) {
+              press(document.activeElement as HTMLElement, ' ');
+            }
+            const at = (start + spaces) % 2;
+            expect(strategySegments(container).map(isPressed)).toEqual([
+              at === 0,
+              at === 1,
+            ]);
+            expect(document.activeElement).toBe(
+              strategySegments(container)[at]
+            );
+            for (let i = 0; i < enters; i += 1) {
+              press(document.activeElement as HTMLElement, 'Enter');
+            }
+
+            const strategy = strategies[at];
+            expect(onClose.mock.calls).toEqual([
+              [
+                {
+                  strategy,
+                  value:
+                    strategy === 'priority'
+                      ? priority
+                      : (intervalDays ?? MINIMUM_FIXED_REVIEW_INTERVAL),
+                },
+              ],
+            ]);
+          }
+        ),
+        { numRuns: 40 }
       );
     });
   });

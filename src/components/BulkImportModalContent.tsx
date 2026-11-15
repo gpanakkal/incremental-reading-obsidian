@@ -34,6 +34,7 @@ import {
 } from 'react';
 import { ImportOptionsFields, useImportOptions } from './ImportOptions';
 import { LoadingSpinner } from './LoadingSpinner';
+import { confirmsOnEnter } from './SegmentGroup';
 
 /** What a scan has reported so far, and whether it has finished. */
 interface ScanState {
@@ -439,10 +440,7 @@ export function BulkImportModalContent({
         <div
           className="ir-bulk-import-options"
           onKeyDown={(e) => {
-            // A focused segment's own Enter activation presses it. Tag check,
-            // not instanceof: a popout window has its own HTMLButtonElement.
-            const onButton = (e.target as HTMLElement).tagName === 'BUTTON';
-            if (e.key === 'Enter' && !onButton) {
+            if (confirmsOnEnter(e)) {
               e.preventDefault();
               confirm();
             }
