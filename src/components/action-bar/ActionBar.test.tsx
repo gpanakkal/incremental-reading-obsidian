@@ -3241,7 +3241,7 @@ describe('ActionBar Go to context and Go to source buttons', () => {
             const kind =
               'file' in source
                 ? 'file'
-                : !mobileApp && webViewer === 'opens-links'
+                : webViewer === 'opens-links'
                   ? 'web-viewer'
                   : 'browser';
             expect(button.getAttribute('aria-label')).toMatch(

@@ -237,7 +237,7 @@ describe('linkWebViewer', () => {
     Platform.isMobileApp = false;
   });
 
-  it('property: is the web viewer exactly when it is on and set to open external links, never on the mobile app', () => {
+  it('property: is the web viewer exactly when it is on and set to open external links, on desktop and the mobile app alike', () => {
     fc.assert(
       fc.property(
         fc.boolean(),
@@ -259,14 +259,15 @@ describe('linkWebViewer', () => {
             'openExternalURLs' in options &&
             options.openExternalURLs === true;
           expect(linkWebViewer(app)).toBe(
-            !mobileApp && enabled && opensLinks ? instance : null
+            enabled && opensLinks ? instance : null
           );
         }
       )
     );
   });
 
-  it('is the web viewer when it is on and set to open external links, on desktop', () => {
+  it('is the web viewer when it is on and set to open external links, on the mobile app too', () => {
+    Platform.isMobileApp = true;
     const instance = { openUrl: vi.fn(), options: { openExternalURLs: true } };
 
     expect(linkWebViewer(makeApp(instance).app)).toBe(instance);

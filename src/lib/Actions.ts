@@ -21,6 +21,7 @@ import {
   type FileView,
   MarkdownView,
   type PaneType,
+  Platform,
   type TFile,
   type WorkspaceLeaf,
 } from 'obsidian';
@@ -1749,8 +1750,9 @@ export class Actions {
   /**
    * Open a web page as `route` says: in Obsidian's web viewer, in the leaf
    * `Workspace.getLeaf(newLeaf)` picks, as {@link _openFile} opens a file — a
-   * new tab instead when that leaf is review's, rather than replace review —
-   * or in the system's browser. A web viewer that fails hands the page to
+   * new tab instead when that leaf is review's, rather than replace review,
+   * and always on the mobile app, whose web viewer picks no leaf — or in the
+   * system's browser. A web viewer that fails hands the page to
    * the system's browser instead.
    * @returns whether the page was handed to either
    */
@@ -1762,11 +1764,18 @@ export class Actions {
     if (route.kind === 'web-viewer') {
       try {
         // `getLeaf(false)` makes the leaf it picks active, so the web viewer
-        // asking again picks the same one
-        const inReview =
-          !newLeaf &&
-          app.workspace.getLeaf(false) === this.plugin.getOpenReviewLeaf();
-        route.viewer.openUrl(route.url, inReview ? 'tab' : newLeaf, true);
+        // asking again picks the same one. Never asked on the mobile app,
+        // whose web viewer opens the page over the app rather than in a
+        // leaf, so picking one would only switch tabs under it, or make an
+        // empty one; a new tab, should it ever take a leaf there, keeps
+        // review where it is.
+        const leaf =
+          newLeaf ||
+          (Platform.isMobileApp ||
+          app.workspace.getLeaf(false) === this.plugin.getOpenReviewLeaf()
+            ? 'tab'
+            : false);
+        route.viewer.openUrl(route.url, leaf, true);
         return true;
       } catch (error) {
         console.warn(
