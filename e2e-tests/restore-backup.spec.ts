@@ -209,6 +209,24 @@ test('restores a backup from the picker, and the review home shows what it holds
   await expect(
     window.locator('.ir-backup-modal .ir-backup-intro')
   ).toContainText(manifest.version);
+  // Escape rather than the close button, whose class differs between
+  // Obsidian versions (`modal-close-button`, `modal-header-button`)
+  await window.keyboard.press('Escape');
+  await expect(window.locator('.ir-backup-modal')).toHaveCount(0);
+
+  // A dismissal made before a restore is no longer offered for undo after it
+  await window.locator('#begin-review-button').click();
+  await window
+    .getByRole('button', { name: 'Stop scheduling this item for review' })
+    .click();
+  await expect(window.locator('#undo-button')).toBeEnabled();
+  await window.getByRole('button', { name: 'Go to home screen' }).click();
+  await window.locator('#restore-backup-button').click();
+  await backupRows().first().locator('button').click();
+  await window.locator('.modal-container.mod-confirmation .mod-cta').click();
+  await expect(window.locator('.ir-backup-modal')).toHaveCount(0);
+  await window.locator('#begin-review-button').click();
+  await expect(window.locator('#undo-button')).toBeDisabled();
 });
 
 test('takes on whole a database another device restored when it arrives, backing up its own first', async () => {
@@ -258,7 +276,7 @@ test('takes on whole a database another device restored when it arrives, backing
   await expect(backupRows()).toHaveCount(1);
 });
 
-test('refuses to undo an action made before a restore from the picker, leaving the restored data as it is', async () => {
+test('drops the undo history from before a restore from the picker, so an undo press leaves the restored data as it is', async () => {
   await writeArticleNotes();
   await writeVaultFile(DATABASE_FILE_PATH, await databaseWith([30, 30]));
   // A backup in which the first article is dismissed too, and the second
@@ -284,8 +302,8 @@ test('refuses to undo an action made before a restore from the picker, leaving t
   await dismiss.click();
   await expect(queueRow(ARTICLES[0].name)).toHaveCount(0);
   await expect.poll(() => pendingSaves(window)).toBe(0);
-  // Count runs of the dismissal's own undo: the refusal comes before it, where
-  // a generic failure ("Couldn't undo") would have run it first
+  // Count runs of the dismissal's own undo: the restore drops the entry from
+  // the stack, so nothing that comes after it may run it
   await window.evaluate(() => {
     const w = window as unknown as UndoWindow;
     const entry =
@@ -305,16 +323,23 @@ test('refuses to undo an action made before a restore from the picker, leaving t
   await expect(queueRow(ARTICLES[1].name)).toContainText(/Priority\s*4\.5/);
   await expect(window.locator('.ir-backup-modal')).toHaveCount(0);
 
-  // Undo is refused, naming the dismissal, and leaves the restored rows be
-  const notices = await watchNotices(window);
-  await executeCommandById(window, 'incremental-reading:undo');
+  // The restore empties the undo history before anything presses undo
   await expect
-    .poll(async () =>
-      (await notices()).some((text) =>
-        text.includes(`dismissing "${ARTICLES[0].name}"`)
+    .poll(() =>
+      window.evaluate(
+        () =>
+          (window as unknown as UndoWindow).app.plugins.plugins[
+            'incremental-reading'
+          ].actions.undoStack.length
       )
     )
-    .toBe(true);
+    .toBe(0);
+
+  // So an undo press has nothing to run, and leaves the restored rows be. The
+  // press answers with a notice, so its arrival marks the press as handled
+  const notices = await watchNotices(window);
+  await executeCommandById(window, 'incremental-reading:undo');
+  await expect.poll(async () => (await notices()).length).toBeGreaterThan(0);
   expect(
     await window.evaluate(() => {
       const w = window as unknown as UndoWindow;

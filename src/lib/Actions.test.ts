@@ -1084,6 +1084,33 @@ function wireNoteSnippet(outcome: DeleteOutcome = 'deleted') {
   return { plugin, actions: new Actions(plugin), deleteSnippet, notify };
 }
 
+/** Whether an entry writes, as {@link ActionStackEntry} can say it. */
+const writesArb = fc.constantFrom(true, false, undefined);
+
+/**
+ * Entries that write as `writes` says, each pushed on `actions` in turn,
+ * named after `when` and their place, so each one's description is unique.
+ */
+function pushEntries(
+  actions: Actions,
+  writes: readonly (boolean | undefined)[],
+  when: string
+): ActionStackEntry[] {
+  return writes.map((write, at) => {
+    const entry: ActionStackEntry = {
+      description: `${when} ${at}`,
+      undo: vi.fn(),
+      writes: write,
+    };
+    actions._pushUndo(entry);
+    return entry;
+  });
+}
+
+/** The descriptions of what is on `actions`' undo stack, bottom first. */
+const stackOf = (actions: Actions) =>
+  actions.undoStack.map(({ description }) => description);
+
 // #endregion
 
 describe('itemName', () => {
@@ -5813,7 +5840,7 @@ describe('Actions.undo after the database was restored', () => {
     vi.restoreAllMocks();
   });
 
-  it('property: drops an entry recorded before a restore without running it, saying why', async () => {
+  it('property: drops an entry recorded before a restore without running it, saying the history was cleared', async () => {
     await fc.assert(
       fc.asyncProperty(
         restoredEpochsArb,
@@ -5843,12 +5870,12 @@ describe('Actions.undo after the database was restored', () => {
 
           expect(entry.undo).not.toHaveBeenCalled();
           expect(below.undo).not.toHaveBeenCalled();
-          expect(actions.undoStack).toEqual([below]);
+          // Below it too: the restore voided every entry that writes
+          expect(actions.undoStack).toEqual([]);
           expect(listener).toHaveBeenCalledOnce();
-          expect(notify).toHaveBeenCalledExactlyOnceWith(
-            expect.stringContaining(description),
-            { kind: 'error' }
-          );
+          // The one notice that the history was cleared, which takes no
+          // options: none for the entry asked for besides
+          expect(notify).toHaveBeenCalledExactlyOnceWith(expect.any(String));
         }
       )
     );
@@ -5931,6 +5958,324 @@ describe('Actions.undo after the database was restored', () => {
       expect.stringContaining('doing'),
       { kind: 'error' }
     );
+  });
+});
+
+describe('Actions undo history after the database was restored', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** How the stack is read: by a render, or once a reload is taken in. */
+  const readArb = fc.constantFrom('peekUndo', 'pruneUndo');
+
+  it('property: the first read after a restore keeps only the entries that write nothing and those made since, in order', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        restoredEpochsArb,
+        fc.array(writesArb, { maxLength: 6 }),
+        fc.array(writesArb, { maxLength: 6 }),
+        readArb,
+        async ([before, after], early, late, read) => {
+          vi.restoreAllMocks();
+          const { actions, notify, listener } = wireImports();
+          const repo = epochRepo(before);
+          Object.assign(actions.plugin.reviewManager, { repo });
+          const made = pushEntries(actions, early, 'before');
+          repo.epoch = after;
+          const since = pushEntries(actions, late, 'since');
+          listener.mockClear();
+          const expected = [
+            ...made.filter(({ writes }) => writes === false),
+            ...since,
+          ];
+          const dropped = expected.length < made.length + since.length;
+
+          const top = actions[read]();
+          // A render's read tells subscribers only once it is done
+          if (read === 'peekUndo') expect(listener).not.toHaveBeenCalled();
+          await Promise.resolve();
+
+          expect(stackOf(actions)).toEqual(
+            expected.map(({ description }) => description)
+          );
+          if (read === 'peekUndo') expect(top).toBe(expected.at(-1));
+          expect(listener).toHaveBeenCalledTimes(dropped ? 1 : 0);
+          expect(notify).toHaveBeenCalledTimes(dropped ? 1 : 0);
+          for (const entry of [...made, ...since]) {
+            expect(entry.undo).not.toHaveBeenCalled();
+          }
+        }
+      )
+    );
+  });
+
+  it('property: says the history was cleared once for each restore that dropped any of it, however often it is read', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.uniqueArray(fc.nat(), { minLength: 1, maxLength: 5 }),
+        fc.array(fc.array(writesArb, { maxLength: 3 }), {
+          minLength: 5,
+          maxLength: 5,
+        }),
+        fc.array(fc.integer({ min: 1, max: 3 }), {
+          minLength: 5,
+          maxLength: 5,
+        }),
+        readArb,
+        async (epochs, pushes, reads, read) => {
+          vi.restoreAllMocks();
+          const { actions, notify } = wireImports();
+          const repo = epochRepo(epochs[0]);
+          Object.assign(actions.plugin.reviewManager, { repo });
+          let expected = 0;
+
+          for (const [phase, epoch] of epochs.entries()) {
+            repo.epoch = epoch;
+            // Each restore drops what the phase before it left that writes
+            if (phase > 0 && pushes[phase - 1].some((w) => w !== false)) {
+              expected++;
+            }
+            pushEntries(actions, pushes[phase], `at ${phase}`);
+            for (let n = 0; n < reads[phase]; n++) actions[read]();
+            await Promise.resolve();
+          }
+
+          expect(notify).toHaveBeenCalledTimes(expected);
+        }
+      )
+    );
+  });
+
+  it('property: a read with no restore since keeps the whole stack and tells no one', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.nat(),
+        fc.array(writesArb, { maxLength: 6 }),
+        readArb,
+        async (epoch, writes, read) => {
+          vi.restoreAllMocks();
+          const { actions, notify, listener } = wireImports();
+          Object.assign(actions.plugin.reviewManager, {
+            repo: epochRepo(epoch),
+          });
+          const made = pushEntries(actions, writes, 'made');
+          listener.mockClear();
+
+          const top = actions[read]();
+          await Promise.resolve();
+
+          expect(stackOf(actions)).toEqual(
+            made.map(({ description }) => description)
+          );
+          if (read === 'peekUndo') expect(top).toBe(made.at(-1));
+          expect(listener).not.toHaveBeenCalled();
+          expect(notify).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+
+  it('property: reads no restore epoch while nothing on the stack writes', () => {
+    fc.assert(
+      fc.property(fc.nat({ max: 6 }), readArb, (count, read) => {
+        vi.restoreAllMocks();
+        const { actions } = wireImports();
+        const repo = epochRepo(0);
+        Object.assign(actions.plugin.reviewManager, { repo });
+        pushEntries(actions, Array<boolean>(count).fill(false), 'plain');
+        const restoreEpoch = vi.spyOn(repo, 'restoreEpoch');
+
+        actions[read]();
+
+        expect(restoreEpoch).not.toHaveBeenCalled();
+      })
+    );
+  });
+
+  it('property: undoes an entry kept through a restore as ever, dropping those the restore voided first', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        restoredEpochsArb,
+        fc.array(writesArb, { maxLength: 5 }),
+        fc.array(writesArb, { maxLength: 5 }),
+        fc.nat(),
+        async ([before, after], early, late, pick) => {
+          vi.restoreAllMocks();
+          const { actions, notify } = wireImports();
+          const repo = epochRepo(before);
+          Object.assign(actions.plugin.reviewManager, { repo });
+          const made = pushEntries(actions, early, 'before');
+          repo.epoch = after;
+          // At least one entry survives: one made since the restore
+          const since = pushEntries(actions, [...late, true], 'since');
+          const kept = [
+            ...made.filter(({ writes }) => writes === false),
+            ...since,
+          ];
+          const dropped = kept.length < made.length + since.length;
+          const target = kept[pick % kept.length];
+
+          await actions.undoEntry(target);
+
+          expect(target.undo).toHaveBeenCalledOnce();
+          for (const entry of [...made, ...since]) {
+            if (entry !== target) expect(entry.undo).not.toHaveBeenCalled();
+          }
+          expect(stackOf(actions)).toEqual(
+            kept
+              .filter((entry) => entry !== target)
+              .map(({ description }) => description)
+          );
+          expect(notify).toHaveBeenCalledTimes(dropped ? 2 : 1);
+          expect(notify).toHaveBeenLastCalledWith(
+            expect.stringContaining(target.description),
+            { kind: 'success', category: 'undo' }
+          );
+        }
+      )
+    );
+  });
+
+  it("property: says an entry the restore dropped can't be undone, when its undo is asked for after", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        restoredEpochsArb,
+        fc.string(),
+        fc.constantFrom(true, undefined),
+        fc.constantFrom('peekUndo', 'pruneUndo', 'undo'),
+        async ([before, after], description, writes, read) => {
+          vi.restoreAllMocks();
+          const { actions, notify, listener } = wireImports();
+          const repo = epochRepo(before);
+          Object.assign(actions.plugin.reviewManager, { repo });
+          const entry: ActionStackEntry = {
+            description,
+            undo: vi.fn(),
+            writes,
+          };
+          actions._pushUndo(entry);
+          repo.epoch = after;
+          await actions[read]();
+          await Promise.resolve();
+          notify.mockClear();
+          listener.mockClear();
+
+          await actions.undoEntry(entry);
+
+          expect(entry.undo).not.toHaveBeenCalled();
+          expect(listener).not.toHaveBeenCalled();
+          expect(notify).toHaveBeenCalledExactlyOnceWith(
+            expect.stringContaining(description),
+            { kind: 'error' }
+          );
+        }
+      )
+    );
+  });
+
+  it('says nothing more of a restore when an undo under way at it comes back to the stack after, and drops it quietly', async () => {
+    const { actions, notify } = wireImports();
+    const repo = epochRepo(0);
+    Object.assign(actions.plugin.reviewManager, { repo });
+    let finish!: (miss: 'retry') => void;
+    pushEntries(actions, [true], 'below');
+    const entry: ActionStackEntry = {
+      description: 'doing',
+      writes: true,
+      undo: vi.fn(
+        () =>
+          new Promise<'retry'>((resolve) => {
+            finish = resolve;
+          })
+      ),
+    };
+    actions._pushUndo(entry);
+    const undone = actions.undoEntry(entry);
+    await vi.waitFor(() => expect(entry.undo).toHaveBeenCalledOnce());
+    repo.epoch = 1;
+    actions.pruneUndo();
+    finish('retry');
+    await undone;
+    notify.mockClear();
+
+    actions.pruneUndo();
+
+    expect(actions.undoStack).toEqual([]);
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it('says only that the history was cleared when the merge an undo waits out takes on a restored file and the reload drops it', async () => {
+    const { actions, notify } = wireImports();
+    const repo = mergingRepo();
+    Object.assign(actions.plugin.reviewManager, { repo });
+    const [entry] = pushEntries(actions, [true], 'doing');
+
+    const undone = actions.undoEntry(entry);
+    await Promise.resolve();
+    repo.epoch = 1;
+    // As the repository does: out of merging, then the reload's callback,
+    // which prunes, in the same synchronous run, before the wait resumes
+    repo.becomes('ready');
+    actions.pruneUndo();
+    await undone;
+
+    expect(entry.undo).not.toHaveBeenCalled();
+    expect(actions.undoStack).toEqual([]);
+    // The notice of the drop, which takes no options, and none for the press
+    expect(notify).toHaveBeenCalledOnce();
+    expect(notify.mock.calls[0]).toHaveLength(1);
+  });
+
+  it('still answers a press whose entry another press undid during the merge both waited out, with no restore', async () => {
+    const { actions, notify } = wireImports();
+    const repo = mergingRepo();
+    Object.assign(actions.plugin.reviewManager, { repo });
+    const [entry] = pushEntries(actions, [true], 'doing');
+
+    const first = actions.undoEntry(entry);
+    const second = actions.undoEntry(entry);
+    await Promise.resolve();
+    repo.becomes('ready');
+    await Promise.all([first, second]);
+
+    expect(entry.undo).toHaveBeenCalledOnce();
+    // The undo's success, and the second press's own answer
+    expect(notify).toHaveBeenCalledTimes(2);
+    expect(notify).toHaveBeenCalledWith(expect.stringContaining('doing'), {
+      kind: 'success',
+      category: 'undo',
+    });
+  });
+
+  it('undo says only that the history was cleared when a restore left nothing to undo', async () => {
+    const { actions, notify } = wireImports();
+    const repo = epochRepo(0);
+    Object.assign(actions.plugin.reviewManager, { repo });
+    const [entry] = pushEntries(actions, [true], 'made');
+    repo.epoch = 1;
+
+    await actions.undo();
+
+    expect(entry.undo).not.toHaveBeenCalled();
+    expect(actions.undoStack).toEqual([]);
+    expect(notify).toHaveBeenCalledOnce();
+    // The notice of the drop, which takes no options, not one for the press
+    expect(notify.mock.calls[0]).toHaveLength(1);
+  });
+
+  it('undo says there is nothing to undo once a restore was said to have cleared the history', async () => {
+    const { actions, notify } = wireImports();
+    const repo = epochRepo(0);
+    Object.assign(actions.plugin.reviewManager, { repo });
+    pushEntries(actions, [true], 'made');
+    repo.epoch = 1;
+    actions.pruneUndo();
+    notify.mockClear();
+
+    await actions.undo();
+
+    expect(notify).toHaveBeenCalledOnce();
   });
 });
 

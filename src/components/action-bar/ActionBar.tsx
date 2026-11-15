@@ -494,10 +494,11 @@ function UndoAction() {
   // The top entry, not the stack: `push`/`pop` mutate the array in place, so
   // its reference never changes and every snapshot would compare equal. The
   // entry is a fresh object per action and is all this button renders, so its
-  // identity changes exactly when the button's appearance should.
+  // identity changes exactly when the button's appearance should. Read
+  // through `peekUndo`, which first drops what a restore voided.
   const lastAction: ActionStackEntry | undefined = useSyncExternalStore(
     actions.subscribe,
-    () => actions.undoStack[actions.undoStack.length - 1]
+    actions.peekUndo
   );
 
   return (
