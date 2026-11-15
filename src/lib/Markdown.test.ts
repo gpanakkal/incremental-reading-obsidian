@@ -2674,6 +2674,31 @@ describe('escapeCutUnderline', () => {
     expect(note('<!-- c --> foo\n---', 11)).toBe('foo\n---');
   });
 
+  it('reads a comment after list or quote markers as their line, which holds the lines after it and which nothing underlines', () => {
+    // The lines after it join the list or quote, so none is set apart
+    expect(note('2. <!-- #c -->\rword#evil', 4, 16)).toBe('!-- #c -->\rw');
+    expect(note('2. <!-- #c -->\nword#evil', 4)).toBe('!-- #c -->\nword#evil');
+    expect(note('> <!-- c -->\r\nfoo', 4)).toBe('-- c -->\r\nfoo');
+    // A rule under it, or under a line it holds, was no underline
+    expect(note('- <!-- c -->\n---', 2)).toBe('<!-- c -->\n\n---');
+    expect(note('> <!-- c -->\r---', 4)).toBe('-- c -->\r\r---');
+    expect(note('- <!-- c -->\nfoo\n---', 2)).toBe('<!-- c -->\nfoo\n\n---');
+  });
+
+  it('reads a comment after list markers indented as code as text the line above holds, which a line under it would underline', () => {
+    // Code in the source, a paragraph's later line in the note
+    expect(note('# h x\n    - <!-- c -->\n---', 4)).toBe(
+      'x\n    - <!-- c -->\n\n---'
+    );
+    expect(note('# h x\n    - <!-- c -->\n===', 4)).toBe(
+      'x\n    - <!-- c -->\n' + String.raw`\===`
+    );
+    // Where it was a later line in the source too, the heading stays
+    expect(note('foo\n    - <!-- c -->\n---', 1)).toBe(
+      'oo\n    - <!-- c -->\n---'
+    );
+  });
+
   it('takes an empty list item above for no underline: the cache reads none', () => {
     expect(note('# h\n-\nfoo\n---', 6)).toBe('foo\n\n---');
     expect(note('a\n\n-\nfoo\n---', 5)).toBe('foo\n\n---');

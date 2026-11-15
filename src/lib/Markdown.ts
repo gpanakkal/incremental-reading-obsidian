@@ -555,10 +555,13 @@ const isParagraphLine = (line: string) =>
  * Whether `line` is an HTML block of a comment closed on it, which ends a
  * paragraph above it, as `<!-- c --> x` doesn't. Reading view still
  * underlines it into a heading, as a paragraph (the probe "reads tags in
- * spans, and underlines…" in e2e-tests/child-start.spec.ts).
+ * spans, and underlines…" in e2e-tests/child-start.spec.ts). After list or
+ * quote markers, it is no such block for an underline: their line holds the
+ * lines after it lazily, and a `---` under it is a rule (the same probe, in
+ * Obsidian 1.15.1).
  */
 const isCommentBlock = (line: string) =>
-  commentAt(line) >= 0 && line.trimEnd().endsWith('-->');
+  /^ {0,3}<!--/.test(line) && line.trimEnd().endsWith('-->');
 
 /**
  * A line that starts an HTML block that interrupts a paragraph: one of
