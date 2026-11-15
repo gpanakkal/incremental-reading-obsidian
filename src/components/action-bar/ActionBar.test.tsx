@@ -268,8 +268,9 @@ function jointSeparator(container: HTMLElement): HTMLElement {
 
 /**
  * Stand-in for `Actions` covering what the undo button touches: an array
- * mutated in place, and an emit after each mutation. `listeners` is exposed so
- * a test can check the button lets go of its subscription.
+ * mutated in place, read through `peekUndo`, and an emit after each mutation.
+ * `listeners` is exposed so a test can check the button lets go of its
+ * subscription.
  */
 function makeActions() {
   const undoStack: ActionStackEntry[] = [];
@@ -279,6 +280,7 @@ function makeActions() {
   };
   return {
     undoStack,
+    peekUndo: () => undoStack.at(-1),
     listeners,
     subscribe: (fn: () => void) => {
       listeners.add(fn);

@@ -294,6 +294,17 @@ export class Actions {
    * its result, which the import's notice holds to undo it.
    */
   private readonly _importEntries = new WeakMap<object, ActionStackEntry>();
+  /**
+   * The restore epoch the undo history was last said to be cleared for (see
+   * {@link pruneUndo}), so a restore is told of once however often the stack
+   * is read after it.
+   */
+  private _clearedFor: number | undefined;
+  /**
+   * Entries a restore took off the stack (see {@link pruneUndo}), held to say
+   * why when an undo of one is still asked for: by a notice's button, say.
+   */
+  private readonly _voided = new WeakSet<ActionStackEntry>();
   emitter;
   subscribe;
 
@@ -1373,10 +1384,81 @@ export class Actions {
     }
   };
 
+  /**
+   * Take off the stack every entry that writes and was made before a restore
+   * since (its restore epoch is not the database's): its undo would write
+   * over rows the restore replaced, so it can never run (see
+   * {@link undoEntry}). Those that write nothing stay. Says so once per
+   * restore, and tells subscribers once when any went. Runs wherever the
+   * stack is read, and once a reload or restore is taken in, so the undo
+   * button stops offering them without waiting to be pressed.
+   * @returns whether any went: `told` when this said so, `dropped` when a
+   *   notice said so already for this restore, `none` when none went
+   */
+  pruneUndo = (): 'none' | 'dropped' | 'told' => {
+    const pruned = this._dropRestored();
+    if (pruned !== 'none') this.emitter.emit();
+    return pruned;
+  };
+
+  /**
+   * The entry {@link undo} would undo, once {@link pruneUndo} has dropped
+   * those a restore voided: what the undo button renders. Read during a
+   * render, so subscribers are told of a drop in a microtask rather than now,
+   * which would set off another render while this one runs.
+   */
+  peekUndo = (): ActionStackEntry | undefined => {
+    if (this._dropRestored() !== 'none') {
+      queueMicrotask(() => this.emitter.emit());
+    }
+    return this.undoStack.at(-1);
+  };
+
+  /** {@link pruneUndo}, telling no subscriber. */
+  private _dropRestored(): 'none' | 'dropped' | 'told' {
+    // Read on every render of the undo button: the epoch is a query, and
+    // only an entry that writes can be voided by it
+    if (this.undoStack.every(({ writes }) => writes === false)) return 'none';
+    const epoch = this.plugin.reviewManager.repo.restoreEpoch();
+    const kept: ActionStackEntry[] = [];
+    for (const entry of this.undoStack) {
+      if (entry.writes === false || entry.restoreEpoch === epoch) {
+        kept.push(entry);
+      } else {
+        this._voided.add(entry);
+      }
+    }
+    if (kept.length === this.undoStack.length) return 'none';
+    // In place: the undo button reads this very array
+    this.undoStack.splice(0, this.undoStack.length, ...kept);
+    if (this._clearedFor === epoch) return 'dropped';
+    this._clearedFor = epoch;
+    Obsidian.notify('Undo history cleared: the database was restored since');
+    return 'told';
+  }
+
+  /**
+   * Whether `target` is an entry a restore voided, after {@link pruneUndo}:
+   * said so, unless the prune just told of the restore that voided it.
+   */
+  private _voidedByRestore(target: ActionStackEntry | undefined): boolean {
+    const pruned = this.pruneUndo();
+    if (target === undefined || !this._voided.has(target)) return false;
+    if (pruned !== 'told') {
+      Obsidian.notify(
+        `Can't undo ${target.description}: the database was restored since`,
+        { kind: 'error' }
+      );
+    }
+    return true;
+  }
+
   undo = async () => {
+    const pruned = this.pruneUndo();
     const actionEntry = this.undoStack.at(-1);
     if (actionEntry === undefined) {
-      Obsidian.notify(`Nothing to undo!`);
+      // A restore just emptied it, which its notice said
+      if (pruned !== 'told') Obsidian.notify(`Nothing to undo!`);
       return;
     }
     await this.undoEntry(actionEntry);
@@ -1389,6 +1471,7 @@ export class Actions {
    * stack (anymore).
    */
   undoEntry = async (target: ActionStackEntry | undefined) => {
+    if (this._voidedByRestore(target)) return;
     // The stack holds no `undefined`, so none is found for it either
     const actionEntry = this.undoStack.find((entry) => entry === target);
     if (actionEntry === undefined) {
@@ -1409,7 +1492,8 @@ export class Actions {
     // undo took the entry off the stack or one below it
     const at = this.undoStack.indexOf(actionEntry);
     if (at === -1) {
-      Obsidian.notify('Already undone');
+      // Or dropped by a restore the wait took in, which its notice told of
+      if (!this._voided.has(actionEntry)) Obsidian.notify('Already undone');
       return;
     }
     // After the wait, which may have taken on another device's restored file

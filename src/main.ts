@@ -899,6 +899,10 @@ export default class IncrementalReadingPlugin extends Plugin {
         void this.reviewManager?.snippets.persistPendingOffsets();
       },
       onReloadFromDisk: async () => {
+        // First, so the undo button stops offering what a restore taken in
+        // here voided without waiting for its next render. Unset while the
+        // database first loads, before there is any history
+        this.actions?.pruneUndo();
         // Before the refetch below, which would otherwise read nothing for an
         // item another device deleted for good and show the summary in its
         // place. Here rather than in a review tab: a tab in the background,
