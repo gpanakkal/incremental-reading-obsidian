@@ -5,39 +5,12 @@
 // ignored; template literals with `${}` stay mutated because the logic inside
 // them is worth testing. Ignored mutants are reported as "Ignored".
 import { PluginKind, declareValuePlugin } from '@stryker-mutator/api/plugin';
-
-/** Calls whose first argument is user-facing text: `notify('…')`, `el.setText('…')` */
-const COPY_CALLS = new Set([
-  'notify',
-  'setName',
-  'setDesc',
-  'setPlaceholder',
-  'setButtonText',
-  'setTooltip',
-  'setTitle',
-  'setHeading',
-  'setText',
-]);
-
-/** Object keys whose value is user-facing text: `createEl('p', { text: '…' })` */
-const COPY_KEYS = new Set([
-  'text',
-  'desc',
-  'heading',
-  'label',
-  'placeholder',
-  'tooltip',
-  'buttonText',
-  'confirmText',
-  'cancelText',
-]);
-
-const COMMAND_CALLBACKS = [
-  'callback',
-  'checkCallback',
-  'editorCallback',
-  'editorCheckCallback',
-];
+import {
+  COMMAND_CALLBACKS,
+  COPY_CALLS,
+  COPY_KEYS,
+  SETTING_KEYS,
+} from './scripts/lib/ui-copy-sinks.mjs';
 
 /**
  * A string literal, or a template whose only `${}`s are module constants
@@ -121,7 +94,7 @@ function isUiCopy(path) {
     // ({ id, name, callback }); elsewhere it's often a storage key
     const object = /** @type {any} */ (parent.parentPath?.node);
     return (
-      hasKey(object, ['desc', 'control']) ||
+      hasKey(object, SETTING_KEYS) ||
       (hasKey(object, ['id']) && hasKey(object, COMMAND_CALLBACKS))
     );
   }

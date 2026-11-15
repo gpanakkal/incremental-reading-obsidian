@@ -28,6 +28,7 @@
 		"lint:css": "cross-env BROWSERSLIST_IGNORE_OLD_DATA=1 stylelint \"./styles.css\" --max-warnings 0",
 		"version": "node version-bump.mjs && git add manifest.json versions.json package.json",
 		"release": "node scripts/release.mjs",
+		"copy-diff": "node scripts/ui-text-diff.mjs",
 		"preinstall": "npx only-allow pnpm"
 	},
 	"keywords": [],
