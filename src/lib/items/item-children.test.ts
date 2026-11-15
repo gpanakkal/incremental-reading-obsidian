@@ -124,8 +124,14 @@ function insert(repo: TestRepository, { id, table, parent, context }: Node) {
   }
 }
 
-async function plant({ nodes, trashed, purged }: Forest) {
+/** A new database holding `forest`. */
+async function plant(forest: Forest) {
   const repo = await TestRepository.create();
+  plantIn(repo, forest);
+  return repo;
+}
+
+function plantIn(repo: TestRepository, { nodes, trashed, purged }: Forest) {
   for (const node of nodes) insert(repo, node);
   for (const { id, table } of nodes) {
     if (trashed.has(id)) {
@@ -137,7 +143,40 @@ async function plant({ nodes, trashed, purged }: Forest) {
       }
     }
   }
-  return repo;
+}
+
+/** Thrown to roll a case's rows back out of the shared database. */
+const ROLL_BACK = new Error('roll back');
+
+/**
+ * Plant `forest` in `repo` and run `check` over it, then roll every row it
+ * wrote back out, so the cases of a property share one database. Each write
+ * outside a transaction saves the whole file, and a new database per case
+ * adds its own setup: together they made a property's 300 cases take most of
+ * the default timeout on a loaded machine. Planting starts from an empty
+ * database, so a row one case left behind fails the next rather than passing
+ * for one of its own.
+ */
+async function withPlanted(
+  repo: TestRepository,
+  forest: Forest,
+  check: () => Promise<void>
+) {
+  try {
+    await repo.transaction(async () => {
+      expect(
+        repo.query(
+          `SELECT id FROM article UNION ALL SELECT id FROM snippet
+           UNION ALL SELECT id FROM srs_card`
+        )
+      ).toEqual([]);
+      plantIn(repo, forest);
+      await check();
+      throw ROLL_BACK;
+    });
+  } catch (error) {
+    if (error !== ROLL_BACK) throw error;
+  }
 }
 
 /**
@@ -202,31 +241,33 @@ const byId = (a: { id: string }, b: { id: string }) =>
 
 describe('childrenOf', () => {
   it('property: finds every snippet and card under the items asked about, however deep, with its own note, and nothing else', async () => {
+    const repo = await TestRepository.create();
     await fc.assert(
-      fc.asyncProperty(askedArb, async ({ forest, roots }) => {
-        const repo = await plant(forest);
+      fc.asyncProperty(askedArb, ({ forest, roots }) =>
+        withPlanted(repo, forest, async () => {
+          const found = await childrenOf(repo, roots);
 
-        const found = await childrenOf(repo, roots);
-
-        expect([...found].sort(byId)).toEqual(
-          expectedChildren(forest, roots).sort(byId)
-        );
-      }),
+          expect([...found].sort(byId)).toEqual(
+            expectedChildren(forest, roots).sort(byId)
+          );
+        })
+      ),
       { numRuns: 300 }
     );
   });
 
   it('property: finds only what hangs under the live items asked about, when told to', async () => {
+    const repo = await TestRepository.create();
     await fc.assert(
-      fc.asyncProperty(askedArb, async ({ forest, roots }) => {
-        const repo = await plant(forest);
+      fc.asyncProperty(askedArb, ({ forest, roots }) =>
+        withPlanted(repo, forest, async () => {
+          const found = await childrenOf(repo, roots, { liveRoots: true });
 
-        const found = await childrenOf(repo, roots, { liveRoots: true });
-
-        expect([...found].sort(byId)).toEqual(
-          expectedChildren(forest, roots, { liveRoots: true }).sort(byId)
-        );
-      }),
+          expect([...found].sort(byId)).toEqual(
+            expectedChildren(forest, roots, { liveRoots: true }).sort(byId)
+          );
+        })
+      ),
       { numRuns: 300 }
     );
   });
@@ -250,56 +291,60 @@ describe('childrenOf', () => {
   });
 
   it('property: lists each one ahead of the row it sits under, deepest first', async () => {
+    const repo = await TestRepository.create();
     await fc.assert(
-      fc.asyncProperty(askedArb, async ({ forest, roots }) => {
-        const repo = await plant(forest);
+      fc.asyncProperty(askedArb, ({ forest, roots }) =>
+        withPlanted(repo, forest, async () => {
+          const found = await childrenOf(repo, roots);
 
-        const found = await childrenOf(repo, roots);
-
-        const at = new Map(found.map(({ id }, i) => [id, i]));
-        for (const { id } of found) {
-          const { parent } = forest.nodes.find((node) => node.id === id)!;
-          const above = parent === null ? undefined : at.get(parent);
-          if (above !== undefined) expect(at.get(id)!).toBeLessThan(above);
-        }
-      }),
+          const at = new Map(found.map(({ id }, i) => [id, i]));
+          for (const { id } of found) {
+            const { parent } = forest.nodes.find((node) => node.id === id)!;
+            const above = parent === null ? undefined : at.get(parent);
+            if (above !== undefined) expect(at.get(id)!).toBeLessThan(above);
+          }
+        })
+      ),
       { numRuns: 300 }
     );
   });
 
   it('property: deleted in the order listed, and the items asked about after them, leave no row under or taken from any of them, and move no other row', async () => {
+    const repo = await TestRepository.create();
+    const links = () =>
+      repo.query(
+        `SELECT id, parent, context FROM snippet WHERE ${NOT_PURGED}
+         UNION ALL
+         SELECT id, parent, context FROM srs_card WHERE ${NOT_PURGED}`
+      ) as unknown as Pick<Node, 'id' | 'parent' | 'context'>[];
     await fc.assert(
-      fc.asyncProperty(askedArb, async ({ forest, roots }) => {
-        const repo = await plant(forest);
-        const links = () =>
-          repo.query(
-            `SELECT id, parent, context FROM snippet WHERE ${NOT_PURGED}
-             UNION ALL
-             SELECT id, parent, context FROM srs_card WHERE ${NOT_PURGED}`
-          ) as unknown as Pick<Node, 'id' | 'parent' | 'context'>[];
-        const before = new Map(links().map(({ id, parent }) => [id, parent]));
+      fc.asyncProperty(askedArb, ({ forest, roots }) =>
+        withPlanted(repo, forest, async () => {
+          const before = new Map(links().map(({ id, parent }) => [id, parent]));
 
-        const found = await childrenOf(repo, roots);
-        const removed = [
-          ...found,
-          ...forest.nodes.filter(
-            ({ id }) => roots.includes(id) && !forest.purged.has(id)
-          ),
-        ];
-        for (const { table, id } of removed) {
-          for (const { query, params } of deleteRowStatements(table, id)) {
-            repo.mutate(query, params);
+          const found = await childrenOf(repo, roots);
+          const removed = [
+            ...found,
+            ...forest.nodes.filter(
+              ({ id }) => roots.includes(id) && !forest.purged.has(id)
+            ),
+          ];
+          // In the case's transaction, as every delete for good runs them
+          for (const { table, id } of removed) {
+            for (const { query, params } of deleteRowStatements(table, id)) {
+              repo.mutate(query, params);
+            }
           }
-        }
 
-        const gone = new Set(removed.map(({ id }) => id));
-        for (const { id, parent, context } of links()) {
-          expect(gone.has(id)).toBe(false);
-          expect(parent === null || !gone.has(parent)).toBe(true);
-          expect(context === null || !gone.has(context)).toBe(true);
-          expect(parent).toBe(before.get(id));
-        }
-      }),
+          const gone = new Set(removed.map(({ id }) => id));
+          for (const { id, parent, context } of links()) {
+            expect(gone.has(id)).toBe(false);
+            expect(parent === null || !gone.has(parent)).toBe(true);
+            expect(context === null || !gone.has(context)).toBe(true);
+            expect(parent).toBe(before.get(id));
+          }
+        })
+      ),
       { numRuns: 300 }
     );
   });
