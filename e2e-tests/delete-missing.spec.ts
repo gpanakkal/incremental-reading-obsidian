@@ -298,3 +298,55 @@ test('moves a card up to the article above a snippet deleted for good, its conte
   await expect.poll(openPaths).toContain('notes/Source.md');
   expect(await openPaths()).not.toContain('articles/Root.md');
 });
+
+test('moves a card an older version left under a snippet it deleted for good up to the article above it, at the next start', async () => {
+  await writeVaultFile(
+    'articles/Root.md',
+    '---\nir-id: root\ntags: ir-article\n---\nThe article\n'
+  );
+  await mutate(
+    `INSERT INTO article (id, reference, due, interval, priority)
+     VALUES ('root', 'articles/Root.md', $1, 86400000, 25)`,
+    [Date.now() + 1e9]
+  );
+  // Deleted for good without moving what sat under it, as before drops did
+  await mutate(
+    `INSERT INTO snippet (id, reference, parent, context, due, interval, priority, deleted)
+     VALUES ('lost', '/ir-deleted/lost', 'root', 'root', $1, 86400000, 30, TRUE)`,
+    [Date.now() + 1e9]
+  );
+  await writeVaultFile(
+    'cards/Kept card.md',
+    '---\nir-id: kept-card\ntags: ir-card\n---\nA card\n'
+  );
+  await mutate(
+    `INSERT INTO srs_card (id, reference, parent, context, created_at, due,
+       stability, difficulty, elapsed_days, scheduled_days, state)
+     VALUES ('kept-card', 'cards/Kept card.md', 'lost', 'lost', 0, $1, 0, 0, 0, 0, 0)`,
+    [Date.now() + 1e9]
+  );
+  await executeCommandById(window, 'incremental-reading:learn');
+  const card = window.locator('.ir-queue-row').filter({ hasText: 'Kept card' });
+  await expect(card).toBeVisible();
+  await expect(card).not.toContainText('articles/Root.md');
+
+  // Loaded again, as at the next start. `app.plugins` is unofficial
+  // Obsidian API (see `PageApp`)
+  await window.evaluate(async () => {
+    const { plugins } = (
+      window as unknown as {
+        app: {
+          plugins: {
+            disablePlugin(id: string): Promise<void>;
+            enablePlugin(id: string): Promise<boolean>;
+          };
+        };
+      }
+    ).app;
+    await plugins.disablePlugin('incremental-reading');
+    await plugins.enablePlugin('incremental-reading');
+  });
+
+  // Its parent column names the article the snippet sat under
+  await expect(card).toContainText('articles/Root.md');
+});

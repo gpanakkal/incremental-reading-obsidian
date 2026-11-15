@@ -1652,6 +1652,42 @@ describe('mergeInto, a row dropped on another device', () => {
     );
   });
 
+  it.each([false, true])(
+    'moves a card made here from a snippet the other copy dropped meanwhile to what the snippet sat under, erasing its context, as writes of this device in the merge (replaying: %s)',
+    (replaying) => {
+      const there = plant();
+      armRowStamps(there, { deviceId: () => 'there', now: () => 2e12 });
+      for (const { query, params } of deleteRowStatements('snippet', 's1')) {
+        there.run(query, params as SqlValue[]);
+      }
+      const here = plant();
+      armRowStamps(here, THIS_DEVICE);
+      here.run(
+        `INSERT INTO srs_card (id, reference, parent, context, created_at, due, stability,
+           difficulty, elapsed_days, scheduled_days, state)
+         VALUES ('new', 'new.md', 's1', 's1', 0, 1, 0, 0, 0, 0, 0)`
+      );
+      const theirs = openIncoming(SQL, there.export(), migrations);
+      open.push(theirs);
+      const planned = previewMerge(here, theirs);
+
+      const report = mergeInto(
+        here,
+        theirs,
+        THIS_DEVICE,
+        replaying ? { fsrsParams: {}, fuzzTextReviews: false } : undefined
+      );
+
+      expect(
+        here.exec(
+          `SELECT parent, context, updated_by FROM srs_card WHERE id = 'new'`
+        )[0].values
+      ).toEqual([['s0', null, 'here']]);
+      // Its context, then its parent
+      expect(report.written).toBe(planned.written + 2);
+    }
+  );
+
   it('takes in a file an older version wrote, before rows had a context, as rows taken from their parents', () => {
     const old = plant();
     old.exec(`

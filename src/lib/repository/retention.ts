@@ -1,6 +1,7 @@
 import { BACKUP_DIRECTORY, MS_PER_DAY } from '#/lib/constants';
+import { letGoOfStatements } from '#/lib/items/row-delete';
 import { type DataAdapter, normalizePath } from 'obsidian';
-import type { Database } from 'sql.js';
+import type { Database, SqlValue } from 'sql.js';
 import {
   type StampSource,
   type SyncedTable,
@@ -322,9 +323,13 @@ const PRUNE_TABLE = 'ir_prune';
 /**
  * Delete from `db` what retention lets go of at `now`: old tombstones with
  * the rows that belong to them, and devices that have not saved in as long.
- * One transaction; the stamp triggers and the delete guard are off for it
- * and armed again from `stamps` after (see `withHardDeletesAllowed`). Not
- * saved: the caller saves when anything was deleted.
+ * What sat under an article or snippet deleted so first moves up, as a drop
+ * moves it (see `letGoOfStatements`): a row only trashed leaves its children
+ * where they are while it can come back, which once pruned it never can.
+ * Those moves are this device's writes, stamped; for the deletes after them
+ * the stamp triggers and the delete guard are off, and armed again from
+ * `stamps` after (see `withHardDeletesAllowed`). One transaction. Not saved:
+ * the caller saves when anything was deleted.
  *
  * Nothing at all while the copy is itself past the sync horizon (its newest
  * save, of any device, is that old, or it has no stamp yet): it is the stale
@@ -348,9 +353,17 @@ export function pruneDatabase(
     .filter(([, generation]) => pastSyncHorizon(generation, now))
     .map(([device]) => device);
   if (rows.length === 0 && devices.length === 0) return { rows: 0, devices: 0 };
-  withHardDeletesAllowed(db, stamps, () => {
-    db.exec('BEGIN');
-    try {
+  db.exec('BEGIN');
+  try {
+    // Any order: a row moved under another pruned one moves again with it
+    for (const { table, key } of rows) {
+      if (table !== 'article' && table !== 'snippet') continue;
+      for (const { query, params } of letGoOfStatements(table, key)) {
+        db.run(query, params as SqlValue[]);
+      }
+    }
+    // Inside the transaction, so a rollback leaves the triggers as they were
+    withHardDeletesAllowed(db, stamps, () => {
       db.exec(`
         DROP TABLE IF EXISTS temp.${PRUNE_TABLE};
         CREATE TEMP TABLE ${PRUNE_TABLE} (tbl TEXT NOT NULL, key TEXT NOT NULL);
@@ -371,11 +384,11 @@ export function pruneDatabase(
         db.run('DELETE FROM main.write_stamp WHERE device = ?', [device]);
       }
       db.exec(`DROP TABLE temp.${PRUNE_TABLE}`);
-      db.exec('COMMIT');
-    } catch (error) {
-      db.exec('ROLLBACK');
-      throw error;
-    }
-  });
+    });
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
   return { rows: rows.length, devices: devices.length };
 }

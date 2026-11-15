@@ -104,6 +104,24 @@ export function deleteRowStatements(
   id: string
 ): MutationStatement[] {
   return [
+    ...letGoOfStatements(table, id),
+    ...tombstoneRowStatements(table, id),
+  ];
+}
+
+/**
+ * The half of {@link deleteRowStatements} that leaves the tree whole around
+ * the `table` row `id`, without touching the row itself: what was taken from
+ * it loses its context, and what sat under it moves up to the item it sat
+ * under, or to the top. Also run for a row already deleted for good, or
+ * gone, whose children arrived from a device that had not seen it go (see
+ * `rehomeOrphans`).
+ */
+export function letGoOfStatements(
+  table: ItemTable,
+  id: string
+): MutationStatement[] {
+  return [
     ...CHILD_TABLES.map((child) => ({
       query: `UPDATE ${child} SET context = NULL WHERE context = $1`,
       params: [id],
@@ -112,6 +130,5 @@ export function deleteRowStatements(
       query: `UPDATE ${child} SET parent = ${itemAbove(table)} WHERE parent = $1`,
       params: [id],
     })),
-    ...tombstoneRowStatements(table, id),
   ];
 }

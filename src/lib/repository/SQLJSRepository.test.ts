@@ -29,6 +29,7 @@ import {
   type MockInstance,
 } from 'vitest';
 import { BulkMutateError } from './BulkMutateError';
+import * as rehome from './rehome-orphans';
 import {
   KNOWN_RESTORE_EPOCH_KEY,
   NEVER_RESTORED,
@@ -5663,6 +5664,44 @@ describe("telling another device's copy from this device's own save", () => {
     repo.dispose();
   });
 
+  it('moves no card off a snippet deleted for good in a copy it takes on while a transaction opened since the swap is open', async () => {
+    const { repo, files } = await startStored(['a']);
+    let release = () => {};
+    let open: Promise<void> | undefined;
+    // Opened in the microtasks between the swap and the fix-up
+    runAfter('reloadDb', () => {
+      open ??= repo.transaction(
+        () => new Promise<void>((resolve) => (release = resolve))
+      );
+    });
+    const SQL = await getSharedSql();
+    const db = new SQL.Database(files.get(DATABASE_FILE_PATH));
+    db.run(
+      `INSERT INTO snippet (id, reference, due, interval, priority, deleted)
+       VALUES ('s', '/ir-deleted/s', 0, 1, 30, 1)`
+    );
+    db.run(
+      `INSERT INTO srs_card (id, reference, parent, context, created_at, due, stability,
+         difficulty, elapsed_days, scheduled_days, state)
+       VALUES ('c', 'cards/c.md', 's', 's', 0, 0, 0, 0, 0, 0, 0)`
+    );
+    stampAsRemote(db);
+    files.set(DATABASE_FILE_PATH, db.export());
+    db.close();
+
+    await repo.handleFileChange(dbFileChange);
+    await settle();
+    expect(open).toBeDefined();
+    release();
+    await open;
+
+    // Left for the next load or merge, outside the transaction
+    expect(repo.query('SELECT parent, context FROM srs_card')).toEqual([
+      { parent: 's', context: 's' },
+    ]);
+    repo.dispose();
+  });
+
   it('takes on a fast-forward unfuzzed, saving nothing, when fuzzing its rows fails', async () => {
     const { repo, files, adapter, onReloadFromDisk } = await startStored(
       ['a'],
@@ -9790,5 +9829,220 @@ describe('restoreEpoch', () => {
     repo.dispose();
 
     expect(repo.restoreEpoch()).toBe(NEVER_RESTORED);
+  });
+});
+
+describe('moving what sits under a row deleted for good', () => {
+  beforeEach(() => {
+    stubWasm();
+    vi.spyOn(console, 'debug').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * Add to `db` a live article `art`, snippet `s` under it, deleted for
+   * good, and card `c` still under and taken from `s`, as a version that
+   * dropped rows without moving what sat under them left it.
+   */
+  function plantOrphan(db: Database) {
+    db.run(
+      `INSERT INTO article (id, reference, due, interval, priority)
+       VALUES ('art', 'n/art.md', 0, 1, 30)`
+    );
+    db.run(
+      `INSERT INTO snippet (id, reference, parent, context, due, interval, priority, deleted)
+       VALUES ('s', '/ir-deleted/s', 'art', 'art', 0, 1, 30, 1)`
+    );
+    db.run(
+      `INSERT INTO srs_card (id, reference, parent, context, created_at, due, stability,
+         difficulty, elapsed_days, scheduled_days, state)
+       VALUES ('c', 'cards/c.md', 's', 's', 0, 0, 0, 0, 0, 0, 0)`
+    );
+  }
+
+  /**
+   * `bytes`, or a new database, with the rows of {@link plantOrphan}, as
+   * another device saved it.
+   */
+  async function withOrphan(bytes?: Uint8Array): Promise<Uint8Array> {
+    const SQL = await getSharedSql();
+    const db = new SQL.Database(bytes ?? (await getEmptyDbBytes()));
+    plantOrphan(db);
+    stampAsRemote(db);
+    const out = db.export();
+    db.close();
+    return out;
+  }
+
+  /** The links of card `c` in the database file `bytes`. */
+  async function cardLinksIn(bytes: Uint8Array | undefined) {
+    const SQL = await getSharedSql();
+    const db = new SQL.Database(bytes);
+    try {
+      return db.exec(`SELECT parent, context FROM srs_card WHERE id = 'c'`)[0]
+        .values;
+    } finally {
+      db.close();
+    }
+  }
+
+  it('moves a card an older version left under a snippet it deleted for good to the article above it at startup, in one save', async () => {
+    const { app, files, adapter } = makeVault(
+      INDEXED,
+      new Map([[DATABASE_FILE_PATH, await withOrphan()]])
+    );
+
+    const repo = await startRepo(app);
+
+    expect(repo.startupKind).toBeNull();
+    expect(
+      repo.query(`SELECT parent, context FROM srs_card WHERE id = 'c'`)
+    ).toEqual([{ parent: 'art', context: null }]);
+    expect(await cardLinksIn(files.get(DATABASE_FILE_PATH))).toEqual([
+      ['art', null],
+    ]);
+    expect(dbWritesOf(adapter)).toBe(1);
+    repo.dispose();
+  });
+
+  it('moves a card under a snippet deleted for good in a fast-forward it starts on, in one save', async () => {
+    const files = new Map([[DATABASE_FILE_PATH, await dbFileWith(['a'])]]);
+    const vault = makeVault(INDEXED, files);
+    const app = withStorage(vault.app);
+    (await startRepo(app)).dispose();
+    files.set(
+      DATABASE_FILE_PATH,
+      await withOrphan(files.get(DATABASE_FILE_PATH))
+    );
+    vault.adapter.writeBinary.mockClear();
+
+    const repo = await startRepo(app);
+
+    expect(repo.startupKind).toBe('fast-forward');
+    expect(await cardLinksIn(files.get(DATABASE_FILE_PATH))).toEqual([
+      ['art', null],
+    ]);
+    expect(dbWritesOf(vault.adapter)).toBe(1);
+    repo.dispose();
+  });
+
+  it('writes nothing at startup when nothing sits under a row deleted for good', async () => {
+    const files = new Map([[DATABASE_FILE_PATH, await dbFileWith(['a'])]]);
+    const vault = makeVault(INDEXED, files);
+    const app = withStorage(vault.app);
+    (await startRepo(app)).dispose();
+    vault.adapter.writeBinary.mockClear();
+
+    const echo = await startRepo(app);
+    expect(echo.startupKind).toBe('echo');
+    echo.dispose();
+    const unplaced = await startRepo(vault.app);
+    unplaced.dispose();
+
+    expect(dbWritesOf(vault.adapter)).toBe(0);
+  });
+
+  it('starts all the same, logging the failure, when moving them fails', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const failure = new Error('refused');
+    vi.spyOn(rehome, 'rehomeOrphans').mockImplementation(() => {
+      throw failure;
+    });
+    const { app, adapter } = makeVault(
+      INDEXED,
+      new Map([[DATABASE_FILE_PATH, await withOrphan()]])
+    );
+
+    const repo = await startRepo(app);
+
+    expect(errors.mock.calls.flat()).toContain(failure);
+    expect(dbWritesOf(adapter)).toBe(0);
+    repo.dispose();
+  });
+
+  it('moves a card off a snippet trashed past the sync horizon to the article above it once retention prunes the snippet, in the save of the prune', async () => {
+    const SQL = await getSharedSql();
+    const db = new SQL.Database(await getEmptyDbBytes());
+    db.run(
+      `INSERT INTO article (id, reference, due, interval, priority)
+       VALUES ('art', 'n/art.md', 0, 1, 30)`
+    );
+    db.run(
+      `INSERT INTO snippet (id, reference, parent, context, due, interval, priority,
+         deleted, updated_at, updated_by)
+       VALUES ('s', 'snips/s.md', 'art', 'art', 0, 1, 30, 1, $1, 'x')`,
+      [Date.now() - STALE_AFTER_MS - DAY_MS]
+    );
+    db.run(
+      `INSERT INTO srs_card (id, reference, parent, context, created_at, due, stability,
+         difficulty, elapsed_days, scheduled_days, state)
+       VALUES ('c', 'cards/c.md', 's', 's', 0, 0, 0, 0, 0, 0, 0)`
+    );
+    stampAsRemote(db);
+    const { app, files, adapter } = makeVault(
+      INDEXED,
+      new Map([[DATABASE_FILE_PATH, db.export()]])
+    );
+    db.close();
+
+    const repo = await startRepo(app);
+
+    expect(repo.query('SELECT id FROM snippet')).toEqual([]);
+    expect(await cardLinksIn(files.get(DATABASE_FILE_PATH))).toEqual([
+      ['art', null],
+    ]);
+    // The startup pass met a trashed snippet, which can come back, and left
+    // the card be: only the prune moved it
+    expect(dbWritesOf(adapter)).toBe(1);
+    repo.dispose();
+  });
+
+  it('moves a card under a snippet deleted for good in a local copy it recovers, in the save that puts the copy back', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const files = new Map([[PREV_PATH, await withOrphan()]]);
+    const { app, adapter } = makeVault({ folder: true, file: false }, files);
+    const onRecovered = vi.fn();
+
+    const repo = await startRepo(app, { onRecovered });
+
+    expect(onRecovered).toHaveBeenCalledOnce();
+    expect(
+      repo.query(`SELECT parent, context FROM srs_card WHERE id = 'c'`)
+    ).toEqual([{ parent: 'art', context: null }]);
+    expect(await cardLinksIn(files.get(DATABASE_FILE_PATH))).toEqual([
+      ['art', null],
+    ]);
+    expect(dbWritesOf(adapter)).toBe(1);
+    repo.dispose();
+  });
+
+  it('moves a card under a snippet deleted for good in a backup it restores, in its one save', async () => {
+    const files = new Map([[DATABASE_FILE_PATH, await dbFileWith(['a'])]]);
+    const vault = makeVault(INDEXED, files);
+    const repo = await startRepo(vault.app);
+    try {
+      const name = backupFileName(LATEST_VERSION, 'merge', new Date(FIXED_DUE));
+      const path = `${BACKUP_DIRECTORY}/${name}`;
+      files.set(path, await withOrphan());
+      vault.adapter.writeBinary.mockClear();
+
+      await repo.restoreBackup(path);
+      await settle();
+
+      expect(
+        repo.query(`SELECT parent, context FROM srs_card WHERE id = 'c'`)
+      ).toEqual([{ parent: 'art', context: null }]);
+      expect(await cardLinksIn(files.get(DATABASE_FILE_PATH))).toEqual([
+        ['art', null],
+      ]);
+      expect(dbWritesOf(vault.adapter)).toBe(1);
+    } finally {
+      repo.dispose();
+    }
   });
 });
