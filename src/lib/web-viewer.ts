@@ -1,12 +1,14 @@
-import { type App, type PaneType, Platform } from 'obsidian';
+import type { App, PaneType } from 'obsidian';
 
 /**
  * What this plugin reads of Obsidian's Web viewer, the core plugin that opens
- * web pages in a tab. It has no public API: everything here is undocumented
- * internals, read from Obsidian's own bundle (`app.js` in obsidian.asar;
- * 1.13.7 and 1.14.4 agree on all of it). The view is read through
- * {@link WebViewerView} and checked at runtime; a view that does not match is
- * not taken for a web viewer, so the plugin behaves as it does without one.
+ * web pages in a tab on desktop. It has no public API: everything here is
+ * undocumented internals, read from Obsidian's own bundle (`app.js` in
+ * obsidian.asar; 1.13.7, 1.14.4 and 1.15.1 agree on all of it, but for what
+ * the mobile app's `openUrl` does, see {@link WebViewerPlugin}). The view is
+ * read through {@link WebViewerView} and checked at runtime; a view that does
+ * not match is not taken for a web viewer, so the plugin behaves as it does
+ * without one.
  */
 
 /** The web viewer's view type (`webviewer`; undocumented). */
@@ -91,7 +93,12 @@ export async function readWebPage(
  *
  * - `openUrl(url, newLeaf, active)`: the plugin's own way to open a page, in
  *   the leaf `Workspace.getLeaf(newLeaf)` picks, as its "Open in web viewer"
- *   link menu item and `web` CLI command do.
+ *   link menu item and `web` CLI command do. On the mobile app (1.15.1) it
+ *   picks no leaf: it hands an http(s) address to the in-app browser
+ *   (Capacitor's `Browser.open`), which opens over the app and closes back to
+ *   it, ignoring `newLeaf` and `active`, and answers any other address with a
+ *   notice. The mobile app registers no `webviewer` view, so it never has a
+ *   web viewer tab for {@link asWebViewer} to read.
  */
 export interface WebViewerPlugin {
   openUrl(url: string, newLeaf: PaneType | boolean, active: boolean): void;
@@ -118,17 +125,21 @@ export function enabledWebViewer(app: App): WebViewerPlugin | null {
 
 /**
  * The web viewer, when it is the one to open a web page a link names: on,
- * and with its own "Open external links in web viewer" option on, as when
- * the user follows a link to the page. Else null, the page then going to the
- * system's browser, as such a link's does. Never on the mobile app, which
- * has no web viewer.
+ * and with its own "Open external links" option on, as when the user follows
+ * a link to the page. Else null, the page then going to the system's
+ * browser, as such a link's does. The same on the mobile app: 1.15 brought
+ * the plugin there (see {@link WebViewerPlugin.openUrl} for what it does
+ * with a page), and older mobile apps don't load it, so it reads as off.
  *
  * The option is `options.openExternalURLs` on the plugin's instance
- * (undocumented; on by default, read from obsidian.asar 1.13.7). Options it
- * has not loaded yet read as off.
+ * (undocumented; on by default, and offered on the mobile app as on desktop,
+ * read from obsidian.asar 1.13.7 and 1.15.1). Options it has not loaded yet
+ * read as off. `openUrl` itself never reads the option, only Obsidian's
+ * handling of a followed link does (1.15.1), so requiring it here is this
+ * plugin's choice: Go to source goes where following a link to the page
+ * would.
  */
 export function linkWebViewer(app: App): WebViewerPlugin | null {
-  if (Platform.isMobileApp) return null;
   const viewer = enabledWebViewer(app);
   if (!viewer) return null;
   const { options } = viewer as { options?: unknown };

@@ -65,6 +65,7 @@ import type ReviewView from '#/views/ReviewView';
 import { EditorState } from '@codemirror/state';
 import {
   MarkdownView,
+  Platform,
   type FileView,
   type PaneType,
   type TFile,
@@ -2669,6 +2670,43 @@ describe('Actions.goToSource', () => {
           }
         )
       );
+    });
+
+    it('property: on the mobile app, hands the page to the web viewer without picking a tab, asking a new one unless told where', async () => {
+      try {
+        await fc.assert(
+          fc.asyncProperty(
+            basenameArb,
+            urlArb,
+            newLeafArb,
+            fc.boolean(),
+            async (basename, url, newLeaf, inReview) => {
+              Platform.isMobileApp = true;
+              const itemFile = makeTFile(basename);
+              const wired = wireWebSource(itemFile, url, inReview);
+              const openUrl = vi.fn();
+              vi.spyOn(webViewer, 'linkWebViewer').mockReturnValue({
+                openUrl,
+              });
+
+              await new Actions(wired.plugin).goToSource(itemFile, newLeaf);
+
+              expect(openUrl).toHaveBeenCalledExactlyOnceWith(
+                url,
+                newLeaf || 'tab',
+                true
+              );
+              // Picking a tab activates it, and makes one when none is free
+              expect(wired.getLeaf).not.toHaveBeenCalled();
+              expect(open).not.toHaveBeenCalled();
+              expect(Notice.messages).toEqual([]);
+              expectNoFileOpened(wired);
+            }
+          )
+        );
+      } finally {
+        Platform.isMobileApp = false;
+      }
     });
 
     it("property: opens the page in the system's browser when the web viewer doesn't open links or fails, saying so only when that fails too", async () => {
