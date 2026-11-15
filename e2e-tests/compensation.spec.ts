@@ -7,6 +7,7 @@ import {
   openNote,
   pendingSaves,
   selectParagraph,
+  setPluginSetting,
   watchNotices,
 } from './helpers';
 import { test } from './setup/fixtures';
@@ -218,6 +219,26 @@ async function openReview() {
   await expect(window.locator('#begin-review-button')).toBeVisible();
 }
 
+/** The review bar's button back to the home screen. */
+const homeButton = () =>
+  window.getByRole('button', { name: 'Go to home screen' });
+
+/**
+ * Open review past its home screen, where the leftover notice shows: it keeps
+ * out of the way of the home's own leftover button.
+ */
+async function openReviewAwayFromHome() {
+  await setPluginSetting(window, 'skipHomeScreen', true);
+  await executeCommandById(window, 'incremental-reading:learn');
+  await expect(homeButton()).toBeVisible();
+}
+
+/** Go from review to its home screen. */
+async function goHome() {
+  await homeButton().click();
+  await expect(window.locator('#begin-review-button')).toBeVisible();
+}
+
 /**
  * Start Obsidian once to give the database an item of its own, then close it:
  * leftovers are asked about only once the database holds items, as an empty
@@ -383,7 +404,7 @@ test.describe('Notes left without review data by a crash', () => {
 
     await leftoversFound(1);
     await expect(leftoverNotice()).toHaveCount(0);
-    await openReview();
+    await openReviewAwayFromHome();
     await expect(leftoverNotice()).toHaveText(/\b1 note\b/);
     expect(await rowCount(window, 'snippet')).toBe(0);
     await leftoverNotice().getByText('Manage', { exact: true }).click();
@@ -392,6 +413,7 @@ test.describe('Notes left without review data by a crash', () => {
     await modal.getByRole('button', { name: 'Cancel' }).click();
 
     await expect(modal).toBeHidden();
+    await goHome();
     await expect(leftoverButton()).toBeVisible();
     await expect.poll(() => itemFiles(window)).toEqual([path]);
 
@@ -416,13 +438,14 @@ test.describe('Notes left without review data by a crash', () => {
     await start();
     await leftoversFound(1);
 
-    await openReview();
+    await openReviewAwayFromHome();
     await expect(leftoverNotice()).toBeVisible();
     await leftoverNotice().locator('.notice-message').click();
 
     await expect(leftoverNotice()).toHaveCount(0);
     await expect(window.locator('.modal')).toHaveCount(0);
 
+    await goHome();
     await leftoverButton().click();
     const modal = window.locator('.modal');
     // No type of its own to show: the placeholder, nothing chosen
@@ -485,7 +508,7 @@ test.describe('Notes left without review data by a crash', () => {
     await start();
     await leftoversFound(1);
 
-    await openReview();
+    await openReviewAwayFromHome();
     await leftoverNotice().getByText('Manage', { exact: true }).click();
     await expect(
       window.getByRole('button', { name: 'Move to trash' })

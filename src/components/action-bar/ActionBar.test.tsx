@@ -45,10 +45,13 @@ function typesRecord(
   return Object.fromEntries(types.map((type) => [type, true]));
 }
 
-/** Render a component into a detached jsdom container and return it. */
-function mount(node: ComponentChild): HTMLElement {
-  const container = document.createElement('div');
-  document.body.appendChild(container);
+/**
+ * Render a component into a jsdom container and return it: a new one, or
+ * `into`, re-rendering what is there.
+ */
+function mount(node: ComponentChild, into?: HTMLElement): HTMLElement {
+  const container = into ?? document.createElement('div');
+  if (!into) document.body.appendChild(container);
   render(node as never, container);
   return container;
 }
@@ -119,6 +122,7 @@ function mountBar({
   openBulkImport = vi.fn(),
   openBackupRestore = vi.fn(),
   app = {},
+  into,
 }: {
   showMoreOptionsMenu?: () => void;
   actions?: ReturnType<typeof makeActions>;
@@ -132,6 +136,8 @@ function mountBar({
   openBackupRestore?: (origin?: unknown) => void;
   /** The Obsidian app, as far as the bar reads it. */
   app?: object;
+  /** A container a bar was mounted into, to render it again there. */
+  into?: HTMLElement;
 } = {}): HTMLElement {
   keepNavigationUnknown();
   return mount(
@@ -150,7 +156,8 @@ function mountBar({
       reviewManager={REVIEW_MANAGER as never}
     >
       <ActionBar />
-    </ReviewContextProvider>
+    </ReviewContextProvider>,
+    into
   );
 }
 
@@ -368,6 +375,7 @@ function makeLeftoverWatch(count: number) {
   const leftoversOf = (n: number) =>
     Array.from({ length: n }, (_, i) => ({ id: `left-${i}` }));
   let current = leftoversOf(count);
+  const homeGone = vi.fn();
   return {
     get current() {
       return current;
@@ -377,6 +385,9 @@ function makeLeftoverWatch(count: number) {
       return () => listeners.delete(listener);
     },
     manage: vi.fn(async () => {}),
+    /** What the bar calls once a home shows; `homeGone` is what it returns. */
+    homeShown: vi.fn((): (() => void) => homeGone),
+    homeGone,
     set(n: number) {
       current = leftoversOf(n);
       listeners.forEach((listener) => listener());
@@ -1019,18 +1030,21 @@ describe('ActionBar', () => {
       );
     });
 
-    it('sits in the leading zone, ahead of the leftover button', () => {
-      // The user asked for it on the left, before "manage leftover notes".
+    it('stays in the leading zone while the upkeep buttons sit at the far end', () => {
+      // The user asked for the restore and leftover buttons at the right end
+      // of the bar, with bulk import left where it was.
       wireQueue();
       const container = mountBar({ leftovers: makeLeftoverWatch(2) });
 
-      const bulk = bulkImportButton(container)!;
-      const leftover = queryLeftoverButton(container)!;
-      expect(bulk.parentElement).toBe(zone(container, 'lead'));
-      expect(
-        bulk.compareDocumentPosition(leftover) &
-          Node.DOCUMENT_POSITION_FOLLOWING
-      ).toBeTruthy();
+      expect(bulkImportButton(container)!.parentElement).toBe(
+        zone(container, 'lead')
+      );
+      expect(queryLeftoverButton(container)!.parentElement).toBe(
+        zone(container, 'trail')
+      );
+      expect(restoreBackupButton(container)!.parentElement).toBe(
+        zone(container, 'trail')
+      );
     });
 
     it('opens the bulk import dialog, whether or not anything is due', () => {
@@ -1077,17 +1091,14 @@ describe('ActionBar', () => {
       );
     });
 
-    it('sits in the leading zone with the other upkeep, after the leftover button', () => {
+    it('closes the trailing zone, after the leftover button', () => {
       wireQueue();
       const container = mountBar({ leftovers: makeLeftoverWatch(2) });
 
-      const restore = restoreBackupButton(container)!;
-      const leftover = queryLeftoverButton(container)!;
-      expect(restore.parentElement).toBe(zone(container, 'lead'));
-      expect(
-        leftover.compareDocumentPosition(restore) &
-          Node.DOCUMENT_POSITION_FOLLOWING
-      ).toBeTruthy();
+      expect(zoneChildren(container, 'trail').slice(-2)).toEqual([
+        queryLeftoverButton(container),
+        restoreBackupButton(container),
+      ]);
     });
 
     it("opens the backup picker in the review tab's window, whether or not anything is due", () => {
@@ -1170,31 +1181,46 @@ describe('ActionBar', () => {
       }
     );
 
-    it('leads the start edge, after the arrows, bulk import and the type filter, leaving the middle zone to the begin-review button', async () => {
-      const container = mountBar({ leftovers: makeLeftoverWatch(1) });
-      await settle();
+    it('stands at the end edge ahead of restore, leaving the start edge to the arrows, bulk import and the type filter and the middle zone to the begin-review button', async () => {
+      await fc.assert(
+        fc.asyncProperty(fc.option(fc.nat(200)), async (count) => {
+          const container = mountBar({
+            leftovers: count === null ? undefined : makeLeftoverWatch(count),
+          });
+          await settle();
 
-      expect(zoneChildren(container, 'lead')).toEqual([
-        navigateButton(container, 'back'),
-        navigateButton(container, 'forward'),
-        bulkImportButton(container),
-        typeFilter(container),
-        queryLeftoverButton(container),
-        restoreBackupButton(container),
-      ]);
-      expect(zoneChildren(container, 'center')).toEqual([
-        beginReviewButton(container),
-      ]);
-      expect(barChildren(container).map((el) => el.className)).toEqual([
-        'ir-bar-lead',
-        'ir-bar-center',
-        'ir-bar-trail',
-      ]);
+          expect(zoneChildren(container, 'lead')).toEqual([
+            navigateButton(container, 'back'),
+            navigateButton(container, 'forward'),
+            bulkImportButton(container),
+            typeFilter(container),
+          ]);
+          expect(zoneChildren(container, 'center')).toEqual([
+            beginReviewButton(container),
+          ]);
+          // The trailing zone holds nothing else on the home screen, so the
+          // two are the bar's last buttons, restore at its very end
+          expect(zoneChildren(container, 'trail')).toEqual(
+            count
+              ? [queryLeftoverButton(container), restoreBackupButton(container)]
+              : [restoreBackupButton(container)]
+          );
+          expect(barChildren(container).map((el) => el.className)).toEqual([
+            'ir-bar-lead',
+            'ir-bar-center',
+            'ir-bar-trail',
+          ]);
+          render(null, container);
+          container.remove();
+        })
+      );
     });
 
     it.each([
       [1, '1', /\b1 note\b/],
       [7, '7', /\b7 notes\b/],
+      [99, '99', /\b99 notes\b/],
+      [100, '99+', /\b100 notes\b/],
       [150, '99+', /\b150 notes\b/],
     ])(
       'shows %i leftovers as "%s" on the button, its label counting them for its tooltip',
@@ -1231,6 +1257,58 @@ describe('ActionBar', () => {
       expect(leftovers.manage).toHaveBeenCalledExactlyOnceWith(containerEl);
     });
 
+    it('tells the watch a home shows, once whatever the count does, and that it has gone once it unmounts', async () => {
+      // The watch keeps its notice away while a home stands to show the
+      // button, so the count coming and going must neither re-announce the
+      // home nor let it go
+      await fc.assert(
+        fc.asyncProperty(
+          fc.constantFrom(...PAGES),
+          fc.nat(3),
+          fc.array(fc.nat(150), { maxLength: 4 }),
+          async (page, count, counts) => {
+            reduxState.page = page;
+            if (page === 'review') wireCurrentItem();
+            const leftovers = makeLeftoverWatch(count);
+            const container = mountBar({ leftovers });
+            await settle();
+
+            for (const n of counts) {
+              leftovers.set(n);
+              await settle();
+            }
+            const shown = page === 'home' ? 1 : 0;
+            expect(leftovers.homeShown).toHaveBeenCalledTimes(shown);
+            expect(leftovers.homeGone).not.toHaveBeenCalled();
+
+            render(null, container);
+            container.remove();
+            expect(leftovers.homeShown).toHaveBeenCalledTimes(shown);
+            expect(leftovers.homeGone).toHaveBeenCalledTimes(shown);
+            Object.assign(reduxState, defaultReduxState);
+            vi.restoreAllMocks();
+            wireQueue();
+          }
+        ),
+        { numRuns: 30 }
+      );
+    });
+
+    it('tells a watch that takes the place of the one before that a home shows, and the one before that it has gone', async () => {
+      const first = makeLeftoverWatch(1);
+      const second = makeLeftoverWatch(1);
+      const container = mountBar({ leftovers: first });
+      await settle();
+
+      mountBar({ leftovers: second, into: container });
+      await settle();
+
+      expect(first.homeShown).toHaveBeenCalledOnce();
+      expect(first.homeGone).toHaveBeenCalledOnce();
+      expect(second.homeShown).toHaveBeenCalledOnce();
+      expect(second.homeGone).not.toHaveBeenCalled();
+    });
+
     it('comes and goes as leftovers are found and resolved, with no other re-render', async () => {
       const leftovers = makeLeftoverWatch(0);
       const container = mountBar({ leftovers });
@@ -1239,7 +1317,10 @@ describe('ActionBar', () => {
 
       leftovers.set(1);
       await settle();
-      expect(queryLeftoverButton(container)).not.toBeNull();
+      expect(zoneChildren(container, 'trail')).toEqual([
+        queryLeftoverButton(container),
+        restoreBackupButton(container),
+      ]);
       expect(queryLeftoverCount(container)!.textContent).toBe('1');
 
       leftovers.set(4);
@@ -1554,6 +1635,20 @@ describe('ActionBar', () => {
       vi.useRealTimers();
     });
 
+    it('sit in a bar that takes focus without being a Tab stop of its own', async () => {
+      for (const page of PAGES) {
+        reduxState.page = page;
+        const container = mountBar();
+        await settle();
+
+        const bar = container.querySelector<HTMLElement>('.ir-action-bar')!;
+        expect(bar.tabIndex).toBeLessThan(0);
+        bar.focus();
+        expect(document.activeElement).toBe(bar);
+        render(null, container);
+      }
+    });
+
     it('are all three there, in order, on every page', async () => {
       for (const page of PAGES) {
         reduxState.page = page;
@@ -1597,7 +1692,6 @@ describe('ActionBar', () => {
         navigateButton(container, 'forward'),
         bulkImportButton(container),
         typeFilter(container),
-        restoreBackupButton(container),
       ]);
       expect(zoneChildren(container, 'center')).toEqual([
         beginReviewButton(container),
@@ -1675,7 +1769,7 @@ describe('ActionBar', () => {
       ]);
     });
 
-    it('leave the end edge empty wherever there is no ⋮', async () => {
+    it('give the end edge no ⋮ while there is no item behind one, leaving it the restore button on the home screen', async () => {
       // The home screen has no item behind one, and neither does review
       // before the first item arrives.
       for (const page of PAGES) {
@@ -1683,7 +1777,9 @@ describe('ActionBar', () => {
         const container = mountBar();
         await settle();
 
-        expect(zoneChildren(container, 'trail')).toEqual([]);
+        expect(zoneChildren(container, 'trail')).toEqual(
+          page === 'home' ? [restoreBackupButton(container)] : []
+        );
         render(null, container);
       }
     });

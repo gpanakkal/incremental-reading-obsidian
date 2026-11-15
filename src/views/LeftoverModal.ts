@@ -28,6 +28,7 @@ import {
   getFrontMatterInfo,
   MarkdownRenderer,
   Modal,
+  type Notice,
   setIcon,
   ToggleComponent,
 } from 'obsidian';
@@ -640,6 +641,14 @@ export interface LeftoverWatchDeps {
  * The notice waits for review because the startup scan ends while Obsidian
  * is still laying itself out, when a notice that stays up would sit over the
  * right sidebar, or over the settings on a phone.
+ *
+ * It also yields to the review home screen, whose leftover button says the
+ * same with a count, and which the notice would otherwise cover at the bar's
+ * right end. While any review tab in any window is on its home screen (see
+ * {@link homeShown}), no notice is shown, and one already up is hidden. A
+ * notice hidden so, or kept from showing, has not had its chance: the next
+ * review tab to open with no home up shows it, should leftovers remain. One
+ * the user closed or acted on has had it.
  */
 export class LeftoverWatch {
   readonly deps: LeftoverWatchDeps;
@@ -649,6 +658,10 @@ export class LeftoverWatch {
   #scanned = false;
   /** Whether the notice had its one chance this load. */
   #announced = false;
+  /** The notice while it is up: neither hidden here nor closed by the user. */
+  #notice: Notice | null = null;
+  /** How many review homes are up (see {@link homeShown}). */
+  #homes = 0;
   /** The {@link manage} under way, if one is. */
   #managing: Promise<void> | null = null;
 
@@ -693,6 +706,33 @@ export class LeftoverWatch {
   /** Told by each review tab as it opens, which shows the notice if due. */
   reviewOpened(): void {
     if (this.#scanned) this.#announce();
+  }
+
+  /**
+   * Told by a review home screen as it comes up, which hides the notice while
+   * it is: the home's own leftover button stands in for it. Every home that
+   * comes up is told apart, in any window, so the notice stays away until the
+   * last has gone.
+   * @returns what the home calls once it has gone; calling it again does
+   *   nothing
+   */
+  homeShown(): () => void {
+    this.#homes++;
+    const notice = this.#notice;
+    this.#notice = null;
+    // Obsidian takes a hidden notice's element out of its container, at once
+    // when a swipe on a phone hides it, which no click tells of (undocumented;
+    // read from obsidian.asar 1.15.1). One out already the user put away.
+    if (notice?.containerEl.parentElement) {
+      notice.hide();
+      this.#announced = false;
+    }
+    let gone = false;
+    return () => {
+      if (gone) return;
+      gone = true;
+      this.#homes--;
+    };
   }
 
   /**
@@ -805,13 +845,18 @@ export class LeftoverWatch {
   /**
    * Show the notice, if this load hasn't had it yet and there are leftovers:
    * one that stays up, counting them, with a button to {@link manage} them.
-   * A click anywhere else on it only hides it.
+   * A click anywhere else on it only hides it. Held back, its chance kept,
+   * while a review home is up (see {@link homeShown}).
    */
   #announce(): void {
     if (this.#announced) return;
+    if (this.#current.length === 0) {
+      this.#announced = true;
+      return;
+    }
+    if (this.#homes > 0) return;
     this.#announced = true;
-    if (this.#current.length === 0) return;
-    notify(leftoversMessage(this.#current), {
+    const notice = notify(leftoversMessage(this.#current), {
       persist: true,
       action: {
         label: 'Manage',
@@ -820,9 +865,18 @@ export class LeftoverWatch {
         // one, the main window (this module's `window`), Obsidian's own
         // fallback. Not the notice's window: Obsidian shows it on
         // `activeWindow`, which can be Settings
-        onClick: () =>
-          void this.manage(this.deps.reviewContainer() ?? window.document.body),
+        onClick: () => {
+          // A middle click hides it too, though no click reaches it
+          if (this.#notice === notice) this.#notice = null;
+          void this.manage(this.deps.reviewContainer() ?? window.document.body);
+        },
       },
+    });
+    this.#notice = notice;
+    // Any click on it hides it, Manage's included, as Obsidian's notice does:
+    // the user has seen it then, and a home coming up has nothing to hide
+    notice.containerEl.addEventListener('click', () => {
+      if (this.#notice === notice) this.#notice = null;
     });
   }
 }

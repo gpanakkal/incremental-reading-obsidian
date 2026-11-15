@@ -96,7 +96,9 @@ export class Notice {
 
   /**
    * The notice's own element, which hides the notice when clicked anywhere, as
-   * Obsidian's does: a detached one, outside jsdom an inert stub.
+   * Obsidian's does: in a `notice-container` of its own outside the document,
+   * outside jsdom an inert stub. Obsidian takes it out of its container once
+   * the notice is hidden; this one stays in, as `hide` here only counts.
    */
   readonly containerEl: HTMLElement;
   /** The message's element, inside {@link containerEl}, as in Obsidian. */
@@ -116,7 +118,9 @@ export class Notice {
     if (typeof document === 'undefined') {
       this.containerEl = this.messageEl = this.noticeEl = inertElement();
     } else {
-      this.containerEl = document.createElement('div');
+      const host = document.createElement('div');
+      host.className = 'notice-container';
+      this.containerEl = host.appendChild(document.createElement('div'));
       this.containerEl.className = 'notice';
       this.messageEl = this.noticeEl = document.createElement('div');
       this.messageEl.className = 'notice-message';

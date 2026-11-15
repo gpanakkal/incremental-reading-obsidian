@@ -2021,6 +2021,273 @@ describe('LeftoverWatch', () => {
   );
 });
 
+describe('LeftoverWatch beside the review home', () => {
+  // The home screen's leftover button says what the notice does, with a
+  // count, so the notice keeps out of its way.
+  beforeEach(() => {
+    Notice.reset();
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.restoreAllMocks();
+  });
+
+  /** The notices still up: neither hidden by the watch nor clicked away. */
+  const upNotices = () => Notice.instances.filter((n) => n.hides === 0);
+
+  it('hides the notice once a review home shows the leftover button', async () => {
+    const wired = await wireWatch(ONE_LEFTOVER);
+    await wired.watch.startupScan();
+    wired.openReview();
+    expect(upNotices()).toHaveLength(1);
+
+    wired.watch.homeShown();
+
+    expect(Notice.instances).toHaveLength(1);
+    expect(upNotices()).toEqual([]);
+  });
+
+  it('shows no notice for a review tab that opens while a home shows the button', async () => {
+    const wired = await wireWatch(ONE_LEFTOVER);
+    wired.watch.homeShown();
+    await wired.watch.startupScan();
+
+    wired.openReview();
+    wired.openReview();
+
+    expect(Notice.instances).toEqual([]);
+  });
+
+  it('shows the notice again on the next review tab once the home has gone, leftovers still pending', async () => {
+    const wired = await wireWatch(ONE_LEFTOVER);
+    await wired.watch.startupScan();
+    wired.openReview();
+    const release = wired.watch.homeShown();
+
+    release();
+    expect(upNotices()).toEqual([]);
+    wired.openReview();
+
+    expect(Notice.instances).toHaveLength(2);
+    expect(upNotices()).toEqual([Notice.instances[1]]);
+    expect(Notice.instances[1].message).toMatch(/\b1 note\b/);
+  });
+
+  it('keeps the notice away while the home is up, however often the leftovers are looked for again', async () => {
+    const wired = await wireWatch(ONE_LEFTOVER);
+    await wired.watch.startupScan();
+    wired.openReview();
+    wired.watch.homeShown();
+
+    wired.vault.add('notes/later.md', { 'ir-id': 'later' });
+    await wired.watch.refresh();
+    wired.openReview();
+
+    expect(wired.watch.current).toHaveLength(2);
+    expect(Notice.instances).toHaveLength(1);
+    expect(upNotices()).toEqual([]);
+  });
+
+  it('leaves a notice the user closed closed, home or not', async () => {
+    const wired = await wireWatch(ONE_LEFTOVER);
+    await wired.watch.startupScan();
+    wired.openReview();
+    Notice.instances[0].messageEl.click();
+
+    wired.watch.homeShown()();
+    wired.openReview();
+
+    expect(Notice.instances).toHaveLength(1);
+  });
+
+  it('leaves a notice the user swiped away on a phone gone, home or not', async () => {
+    // Obsidian's phone swipe takes the notice's element out and hides it, no
+    // click involved
+    const wired = await wireWatch(ONE_LEFTOVER);
+    await wired.watch.startupScan();
+    wired.openReview();
+    const [notice] = Notice.instances;
+    notice.containerEl.remove();
+    notice.hide();
+
+    wired.watch.homeShown()();
+    wired.openReview();
+
+    expect(Notice.instances).toHaveLength(1);
+  });
+
+  it('counts a middle click on Manage as the notice used, home or not', async () => {
+    const wired = await wireWatch(ONE_LEFTOVER);
+    await wired.watch.startupScan();
+    wired.openReview();
+    const [manage] = noticeButtons(Notice.instances[0]);
+    manage.dispatchEvent(new MouseEvent('auxclick', { button: 1 }));
+    await vi.waitFor(() => expect(wired.opened).toHaveLength(1));
+
+    wired.watch.homeShown()();
+    wired.openReview();
+
+    expect(Notice.instances).toHaveLength(1);
+  });
+
+  it('spends the one chance on a review tab that opens while there are no leftovers, as before', async () => {
+    const wired = await wireWatch({ 'notes/a.md': { title: 'plain' } });
+    await wired.watch.startupScan();
+    wired.openReview();
+
+    wired.vault.add('notes/later.md', { 'ir-id': 'later' });
+    await wired.watch.refresh();
+    wired.openReview();
+
+    expect(wired.watch.current).toHaveLength(1);
+    expect(Notice.instances).toEqual([]);
+  });
+
+  it('hides the notice up now when a home comes up, though a click lands on one hidden before', async () => {
+    // Obsidian animates a notice out before it detaches it, so a click can
+    // still reach one the watch has hidden
+    const wired = await wireWatch(ONE_LEFTOVER);
+    await wired.watch.startupScan();
+    wired.openReview();
+    wired.watch.homeShown()();
+    wired.openReview();
+    const [before, now] = Notice.instances;
+
+    before.messageEl.click();
+    wired.watch.homeShown();
+
+    expect(now.hides).toBe(1);
+  });
+
+  it('hides the notice up now when a home comes up, though a middle click lands on Manage on one hidden before', async () => {
+    const wired = await wireWatch(ONE_LEFTOVER);
+    await wired.watch.startupScan();
+    wired.openReview();
+    wired.watch.homeShown()();
+    wired.openReview();
+    const [before, now] = Notice.instances;
+
+    const [manage] = noticeButtons(before);
+    manage.dispatchEvent(new MouseEvent('auxclick', { button: 1 }));
+    await vi.waitFor(() => expect(wired.opened).toHaveLength(1));
+    wired.watch.homeShown();
+
+    expect(now.hides).toBe(1);
+  });
+
+  it('counts each home apart, and a home gone twice only once', async () => {
+    const wired = await wireWatch(ONE_LEFTOVER);
+    await wired.watch.startupScan();
+    const first = wired.watch.homeShown();
+    const second = wired.watch.homeShown();
+
+    first();
+    first();
+    wired.openReview();
+    expect(Notice.instances).toEqual([]);
+
+    second();
+    wired.openReview();
+    expect(upNotices()).toHaveLength(1);
+  });
+
+  it('never has a notice up while a home shows the button, and shows one only when a review tab opens away from every home', async () => {
+    type Step = 'open' | 'close' | 'home' | 'leave' | 'stale' | 'dismiss';
+    const step = fc.constantFrom<Step>(
+      'open',
+      'close',
+      'home',
+      'leave',
+      'stale',
+      'dismiss'
+    );
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(step, { maxLength: 6 }),
+        fc.array(step, { maxLength: 12 }),
+        async (before, after) => {
+          Notice.reset();
+          const wired = await wireWatch(ONE_LEFTOVER, { sharedRepo: true });
+          const model = {
+            scanned: false,
+            reviewOpen: false,
+            announced: false,
+            up: false,
+            shown: 0,
+          };
+          const releases: (() => void)[] = [];
+          const used: (() => void)[] = [];
+          const announce = () => {
+            if (!model.scanned || model.announced || releases.length > 0) {
+              return;
+            }
+            model.announced = true;
+            model.up = true;
+            model.shown++;
+          };
+          const run = (s: Step) => {
+            switch (s) {
+              case 'open':
+                model.reviewOpen = true;
+                wired.openReview();
+                announce();
+                break;
+              case 'close':
+                model.reviewOpen = false;
+                wired.closeReview();
+                break;
+              case 'home':
+                releases.push(wired.watch.homeShown());
+                if (model.up) {
+                  model.up = false;
+                  model.announced = false;
+                }
+                break;
+              case 'leave': {
+                const release = releases.pop();
+                if (release) {
+                  release();
+                  used.push(release);
+                }
+                break;
+              }
+              case 'stale':
+                used[0]?.();
+                break;
+              case 'dismiss':
+                if (model.up) {
+                  Notice.instances.at(-1)!.messageEl.click();
+                  model.up = false;
+                }
+                break;
+            }
+          };
+          const check = () => {
+            expect(Notice.instances).toHaveLength(model.shown);
+            expect(upNotices()).toHaveLength(model.up ? 1 : 0);
+            if (releases.length > 0) expect(upNotices()).toEqual([]);
+          };
+
+          for (const s of before) {
+            run(s);
+            check();
+          }
+          await wired.watch.startupScan();
+          model.scanned = true;
+          if (model.reviewOpen) announce();
+          check();
+          for (const s of after) {
+            run(s);
+            check();
+          }
+        }
+      ),
+      { numRuns: 80 }
+    );
+  });
+});
+
 describe('LeftoverModal of notes a row holds the id of', () => {
   afterEach(() => {
     document.body.innerHTML = '';
