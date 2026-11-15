@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { MINIMUM_FIXED_REVIEW_INTERVAL } from '#/lib/constants';
 import IRScheduler from '#/lib/IRScheduler';
 import { DEFAULT_SETTINGS } from '#/lib/settings';
 import type { WebPage } from '#/lib/web-viewer';
@@ -412,9 +413,8 @@ describe('ImportModal', () => {
     );
   });
 
-  it('leaves Enter on a button to the button, never confirming', () => {
-    // A focused segment's own Enter activation presses it, as Enter on
-    // Cancel cancels
+  it('leaves Enter on Cancel or Confirm to the button, never confirming', () => {
+    // A focused button's own Enter activation clicks it: Cancel cancels
     fc.assert(
       fc.property(fc.boolean(), fc.nat(), (initial, pick) => {
         const { plugin, importArticle } = makePlugin();
@@ -427,7 +427,11 @@ describe('ImportModal', () => {
         modal.onOpen();
         document.body.append(modal.contentEl);
         try {
-          const buttons = [...modal.contentEl.querySelectorAll('button')];
+          const buttons = [
+            ...modal.contentEl.querySelectorAll(
+              '.modal-button-container > button'
+            ),
+          ];
           const event = new KeyboardEvent('keydown', {
             key: 'Enter',
             bubbles: true,
@@ -447,6 +451,70 @@ describe('ImportModal', () => {
         }
       }),
       { numRuns: 20 }
+    );
+  });
+
+  it('imports once with the choices Space cycles to, on Enter at any segment however often it repeats', () => {
+    fc.assert(
+      fc.property(
+        fc.boolean(),
+        fc.integer({ min: 0, max: 3 }),
+        fc.integer({ min: 0, max: 3 }),
+        fc.constantFrom(0, 1),
+        fc.constantFrom(0, 1),
+        fc.integer({ min: 1, max: 4 }),
+        (initialCopy, strategySpaces, copySpaces, group, index, enters) => {
+          const { plugin, importArticle } = makePlugin();
+          const file = makeFile('note');
+          const modal = new ImportModal(plugin, fileSubject(file, initialCopy));
+          modal.onOpen();
+          document.body.append(modal.contentEl);
+          const keydown = (key: string) => {
+            const event = new KeyboardEvent('keydown', {
+              key,
+              bubbles: true,
+              cancelable: true,
+            });
+            void act(() => {
+              document.activeElement!.dispatchEvent(event);
+            });
+            return event;
+          };
+          try {
+            for (const [n, spaces] of [
+              [0, strategySpaces],
+              [1, copySpaces],
+            ] as const) {
+              void act(() => {
+                segments(modal, n)![0].focus();
+              });
+              for (let i = 0; i < spaces; i += 1) keydown(' ');
+            }
+            void act(() => {
+              segments(modal, group)![index].focus();
+            });
+            const events = Array.from({ length: enters }, () =>
+              keydown('Enter')
+            );
+
+            expect(events.every((e) => e.defaultPrevented)).toBe(true);
+            expect(importArticle).toHaveBeenCalledExactlyOnceWith(
+              file,
+              ...(strategySpaces % 2 === 1
+                ? [
+                    plugin.settings.defaultPriority,
+                    MINIMUM_FIXED_REVIEW_INTERVAL,
+                  ]
+                : [plugin.settings.defaultPriority, null]),
+              initialCopy !== (copySpaces % 2 === 1)
+            );
+          } finally {
+            modal.onClose();
+            modal.contentEl.remove();
+          }
+        }
+      ),
+      { numRuns: 40 }
     );
   });
 

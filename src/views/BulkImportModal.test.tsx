@@ -687,32 +687,51 @@ describe('BulkImportModal', () => {
     );
   });
 
-  it('leaves Enter on a segment to the segment, never importing', async () => {
-    // A focused segment's own Enter activation presses it
+  it('imports with the options Space cycles to, on Enter at any segment', async () => {
     await fc.assert(
       fc.asyncProperty(
         fc.boolean(),
+        fc.integer({ min: 0, max: 3 }),
+        fc.integer({ min: 0, max: 3 }),
         fc.constantFrom(0, 1),
         fc.constantFrom(0, 1),
-        async (copyOnImport, group, index) => {
+        async (copyOnImport, strategySpaces, copySpaces, group, index) => {
           document.body.replaceChildren();
           const { plugin, importArticles } = makePlugin(copyOnImport);
           const scan = makeSource();
           const modal = openModal(plugin, scan.source);
-          await scan.add(makeFile('a.md'));
-          const event = new KeyboardEvent('keydown', {
-            key: 'Enter',
-            bubbles: true,
-            cancelable: true,
-          });
+          const file = makeFile('a.md');
+          await scan.add(file);
+          const keydown = async (key: string) => {
+            const event = new KeyboardEvent('keydown', {
+              key,
+              bubbles: true,
+              cancelable: true,
+            });
+            await act(() => {
+              document.activeElement!.dispatchEvent(event);
+            });
+            return event;
+          };
+          for (const [n, spaces] of [
+            [0, strategySpaces],
+            [1, copySpaces],
+          ] as const) {
+            await act(() => optionSegments(modal, n)![0].focus());
+            for (let i = 0; i < spaces; i += 1) await keydown(' ');
+          }
+          await act(() => optionSegments(modal, group)![index].focus());
 
-          await act(() => {
-            optionSegments(modal, group)![index].dispatchEvent(event);
-          });
+          const event = await keydown('Enter');
+          await modal.closed;
 
-          expect(event.defaultPrevented).toBe(false);
-          expect(importArticles).not.toHaveBeenCalled();
-          modal.close();
+          expect(event.defaultPrevented).toBe(true);
+          expect(importArticles).toHaveBeenCalledExactlyOnceWith([{ file }], {
+            priority: plugin.settings.defaultPriority,
+            fixedIntervalDays:
+              strategySpaces % 2 === 1 ? MINIMUM_FIXED_REVIEW_INTERVAL : null,
+            makeCopy: copyOnImport !== (copySpaces % 2 === 1),
+          });
         }
       ),
       { numRuns: 16 }
