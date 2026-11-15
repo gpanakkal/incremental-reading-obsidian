@@ -5,6 +5,7 @@ import { getEndOfDay } from '#/lib/utils';
 import type initSqlJs from 'sql.js';
 import type { Database } from 'sql.js';
 import { markPhase } from './phase-timing';
+import { rehomeOrphans } from './rehome-orphans';
 import {
   armRowStamps,
   disarmRowStamps,
@@ -159,6 +160,11 @@ function planTables(db: Database): MergeReport {
  * won (see `replaySchedules`), in the same transaction: those rows are this
  * device's writes, stamped by the triggers armed again first.
  *
+ * A snippet or card either copy made from a row the other deleted for good
+ * meanwhile is then moved off it, as the drop would have moved it had it
+ * been there (see `rehomeOrphans`), in the same transaction and stamped the
+ * same way, whether or not `replay` is given.
+ *
  * When `replay` fuzzes text reviews, a live text row of the other copy's
  * that wins without a `due_fuzz` is written with one if this device held
  * one for it or it is due (see {@link fuzzArrivals}), and a row of this
@@ -229,11 +235,14 @@ function merge(
           }
           mergeWriteStamps(db);
           markPhase('apply');
+          // What follows are this device's writes, stamped as any
+          armRowStamps(db, stamps);
           if (diverged) {
-            armRowStamps(db, stamps);
             report.written += replaySchedules(db, diverged, replay);
             markPhase('replay');
           }
+          report.written += rehomeOrphans(db);
+          markPhase('rehome');
           return report;
         }
       )

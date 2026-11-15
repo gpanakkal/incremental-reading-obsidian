@@ -280,6 +280,17 @@ function keysIn(db: Database, table: SyncedTable | 'write_stamp'): string[] {
     .map(String);
 }
 
+/** The links of the `table` row `id`, and who last wrote it. */
+function linksOf(db: Database, table: SyncedTable, id: string) {
+  const [result] = db.exec(
+    `SELECT parent, context, updated_by FROM ${table} WHERE id = ?`,
+    [id]
+  );
+  return Object.fromEntries(
+    result.columns.map((column, i) => [column, result.values[0][i]])
+  );
+}
+
 function tempTables(db: Database): string[] {
   return (
     db.exec(`SELECT name FROM sqlite_temp_master WHERE type = 'table'`)[0]
@@ -956,7 +967,47 @@ describe('pruneDatabase', () => {
       'young-r2',
     ]);
     expect(keysIn(db, 'write_stamp')).toEqual(['away', 'edge', 'here']);
+    expect(linksOf(db, 'snippet', 'made-from-gone')).toEqual({
+      parent: 'gone',
+      context: 'gone',
+      updated_by: 'x',
+    });
     expect(() => db.run(`DELETE FROM article WHERE id = 'live'`)).toThrow();
+    db.close();
+  });
+
+  it('moves what sat under an item it prunes up to the item that one sat under, as this device’s write, as dropping it would', () => {
+    const db = makeDb();
+    addArticle(db, 'art', false, DAY);
+    addSnippet(db, 'upper', true, 181 * DAY, 'art');
+    addSnippet(db, 'lower', true, 181 * DAY, 'upper');
+    addSnippet(db, 'kid', false, DAY, 'lower');
+    addSnippet(db, 'sibling', false, DAY, 'upper');
+    addArticle(db, 'gone', true, 181 * DAY);
+    addSnippet(db, 'made-from-gone', false, DAY, 'gone');
+    addSnippet(db, 'young', true, DAY, 'art');
+    addSnippet(db, 'under-young', false, DAY, 'young');
+    stampDevice(db, 'here', 0);
+    armRowStamps(db, STAMPS);
+
+    expect(pruneDatabase(db, NOW, STAMPS).rows).toBe(3);
+
+    const moved = { context: null, updated_by: 'device-a' };
+    expect(linksOf(db, 'snippet', 'kid')).toEqual({ parent: 'art', ...moved });
+    expect(linksOf(db, 'snippet', 'sibling')).toEqual({
+      parent: 'art',
+      ...moved,
+    });
+    expect(linksOf(db, 'snippet', 'made-from-gone')).toEqual({
+      parent: null,
+      ...moved,
+    });
+    // Trashed, not yet past the horizon: it can still come back
+    expect(linksOf(db, 'snippet', 'under-young')).toEqual({
+      parent: 'young',
+      context: 'young',
+      updated_by: 'x',
+    });
     db.close();
   });
 });

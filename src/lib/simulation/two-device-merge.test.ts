@@ -4,6 +4,7 @@ import { ArticleManager } from '#/lib/items/ArticleManager';
 import { CardManager } from '#/lib/items/CardManager';
 import ReviewManager from '#/lib/items/ReviewManager';
 import {
+  deleteRowStatements,
   PURGED_REFERENCE_PREFIX,
   purgedReference,
   tombstoneRowStatements,
@@ -22,6 +23,7 @@ import {
   type LoggedGrade,
   type ReplaySettings,
 } from '#/lib/repository/scheduling-replay';
+import type { MutationStatement } from '#/lib/types';
 import { makeLinkVault } from '#/test/link-vault';
 import fc from 'fast-check';
 import type { TFile } from 'obsidian';
@@ -132,8 +134,15 @@ async function reviewArticle(device: FakeDevice, id: string) {
   return reviewId;
 }
 
-/** Make card `id` on `device` as `CardManager` does, never graded. */
-async function makeCard(device: FakeDevice, id: string) {
+/**
+ * Make card `id` on `device` as `CardManager` does, never graded, taken from
+ * `parent`, if any.
+ */
+async function makeCard(
+  device: FakeDevice,
+  id: string,
+  parent: string | null = null
+) {
   const reference = `cards/${id}.md`;
   const card = new SRSCard(reference, new Date(device.clock.now));
   card.id = id;
@@ -141,10 +150,68 @@ async function makeCard(device: FakeDevice, id: string) {
   const file = makeLinkVault({ [reference]: {} }).files.get(reference)!;
   await (
     new CardManager(PLUGIN, device.repo) as unknown as {
-      insertRow(card: SRSCard, parent: null, file: TFile): Promise<void>;
+      insertRow(
+        card: SRSCard,
+        parent: string | null,
+        file: TFile
+      ): Promise<void>;
     }
-  ).insertRow(card, null, file);
+  ).insertRow(card, parent, file);
   await device.repo.settle();
+}
+
+/** Extract snippet `id` on `device` from `parent`, if any, which it sits under. */
+async function makeSnippet(
+  device: FakeDevice,
+  id: string,
+  parent: string | null
+) {
+  device.repo.mutate(
+    `INSERT INTO snippet (id, reference, parent, context, due, interval, priority)
+     VALUES ($1, $2, $3, $3, $4, $5, 30)`,
+    [id, `snips/${id}.md`, parent, T, DAY]
+  );
+  await device.repo.settle();
+}
+
+/** Run `statements` on `device` in one transaction, as a drop runs them. */
+async function write(device: FakeDevice, statements: MutationStatement[]) {
+  await device.repo.transaction(() => {
+    for (const { query, params } of statements) {
+      device.repo.mutate(query, params);
+    }
+  });
+  await device.repo.settle();
+}
+
+/** Where snippet or card `id` sits and what it was taken from, on `device`. */
+function linksOf(device: FakeDevice, id: string): Row[] {
+  return rows(
+    device,
+    `SELECT parent, context FROM snippet WHERE id = $1
+     UNION ALL SELECT parent, context FROM srs_card WHERE id = $1`,
+    [id]
+  );
+}
+
+/**
+ * Each link of a snippet or card not deleted for good, in `tables`, naming
+ * no article or snippet still there: none, once every drop has moved what
+ * sat under the row it dropped.
+ */
+function danglingLinks(tables: Record<string, Row[]>): string[] {
+  const holders = new Set(
+    [...tables.article, ...tables.snippet]
+      .filter((row) => row.reference !== purgedReference(row.id as string))
+      .map((row) => row.id)
+  );
+  return [...tables.snippet, ...tables.srs_card]
+    .filter((row) => row.reference !== purgedReference(row.id as string))
+    .flatMap((row) =>
+      (['parent', 'context'] as const)
+        .filter((link) => row[link] !== null && !holders.has(row[link]))
+        .map((link) => `${String(row.id)}.${link} = ${String(row[link])}`)
+    );
 }
 
 /**
@@ -185,12 +252,7 @@ async function purge(
   id: string,
   table: 'article' | 'snippet' | 'srs_card' = 'article'
 ) {
-  await device.repo.transaction(() => {
-    for (const { query, params } of tombstoneRowStatements(table, id)) {
-      device.repo.mutate(query, params);
-    }
-  });
-  await device.repo.settle();
+  await write(device, deleteRowStatements(table, id));
 }
 
 /** Dismiss the `table` row `id` on `device`, as `dismissItem` does. */
@@ -254,6 +316,8 @@ type Step =
   | { kind: 'move'; on: number; pick: number; reference: number }
   | { kind: 'position'; on: number; pick: number; position: number }
   | { kind: 'purge'; on: number; pick: number }
+  | { kind: 'extract'; on: number; pick: number; card: boolean }
+  | { kind: 'drop'; on: number; pick: number }
   | { kind: 'review'; on: number; pick: number }
   | { kind: 'undo'; on: number; pick: number }
   | { kind: 'deliver'; from: number; to: number }
@@ -305,6 +369,19 @@ const stepsOn = (count: number): fc.Arbitrary<Step> => {
     {
       weight: 3,
       arbitrary: fc.record({ kind: fc.constant('review' as const), on, pick }),
+    },
+    {
+      weight: 2,
+      arbitrary: fc.record({
+        kind: fc.constant('extract' as const),
+        on,
+        pick,
+        card: fc.boolean(),
+      }),
+    },
+    {
+      weight: 1,
+      arbitrary: fc.record({ kind: fc.constant('drop' as const), on, pick }),
     },
     {
       weight: 1,
@@ -440,6 +517,25 @@ async function run(
     await device.repo.settle();
     return;
   }
+  if (step.kind === 'extract' || step.kind === 'drop') {
+    const holders = rows(
+      device,
+      step.kind === 'extract'
+        ? `SELECT id FROM article WHERE deleted = FALSE
+           UNION ALL SELECT id FROM snippet WHERE deleted = FALSE ORDER BY id`
+        : 'SELECT id FROM snippet WHERE deleted = FALSE ORDER BY id'
+    );
+    if (holders.length === 0) return;
+    const target = holders[step.pick % holders.length].id as string;
+    if (step.kind === 'drop') {
+      await write(device, deleteRowStatements('snippet', target));
+    } else if (step.card) {
+      await makeCard(device, `card-${i}`, target);
+    } else {
+      await makeSnippet(device, `snip-${i}`, target);
+    }
+    return;
+  }
   const articles = liveArticles(device);
   if (articles.length === 0) return;
   const target = articles[step.pick % articles.length].id as string;
@@ -490,7 +586,9 @@ async function run(
  * Run `steps` on `devices`, let Sync settle, and check what any history must
  * leave: (1) every device holds the same rows, (2) no review is lost, (3) no
  * tombstone comes back unless a later write replaced it, (4) every article's
- * schedule is what its merged log implies, (5) references stay unique.
+ * schedule is what its merged log implies, (5) references stay unique, (6)
+ * no snippet or card still there sits under, or was taken from, a row
+ * deleted for good or gone, however its making and the drop interleaved.
  */
 async function checkSettled(
   devices: FakeDevice[],
@@ -569,6 +667,8 @@ async function checkSettled(
   // (5) one note, one row: references stay unique
   const held = merged.article.map((r) => r.reference);
   expect(new Set(held).size).toBe(held.length);
+  // (6) every drop leaves the tree whole, on whichever device it arrives
+  expect(danglingLinks(merged)).toEqual([]);
 }
 
 // #endregion
@@ -585,7 +685,7 @@ describe('two devices merging one database file', () => {
     vi.restoreAllMocks();
   });
 
-  it('property: once Sync settles both hold the same rows, no review is lost, no tombstone comes back unless written over later, and every schedule is what its merged log implies', async () => {
+  it('property: once Sync settles both hold the same rows, no review is lost, no tombstone comes back unless written over later, every schedule is what its merged log implies, and nothing sits under or was taken from a row deleted for good', async () => {
     await fc.assert(
       fc.asyncProperty(
         fc.array(stepsOn(2), { minLength: 6, maxLength: 24, size: 'max' }),
@@ -1337,4 +1437,145 @@ describe('two devices merging one database file', () => {
       expect(draw).toHaveBeenCalledTimes(1);
     }
   );
+
+  describe('a snippet or card made on one device from a row the other deletes for good', () => {
+    it.each([
+      ['nothing', null],
+      ['an article', 'art'],
+    ])(
+      'moves a card made from a snippet deleted for good elsewhere, which sat under %s, to what it sat under, erasing what it was taken from, on both',
+      async (_, above) => {
+        const [a, b] = await twoDevices();
+        if (above) await importArticle(a, above, 'notes/n0.md');
+        await makeSnippet(a, 's', above);
+        await sync.deliver(a, b);
+
+        await makeCard(b, 'c', 's');
+        await write(a, tombstoneRowStatements('snippet', 's'));
+        await sync.quiesce(a, b);
+
+        for (const device of [a, b]) {
+          expect(
+            rows(device, `SELECT reference FROM snippet WHERE id = 's'`)
+          ).toEqual([{ reference: purgedReference('s') }]);
+          expect(linksOf(device, 'c')).toEqual([
+            { parent: above, context: null },
+          ]);
+        }
+        expect(everything(a)).toEqual(everything(b));
+      }
+    );
+
+    it('moves a snippet extracted from an article un-imported elsewhere to the top, on both', async () => {
+      const [a, b] = await twoDevices();
+      await importArticle(a, 'art', 'notes/n0.md');
+      await sync.deliver(a, b);
+
+      await makeSnippet(b, 's', 'art');
+      await purge(a, 'art');
+      await sync.quiesce(a, b);
+
+      for (const device of [a, b]) {
+        expect(linksOf(device, 's')).toEqual([{ parent: null, context: null }]);
+      }
+      expect(everything(a)).toEqual(everything(b));
+    });
+
+    it('walks a card up past two snippets deleted for good elsewhere, one under the other, to the article above them', async () => {
+      const [a, b] = await twoDevices();
+      await importArticle(a, 'art', 'notes/n0.md');
+      await makeSnippet(a, 's1', 'art');
+      await makeSnippet(a, 's2', 's1');
+      await sync.deliver(a, b);
+
+      await makeCard(b, 'c', 's2');
+      // Each tombstone keeps its own links, so s2's still names s1
+      await write(a, tombstoneRowStatements('snippet', 's2'));
+      await write(a, tombstoneRowStatements('snippet', 's1'));
+      await sync.quiesce(a, b);
+
+      for (const device of [a, b]) {
+        expect(linksOf(device, 'c')).toEqual([
+          { parent: 'art', context: null },
+        ]);
+      }
+      expect(everything(a)).toEqual(everything(b));
+    });
+
+    it('leaves a card made from a snippet only trashed elsewhere where it is, as the snippet can come back', async () => {
+      const [a, b] = await twoDevices();
+      await importArticle(a, 'art', 'notes/n0.md');
+      await makeSnippet(a, 's', 'art');
+      await sync.deliver(a, b);
+
+      await makeCard(b, 'c', 's');
+      a.repo.mutate(`UPDATE snippet SET deleted = TRUE WHERE id = 's'`);
+      await a.repo.settle();
+      await sync.quiesce(a, b);
+
+      for (const device of [a, b]) {
+        expect(
+          rows(device, `SELECT deleted FROM snippet WHERE id = 's'`)
+        ).toEqual([{ deleted: 1 }]);
+        expect(linksOf(device, 'c')).toEqual([{ parent: 's', context: 's' }]);
+      }
+      expect(everything(a)).toEqual(everything(b));
+    });
+
+    it('moves a snippet one device moved at a merge and the other edited before it saw that move, keeping the edit, on both', async () => {
+      const [a, b] = await twoDevices();
+      await importArticle(a, 'art', 'notes/n0.md');
+      await makeSnippet(a, 's', 'art');
+      await sync.deliver(a, b);
+
+      await makeSnippet(b, 'kid', 's');
+      await write(a, tombstoneRowStatements('snippet', 's'));
+      await sync.deliver(b, a);
+      expect(linksOf(a, 'kid')).toEqual([{ parent: 'art', context: null }]);
+      // B, yet to see the move, writes the row after it: its row wins
+      b.clock.now += 1000;
+      b.repo.mutate(`UPDATE snippet SET priority = 10 WHERE id = 'kid'`);
+      await b.repo.settle();
+      await sync.quiesce(a, b);
+
+      for (const device of [a, b]) {
+        expect(
+          rows(
+            device,
+            `SELECT parent, context, priority FROM snippet WHERE id = 'kid'`
+          )
+        ).toEqual([{ parent: 'art', context: null, priority: 10 }]);
+      }
+      expect(everything(a)).toEqual(everything(b));
+    });
+
+    // As a version that tombstoned without moving children left them, once
+    // retention pruned the tombstone
+    it('moves a card made from a row no device holds any more, its tombstone pruned, to the top, at the merge that brings it', async () => {
+      const [a, b] = await twoDevices();
+      await importArticle(a, 'art', 'notes/n0.md');
+      await sync.deliver(a, b);
+
+      await savePosition(b, 'art', 4);
+      await makeCard(a, 'c', 'pruned');
+      await sync.quiesce(a, b);
+
+      for (const device of [a, b]) {
+        expect(linksOf(device, 'c')).toEqual([{ parent: null, context: null }]);
+      }
+      expect(everything(a)).toEqual(everything(b));
+    });
+
+    it('moves a card made from a row no device holds any more to the top in the copy it takes on whole, saving it so', async () => {
+      const [a, b] = await twoDevices();
+      await makeCard(a, 'c', 'pruned');
+
+      await sync.deliver(a, b);
+
+      expect(linksOf(b, 'c')).toEqual([{ parent: null, context: null }]);
+      await sync.quiesce(a, b);
+      expect(linksOf(a, 'c')).toEqual([{ parent: null, context: null }]);
+      expect(everything(a)).toEqual(everything(b));
+    });
+  });
 });

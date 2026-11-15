@@ -53,6 +53,7 @@ import {
   type FileFingerprint,
 } from './db-file';
 import { markPhase } from './phase-timing';
+import { rehomeOrphans } from './rehome-orphans';
 import {
   answerByRestoreEpoch,
   bumpRestoreEpoch,
@@ -578,9 +579,15 @@ export class SQLJSRepository implements SQLiteRepository {
           // Unless a migration saved since, which took its own
           repo.#knownGood ??= before;
           repo.#classifyAtStartup(known, knownEpoch);
-          // A file another device wrote, taken on whole like a reload's
+          // A file another device wrote, taken on whole like a reload's.
+          // Any other file can still hold rows left under one deleted for
+          // good, by an older version or a merge before this one moved them
           const kind = repo.#startupKind;
-          if (kind !== null && kind !== 'echo') await repo.#fuzzTakenOn();
+          if (kind !== null && kind !== 'echo') {
+            await repo.#fixUpTakenOn();
+          } else if (repo.#rehomeOrphans()) {
+            await repo.save().catch(() => undefined); // logged by `save`
+          }
           assertLive();
           await repo.applyRetention();
           assertLive();
@@ -846,6 +853,9 @@ export class SQLJSRepository implements SQLiteRepository {
     this.#fileWrites = keeping.catch(() => undefined);
     await keeping.catch(() => undefined); // logged; saves try again
     assertLive();
+    // A copy saved before a merge moved them, or by an older version, can
+    // hold rows under one deleted for good: moved in the same save
+    this.#rehomeOrphans();
     // `save` logs its own failure, and the next write saves again. Not
     // while writes are refused: a file met at the path refused them, and
     // its hold saves (see `#holdDamaged`)
@@ -953,8 +963,9 @@ export class SQLJSRepository implements SQLiteRepository {
    * database has gone bad: never merged, since the rows memory holds are the
    * ones being escaped, newer as they are. What it replaces is backed up
    * first (a `stale` backup). A backup from an older schema is migrated.
-   * Its due text rows lacking fuzz are given some, as any copy taken on whole
-   * (see `#fuzzTakenOn`), its restore epoch is raised past that of what it
+   * Its due text rows lacking fuzz are given some, and its rows left under
+   * one deleted for good are moved, as in any copy taken on whole (see
+   * `#fixUpTakenOn`), its restore epoch is raised past that of what it
    * replaces, and the result is saved, so Sync carries it to other devices,
    * which take it on whole too (see `#answerIncoming`).
    *
@@ -1037,8 +1048,10 @@ export class SQLJSRepository implements SQLiteRepository {
         // `#answerIncoming`). Recorded as known by the save
         bumpRestoreEpoch(db, replacedEpoch, this.#device(), this.#stampClock());
         // Taken on whole like any copy: its due text rows lacking fuzz get
-        // some, in the one save that follows (see `#fuzzTakenOn`)
+        // some, and its orphans a place, in the one save that follows (see
+        // `#fixUpTakenOn`)
         this.#fuzzUnfuzzedDue();
+        this.#rehomeOrphans();
         await this.save();
       } catch (error) {
         // The backup is the database only once saved: memory goes back to
@@ -1456,7 +1469,7 @@ export class SQLJSRepository implements SQLiteRepository {
         }
         return;
       }
-      await this.#fuzzTakenOn();
+      await this.#fixUpTakenOn();
       if (this.#disposed) return;
       // Taken in: what follows only refetches
       this.#setMerging(false);
@@ -1534,8 +1547,9 @@ export class SQLJSRepository implements SQLiteRepository {
    * - a copy from a device away for months (`stale-other`) is left alone,
    *   and memory saved over it, so that device takes this one on in turn.
    * - a copy that has every save memory has (`fast-forward`) is taken on.
-   *   Like every copy taken on, its due text rows lacking fuzz then get some
-   *   (see {@link #fuzzTakenOn}).
+   *   Like every copy taken on, its due text rows lacking fuzz then get some,
+   *   and its rows left under one deleted for good are moved (see
+   *   {@link #fixUpTakenOn}).
    * - one from a device that has every save memory has, but more than six
    *   months on (`stale-self`), is taken on after memory is backed up, since
    *   the saves it lacks are dropped.
@@ -1615,27 +1629,60 @@ export class SQLJSRepository implements SQLiteRepository {
   }
 
   /**
-   * Give the text rows of a copy taken on whole that came without fuzz, and
-   * are due by the end of the review day (`fuzzDueBy`), some (`fuzzTakenOn`,
-   * 0176), while text reviews are fuzzed, then save once: a merge fuzzes the
-   * rows it brings in its own save (`mergeInto`), but a copy taken on passes
-   * no merge. A row due later waits for the first merge or take-on after it
-   * falls due. No due row lacking fuzz, no write. It can't loop: the other
-   * device takes the save on in turn and finds none.
+   * Fix up a copy taken on whole, then save once, as a merge fixes up the
+   * rows it brings in its own save (`mergeInto`), which a copy taken on
+   * passes no merge to do:
    *
-   * On a device that fuzzes, a live row without fuzz came from elsewhere:
-   * rows get theirs as they are made, and turning fuzz on fills in the rest
-   * (`ItemManager.backfillReviewTimeFuzz`). Skipped, until a later copy is
-   * taken on, while writes are refused or a transaction is open. Never
-   * throws: a failure is logged, as `save` logs its own.
+   * - its text rows that came without fuzz, and are due by the end of the
+   *   review day (`fuzzDueBy`), get some (`fuzzTakenOn`, 0176), while text
+   *   reviews are fuzzed. A row due later waits for the first merge or
+   *   take-on after it falls due. On a device that fuzzes, a live row
+   *   without fuzz came from elsewhere: rows get theirs as they are made,
+   *   and turning fuzz on fills in the rest
+   *   (`ItemManager.backfillReviewTimeFuzz`).
+   * - its snippets and cards under, or taken from, a row deleted for good
+   *   are moved off it (see {@link #rehomeOrphans}).
+   *
+   * Nothing to fix, no write. It can't loop: the other device takes the save
+   * on in turn and finds nothing. Skipped, until a later copy is taken on,
+   * while writes are refused or a transaction is open. Never throws: a
+   * failure is logged, as `save` logs its own.
    */
-  async #fuzzTakenOn(): Promise<void> {
+  async #fixUpTakenOn(): Promise<void> {
+    const fuzzed = this.#fuzzUnfuzzedDue();
+    const rehomed = this.#rehomeOrphans();
     // Straight to `save`: the rows changed, so 0174's gate would let it pass
-    if (this.#fuzzUnfuzzedDue()) await this.save().catch(() => undefined);
+    if (fuzzed || rehomed) await this.save().catch(() => undefined);
   }
 
   /**
-   * The fuzzing half of {@link #fuzzTakenOn}, without its save: for a caller
+   * Move the snippets and cards of the database in memory off rows deleted
+   * for good, or gone, as dropping those rows would have moved them (see
+   * `rehomeOrphans`): another device made them before it saw the drop, or a
+   * version before drops moved anything left them. Stamped as this device's
+   * writes, as the drop's own are, without a save: the caller saves.
+   * Skipped while writes are refused or a transaction is open, for the next
+   * load or merge. Never throws: a failure is logged, changing nothing.
+   * Synchronous, so a caller can run it in the same synchronous run as its
+   * own checks and save.
+   * @returns whether it wrote any row, so that there is something to save
+   */
+  #rehomeOrphans(): boolean {
+    const db = this.db;
+    if (!db || this.writeRefusal() || this.#txDepth > 0) return false;
+    try {
+      if (rehomeOrphans(db) === 0) return false;
+    } catch (error) {
+      console.error('Incremental Reading - Failed to move orphans:', error);
+      return false;
+    }
+    // Listeners hear of the rows it changed, as of any write
+    this.#flushChanges();
+    return true;
+  }
+
+  /**
+   * The fuzzing half of {@link #fixUpTakenOn}, without its save: for a caller
    * that saves anyway, as a restore does. Synchronous, so a caller can run it
    * in the same synchronous run as its own checks and save.
    * @returns whether it fuzzed any row, so that there is something to save
