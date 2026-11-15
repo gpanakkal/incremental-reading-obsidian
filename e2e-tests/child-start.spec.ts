@@ -250,6 +250,22 @@ test('reads tags in spans, and underlines, as escaping a cut start relies on', a
   for (const text of ['- <!-- c --> #tag', '> <!-- c --> #tag']) {
     expect((await read(text)).tags).toEqual([]);
   }
+  // But no block an underline reads: their line holds the lines after it
+  // lazily, and a `---` under it, or under a line it holds, is a rule
+  for (const text of ['- <!-- c -->\nfoo', '> <!-- c -->\nfoo']) {
+    expect((await read(text)).sections).toHaveLength(1);
+  }
+  for (const text of [
+    '- <!-- c -->\n---',
+    '> <!-- c -->\n---',
+    '- <!-- c -->\nfoo\n---',
+    '2. <!-- c -->\nfoo\n---',
+  ]) {
+    expect(await read(text)).toMatchObject({
+      headings: 0,
+      liveHeading: false,
+    });
+  }
   // The cache takes no underline under an empty list item
   expect(await read('# h\n-\nfoo\n---')).toMatchObject({ headings: 1 });
   // A fence closes only in its own quote or list item, unindented as code;
