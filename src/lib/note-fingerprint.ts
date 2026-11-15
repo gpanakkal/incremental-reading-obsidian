@@ -1,4 +1,4 @@
-import type { TFile } from 'obsidian';
+import type { MetadataCache, TFile } from 'obsidian';
 import { supportsFrontmatter } from './mime';
 import type { ItemTable } from './moved-note-scan';
 import type { MutationStatement } from './types';
@@ -48,6 +48,40 @@ export function noteFingerprint(file: TFile): number | null {
   const { stat } = file as Partial<Pick<TFile, 'stat'>>;
   if (typeof stat?.mtime !== 'number') return null;
   return supportsFrontmatter(file) ? stat.mtime : null;
+}
+
+/**
+ * Whether the metadata cache's parse of `file` is of an older version of the
+ * note than the vault now holds: one a write has landed over that the cache
+ * has yet to re-read. Its frontmatter is then the note's as it was, so an
+ * `ir-id` the plugin just wrote over reads as the note's still, while
+ * {@link noteFingerprint} already reads the mtime that write left.
+ *
+ * Obsidian re-reads a note in a queue it works through one note at a time,
+ * so how long this lasts depends on how much is queued before it. Until the
+ * re-read has read the file, `getFileCache` keeps answering the old parse;
+ * then `null` until the new one is parsed (read from
+ * `MetadataCache.computeFileMetadataAsync` in obsidian.asar, 1.15.1).
+ *
+ * `metadataCache.fileCache` is unofficial Obsidian API: by path, the `mtime`
+ * and `size` each note was last parsed at, the same ones Obsidian compares
+ * with the note's stat to tell whether its parse is current. Its shape is
+ * checked rather than assumed: a cache without it, or an entry that has no
+ * stat to compare, is never called behind.
+ */
+export function cacheLagsNote(file: TFile, metadataCache: MetadataCache) {
+  const { stat } = file as Partial<Pick<TFile, 'stat'>>;
+  const parsed: unknown = (metadataCache as { fileCache?: unknown }).fileCache;
+  if (!stat || typeof parsed !== 'object' || parsed === null) return false;
+  if (!Object.hasOwn(parsed, file.path)) return false;
+  const entry = (parsed as Record<string, unknown>)[file.path] as {
+    mtime?: unknown;
+    size?: unknown;
+  } | null;
+  if (typeof entry?.mtime !== 'number' || typeof entry.size !== 'number') {
+    return false;
+  }
+  return entry.mtime !== stat.mtime || entry.size !== stat.size;
 }
 
 /**

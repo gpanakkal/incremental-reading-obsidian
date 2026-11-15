@@ -1,12 +1,13 @@
 import { TestRepository } from '#/test/item-vault';
 import fc from 'fast-check';
-import type { TFile } from 'obsidian';
+import type { MetadataCache, TFile } from 'obsidian';
 import { describe, expect, it } from 'vitest';
 import { ITEM_TABLES, type ItemTable } from './moved-note-scan';
 import {
   type IrIdRelation,
   type ReconcileInput,
   type RowState,
+  cacheLagsNote,
   fingerprintMatches,
   noteFingerprint,
   reconcileAction,
@@ -72,6 +73,27 @@ function insertItem(repo: TestRepository, table: ItemTable, id: string) {
     [id, `${id}.md`]
   );
 }
+
+/**
+ * A metadata cache whose internal `fileCache` (unofficial Obsidian API: the
+ * stat each note was last parsed at, by path) is `fileCache`.
+ */
+const cacheWith = (fileCache: unknown) =>
+  ({ fileCache }) as unknown as MetadataCache;
+
+/** A note's stat, and the stat its cache entry was parsed at, related the ways that matter. */
+const statPairArb = fc.tuple(mtimeArb, fc.nat()).chain(([mtime, size]) =>
+  fc.record({
+    now: fc.constant({ mtime, size }),
+    parsed: fc.oneof(
+      fc.constant({ mtime, size }),
+      fc.constant({ mtime: mtime + 1, size }),
+      fc.constant({ mtime: mtime - 1, size }),
+      fc.constant({ mtime, size: size + 1 }),
+      fc.record({ mtime: mtimeArb, size: fc.nat() })
+    ),
+  })
+);
 
 // #endregion
 
@@ -197,6 +219,49 @@ describe('noteFingerprint', () => {
 
   it('gives a file object with no stat to read none', () => {
     expect(noteFingerprint(fileAt('notes/a.md'))).toBeNull();
+  });
+});
+
+describe('cacheLagsNote', () => {
+  it("calls the cache behind exactly when it parsed the note at another mtime or size than the note's now", () => {
+    fc.assert(
+      fc.property(fc.string(), statPairArb, (name, { now, parsed }) => {
+        const path = `notes/${name}.md`;
+        const file = { path, stat: { ctime: 0, ...now } } as TFile;
+
+        expect(cacheLagsNote(file, cacheWith({ [path]: parsed }))).toBe(
+          parsed.mtime !== now.mtime || parsed.size !== now.size
+        );
+      })
+    );
+  });
+
+  it("never calls the cache behind when it can't compare the two", () => {
+    const path = 'notes/a.md';
+    const file = { path, stat: { ctime: 0, mtime: 5, size: 5 } } as TFile;
+    const older = { mtime: 1, size: 1, hash: 'h' };
+    // No internal to read, or not of the shape it had
+    fc.assert(
+      fc.property(
+        fc.oneof(fc.constant(undefined), fc.constant(null), fc.string()),
+        (fileCache) => {
+          expect(cacheLagsNote(file, cacheWith(fileCache))).toBe(false);
+        }
+      )
+    );
+    // No entry of the note's own, an older one elsewhere or inherited
+    expect(cacheLagsNote(file, cacheWith({ 'notes/b.md': older }))).toBe(false);
+    expect(
+      cacheLagsNote(file, cacheWith(Object.create({ [path]: older })))
+    ).toBe(false);
+    // An entry with no stat of its own to compare
+    for (const entry of [null, {}, { mtime: 1 }, { size: 1 }]) {
+      expect(cacheLagsNote(file, cacheWith({ [path]: entry }))).toBe(false);
+    }
+    // A stand-in file object with no stat
+    expect(cacheLagsNote({ path } as TFile, cacheWith({ [path]: older }))).toBe(
+      false
+    );
   });
 });
 

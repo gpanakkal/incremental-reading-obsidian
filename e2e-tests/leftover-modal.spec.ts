@@ -2,7 +2,11 @@ import { ARTICLE_TAG, SNIPPET_TAG } from '#/lib/constants';
 import { expect, type ElectronApplication, type Page } from '@playwright/test';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { executeCommandById, openFileInActiveLeaf } from './helpers';
+import {
+  executeCommandById,
+  openFileInActiveLeaf,
+  waitForReviewItem,
+} from './helpers';
 import { test } from './setup/fixtures';
 import {
   closeElectron,
@@ -279,6 +283,60 @@ test.describe("A leftover at another item's path", () => {
     const rows = window.locator('.ir-queue-row').filter({ hasText: 'Missing' });
     await expect(rows).toHaveCount(1);
     await expect(rows).toHaveAttribute('data-type', 'article');
+  });
+
+  test('Erase and import fresh keeps the new article while Obsidian has yet to re-read the note it rewrote', async () => {
+    await adoptOverSnippet('notes/Unread.md', {
+      id: 'live-snippet',
+      deleted: false,
+      due: Date.now() - 1_000,
+    });
+    await answer('button.mod-destructive:not(.mod-cta)');
+    await expect(question().last()).toBeVisible();
+    // Hold Obsidian's metadata queue, which re-reads a note once it is
+    // written, so the cache keeps the leftover's old id as review opens: what
+    // a slow machine does for a moment. `metadataCache.workQueue` is
+    // unofficial Obsidian API (a promise chain, read from obsidian.asar 1.15).
+    // Without it the note is re-read at once and the test proves nothing
+    const holding = await window.evaluate(() => {
+      const { app } = window as unknown as {
+        app: {
+          metadataCache: {
+            workQueue?: { queue(task: () => unknown): unknown };
+          };
+        };
+      };
+      const held = window as unknown as { releaseMetadata?: () => void };
+      const { workQueue } = app.metadataCache;
+      if (typeof workQueue?.queue !== 'function') return false;
+      void workQueue.queue(
+        () =>
+          new Promise<void>((resolve) => {
+            held.releaseMetadata = resolve;
+            setTimeout(resolve, 30_000);
+          })
+      );
+      return true;
+    });
+    try {
+      expect(holding).toBe(true);
+
+      await answer('.mod-cta');
+
+      await expect(window.locator('.ir-leftover-modal')).toHaveCount(0);
+      // Each look at the item squares it with its note, from the cache
+      await executeCommandById(window, 'incremental-reading:learn');
+      await window
+        .locator('.ir-queue-row[data-type="article"]', { hasText: 'Unread' })
+        .click();
+      expect((await waitForReviewItem(window)).title).toContain('Unread');
+    } finally {
+      await window.evaluate(() =>
+        (
+          window as unknown as { releaseMetadata?: () => void }
+        ).releaseMetadata?.()
+      );
+    }
   });
 
   test('Cancel writes nothing, shows no error, and the leftover stays listed', async () => {
