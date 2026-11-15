@@ -2,6 +2,7 @@ import { migrations, pluginVersionsOfSchema } from '#/db/migrations';
 import {
   ARTICLE_TAG,
   BACKUP_DIRECTORY,
+  CURRENT_ITEM_REFETCH_TIME,
   DATABASE_FILE_PATH,
 } from '#/lib/constants';
 import test, {
@@ -15,8 +16,10 @@ import initSqlJs, { type SqlJsStatic } from 'sql.js';
 import {
   emulateMobile,
   executeCommandById,
+  expectReviewOn,
   pendingSaves,
   setNativeMenus,
+  waitForReviewItem,
   watchNotices,
 } from './helpers';
 import {
@@ -361,6 +364,81 @@ test('drops the undo history from before a restore from the picker, so an undo p
   ]);
   await expect(queueRow(ARTICLES[0].name)).toHaveCount(0);
   await expect(queueRow(ARTICLES[1].name)).toContainText(/Priority\s*4\.5/);
+});
+
+test('clears the undo history from before a restore from the picker with one notice, and keeps a skip made before it undoable', async () => {
+  await writeArticleNotes();
+  await writeVaultFile(DATABASE_FILE_PATH, await databaseWith([30, 30]));
+  await writeVaultFile(
+    `${BACKUP_DIRECTORY}/${mergeBackupName(await schemaVersion(), new Date(Date.now() - DAY_MS))}`,
+    await databaseWith([30, 30])
+  );
+  app = await launchElectron(vaultPath);
+  window = await openVault(app, vaultPath);
+  await executeCommandById(window, 'incremental-reading:learn');
+  await expect(queueRow(ARTICLES[0].name)).toHaveCount(1);
+  await expect.poll(() => pendingSaves(window)).toBe(0);
+  const notices = await watchNotices(window);
+  const noticeCount = async () => (await notices()).length;
+  const restoreFirstBackup = async () => {
+    await window.locator('#restore-backup-button').click();
+    await expect(backupRows().first()).toBeVisible();
+    await backupRows().first().locator('button').click();
+    await window.locator('.modal-container.mod-confirmation .mod-cta').click();
+    await expect(window.locator('.ir-backup-modal')).toHaveCount(0);
+  };
+
+  // What a restore raises on its own, with no undo history to clear
+  await restoreFirstBackup();
+  await expect.poll(noticeCount).toBeGreaterThan(0);
+  await expect.poll(() => pendingSaves(window)).toBe(0);
+  const ownNotices = await noticeCount();
+
+  // Skip one article, then dismiss the other
+  await window.locator('#begin-review-button').click();
+  const skipped = await waitForReviewItem(window);
+  await window
+    .getByRole('button', { name: 'Skip for current review session' })
+    .click();
+  const dismissed = await waitForReviewItem(window);
+  expect(dismissed.id).not.toBe(skipped.id);
+  await window
+    .getByRole('button', { name: 'Stop scheduling this item for review' })
+    .click();
+  await expect
+    .poll(() => window.locator('#undo-button').getAttribute('aria-label'))
+    .toContain(dismissed.title);
+  await expect.poll(() => pendingSaves(window)).toBe(0);
+  await window.getByRole('button', { name: 'Go to home screen' }).click();
+  const beforeRestore = await noticeCount();
+
+  // The dismissal goes with one notice more than the restore raises alone
+  await restoreFirstBackup();
+  await expect.poll(noticeCount).toBe(beforeRestore + ownNotices + 1);
+  await expect.poll(() => pendingSaves(window)).toBe(0);
+
+  // And no read of the history after that tells of it again: the action bar
+  // drawn again, the current item polled twice, the undo button's tooltip
+  await window.locator('#begin-review-button').click();
+  const undoButton = window.locator('#undo-button');
+  await expect(undoButton).toBeEnabled();
+  await window.getByRole('button', { name: 'Go to home screen' }).click();
+  await window.locator('#begin-review-button').click();
+  await undoButton.hover();
+  await expect(window.locator('.tooltip')).toBeVisible();
+  // One bounded wait past two polls of the current item, not a loop
+  await window.waitForTimeout(2 * CURRENT_ITEM_REFETCH_TIME + 1000);
+  await undoButton.hover();
+  expect(await noticeCount()).toBe(beforeRestore + ownNotices + 1);
+
+  // What the undo button offers is the skip, which still undoes; nothing is
+  // left to undo after it, so the dismissal was never offered
+  await expect
+    .poll(() => undoButton.getAttribute('aria-label'))
+    .toContain(skipped.title);
+  await undoButton.click();
+  await expectReviewOn(window, skipped);
+  await expect(undoButton).toBeDisabled();
 });
 
 test('names each backup in the picker for the plugin versions that made it, keeps its schema version to the tooltip, and offers the backups folder on desktop alone', async () => {
