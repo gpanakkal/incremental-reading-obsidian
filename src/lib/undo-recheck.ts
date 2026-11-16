@@ -249,6 +249,6 @@ export function describeChanges(changes: ChangesElsewhere): string[] {
   const said: string[] = [...edits];
   if (reviews > 0) said.push(counted(reviews, 'review'));
   if (grades > 0) said.push(`graded ${counted(grades, 'time')}`);
-  if (relinked) said.push('linked to a moved note');
+  if (relinked) said.push('linked to a note that was moved');
   return said;
 }

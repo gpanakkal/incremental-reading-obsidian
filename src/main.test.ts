@@ -5429,16 +5429,30 @@ describe('IncrementalReadingPlugin.verifySyncSettings', () => {
   });
 });
 
+/** A word only the plural form of a sentence about copies would use. */
+const PLURAL = /\b(?:were|they|them)\b/;
+
 describe('startupFailureMessage', () => {
-  it('property: says a database file that would not load was left as it was', () => {
+  it('property: names a database file that would not load, in a message of its own that claims no recovery', () => {
+    /** A newer copy's path, found again in the message by being nowhere else. */
+    const MARK = '\u0000';
     fc.assert(
-      fc.property(fc.string(), (path) => {
-        expect(startupFailureMessage(new DatabaseLoadError(path))).toBe(
-          `Incremental reading: the database file ${path} could not be ` +
-            'loaded, so the plugin did not start. The file was left ' +
-            'unchanged. See the console for details.'
-        );
-      })
+      fc.property(
+        fc
+          .string()
+          .filter((path) => !/restored/i.test(path) && !path.includes(MARK)),
+        (path) => {
+          const message = startupFailureMessage(new DatabaseLoadError(path));
+          expect(message).toContain(path);
+          expect(message).not.toMatch(/restored/i);
+          expect(message).not.toBe(startupFailureMessage(new Error()));
+          // Not the message for copies from a newer version, with none named
+          const newer = startupFailureMessage(
+            new DatabaseLoadError(path, null, [MARK])
+          );
+          expect(message).not.toBe(newer.replace(MARK, ''));
+        }
+      )
     );
   });
 
@@ -5467,11 +5481,17 @@ describe('startupFailureMessage', () => {
             new DatabaseLoadError(path, copy, newer)
           );
           expect(message).toContain(path);
-          for (const newerPath of newer) expect(message).toContain(newerPath);
+          expect(message).toContain(newer.join(', '));
           if (copy !== null) expect(message).toContain(copy);
           expect(message).not.toBe(
             startupFailureMessage(new DatabaseLoadError(path, copy))
           );
+          // The damaged copy, if any, is told of after the rest
+          expect(
+            message.startsWith(
+              startupFailureMessage(new DatabaseLoadError(path, null, newer))
+            )
+          ).toBe(true);
         }
       )
     );
@@ -5491,9 +5511,9 @@ describe('recoveryMessage', () => {
   /** Any path that doesn't itself say what the message is checked for. */
   const pathArb = fc
     .string()
-    .filter((path) => !path.includes('missing') && !path.includes('null'));
+    .filter((path) => !path.includes('Sync') && !path.includes('null'));
 
-  it('property: names the file, what it was restored from, any damaged copy and any copy from a newer version, and says changes may be missing unless the save under way was restored', () => {
+  it("property: names the file, what it was restored from, any damaged copy and any copy from a newer version, and points to Sync's version history for later changes unless the save under way was restored", () => {
     fc.assert(
       fc.property(
         pathArb,
@@ -5544,7 +5564,42 @@ describe('recoveryMessage', () => {
           } else {
             expect(message).toContain(corruptCopyPath);
           }
-          expect(message.includes('missing')).toBe(source !== 'tmp');
+          // The save under way holds every change; the others send the user
+          // to Sync's version history for what they lack
+          expect(message.includes('Sync')).toBe(source !== 'tmp');
+        }
+      )
+    );
+  });
+
+  it('property: speaks of each list of copies from a newer version in the singular for one path and the plural for two', () => {
+    /** A path that can't itself read as a plural marker. */
+    const markerFreeArb = pathArb.filter((path) => !PLURAL.test(path));
+    fc.assert(
+      fc.property(
+        pathArb,
+        fc.constantFrom('tmp' as const, 'prev' as const, 'backup' as const),
+        pathArb,
+        fc.option(pathArb),
+        fc.array(markerFreeArb, { minLength: 1, maxLength: 2 }),
+        fc.boolean(),
+        (dbFilePath, source, path, corruptCopyPath, paths, stuck) => {
+          const restored = { source, path, corruptCopyPath };
+          const base = recoveryMessage(dbFilePath, {
+            ...restored,
+            newerCopyPaths: [],
+            stuckNewerCopyPaths: [],
+          });
+          const message = recoveryMessage(dbFilePath, {
+            ...restored,
+            newerCopyPaths: stuck ? [] : paths,
+            stuckNewerCopyPaths: stuck ? paths : [],
+          });
+          // The copies are told of after everything else
+          expect(message.startsWith(base)).toBe(true);
+          const clause = message.slice(base.length);
+          expect(clause).toContain(paths.join(', '));
+          expect(PLURAL.test(clause)).toBe(paths.length > 1);
         }
       )
     );
@@ -5559,6 +5614,22 @@ describe('savesPausedMessage', () => {
         (paths) => {
           const message = savesPausedMessage(paths);
           for (const path of paths) expect(message).toContain(path);
+        }
+      )
+    );
+  });
+
+  it('property: speaks of one copy in the singular and two in the plural', () => {
+    fc.assert(
+      fc.property(
+        fc.array(
+          fc.string({ minLength: 1 }).filter((path) => !PLURAL.test(path)),
+          { minLength: 1, maxLength: 2 }
+        ),
+        (paths) => {
+          const message = savesPausedMessage(paths);
+          expect(message).toContain(paths.join(', '));
+          expect(PLURAL.test(message)).toBe(paths.length > 1);
         }
       )
     );

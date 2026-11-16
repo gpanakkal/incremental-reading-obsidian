@@ -179,22 +179,21 @@ export function startupFailureMessage(error: unknown): string {
       `Incremental reading: the database file ${error.dbFilePath} is ` +
       `missing or damaged, and the only local copies that could replace it ` +
       `(${error.newerCopyPaths.join(', ')}) were written by a newer version ` +
-      `of the plugin, so the plugin did not start and left them as they ` +
-      `were. Update the plugin to load them.${kept}`
+      `of the plugin. Update the plugin to load them.${kept}`
     );
   }
   if (error instanceof DatabaseLoadError && error.corruptCopyPath) {
     return (
-      `Incremental reading: the database file ${error.dbFilePath} holds no ` +
+      `Incremental reading: the database file ${error.dbFilePath} appears to have no ` +
       `database (it may be empty or cut short), and no local copy could ` +
-      `replace it, so the plugin did not start. Obsidian Sync's version ` +
-      `history for the file may hold an earlier copy.`
+      `replace it, so the plugin couldn't launch. Check Obsidian Sync's version ` +
+      `history for the file to restore an earlier copy.`
     );
   }
   if (error instanceof DatabaseLoadError) {
     return (
       `Incremental reading: the database file ${error.dbFilePath} could not ` +
-      `be loaded, so the plugin did not start. The file was left unchanged. ` +
+      `be loaded, so the plugin couldn't launch. ` +
       `See the console for details.`
     );
   }
@@ -218,32 +217,41 @@ export function recoveryMessage(
   const missing =
     report.source === 'tmp'
       ? ''
-      : ` Changes made after that copy was saved are missing; Obsidian ` +
-        `Sync's version history for the file may hold a newer copy.`;
+      : ` Changes made after that point may be lost, but Obsidian ` +
+        `Sync's version history may have newer database copies.`;
   // Kept aside after a plugin downgrade; nothing loads them on its own
+  const keptAt = report.newerCopyPaths.join(', ');
   const newer =
     report.newerCopyPaths.length === 0
       ? ''
-      : ` A copy written by a newer version of the plugin was kept at ` +
-        `${report.newerCopyPaths.join(', ')}; updating the plugin again ` +
-        `will not bring it back by itself.`;
+      : report.newerCopyPaths.length === 1
+        ? ` A database file from a newer version of the plugin was kept at ` +
+          `${keptAt}; updating the plugin again ` +
+          `will not automatically load the copy.`
+        : ` Database files from a newer version of the plugin were kept at ` +
+          `${keptAt}; updating the plugin again ` +
+          `will not automatically load the copies.`;
   // Saves wait on these; `savesPausedMessage` says so too
+  const stuckAt = report.stuckNewerCopyPaths.join(', ');
   const stuck =
     report.stuckNewerCopyPaths.length === 0
       ? ''
-      : ` A copy written by a newer version of the plugin could not be ` +
-        `moved aside and is still at ` +
-        `${report.stuckNewerCopyPaths.join(', ')}, so the plugin cannot ` +
-        `save until it is moved or removed. Updating the plugin may load it.`;
+      : report.stuckNewerCopyPaths.length === 1
+        ? ` A database file from a newer version of the plugin could not be ` +
+          `moved from ${stuckAt}. The plugin cannot ` +
+          `save until it is moved or removed. Updating the plugin may load it.`
+        : ` Database files from a newer version of the plugin could not be ` +
+          `moved from ${stuckAt}. The plugin cannot ` +
+          `save until they are moved or removed. Updating the plugin may load them.`;
   if (report.corruptCopyPath === null) {
     return (
-      `Incremental reading: the database file ${dbFilePath} was not there, so ` +
+      `Incremental reading: the database file was not at ${dbFilePath}, so ` +
       `it was restored from ${from}.${missing}${newer}${stuck}`
     );
   }
   return (
-    `Incremental reading: the database file ${dbFilePath} held no database ` +
-    `(it may have been cut short), so it was restored from ${from}. ` +
+    `Incremental reading: no database was found in the file at ${dbFilePath} ` +
+    `(it may have been corrupted), so it was restored from ${from}. ` +
     `The damaged file was kept at ${report.corruptCopyPath}.` +
     `${missing}${newer}${stuck}`
   );
@@ -254,12 +262,22 @@ export function recoveryMessage(
  * could not be moved aside (see `SQLJSRepository.#keepNewerCopies`).
  */
 export function savesPausedMessage(stuckPaths: readonly string[]): string {
+  const at = stuckPaths.join(', ');
+  if (stuckPaths.length === 1) {
+    return (
+      `Incremental reading: changes are not being saved. A copy of the ` +
+      `database written by a newer version of the plugin, at ` +
+      `${at}, could not be moved, and saving would ` +
+      `write over it. Move or delete the file to resume saving. ` +
+      `See the console for the error.`
+    );
+  }
   return (
-    `Incremental reading: changes are not being saved. A copy of the ` +
+    `Incremental reading: changes are not being saved. Copies of the ` +
     `database written by a newer version of the plugin, at ` +
-    `${stuckPaths.join(', ')}, could not be moved aside, and saving would ` +
-    `write over it. Move or remove it to resume saving; see the console ` +
-    `for the error.`
+    `${at}, could not be moved, and saving would ` +
+    `write over them. Move or delete the files to resume saving. ` +
+    `See the console for the error.`
   );
 }
 
