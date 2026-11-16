@@ -470,6 +470,33 @@ export async function scrollToText(window: Page, text: string) {
 }
 
 /**
+ * Select the first `text` in the active editor, as a drag over it does.
+ *
+ * Waits for an editor holding `text` first: {@link openNote} returns on
+ * `file-open`, which Obsidian fires while the new note's editor is still
+ * empty. Selected then, the range clamps to nothing, and an extraction run
+ * next is refused for want of a selection.
+ *
+ * Unofficial: `window.app`. `workspace.activeEditor` and the `Editor` methods
+ * are API.
+ *
+ * @param text a sequence the note holds
+ */
+export async function selectInEditor(window: Page, text: string) {
+  await window.waitForFunction((text) => {
+    const { app } = window as unknown as { app: App };
+    const editor = app.workspace.activeEditor?.editor;
+    const at = editor?.getValue().indexOf(text) ?? -1;
+    if (!editor || at < 0) return false;
+    editor.setSelection(
+      editor.offsetToPos(at),
+      editor.offsetToPos(at + text.length)
+    );
+    return true;
+  }, text);
+}
+
+/**
  * Import a note from the vault as an article, starting from wherever the
  * workspace is: opens the note in the active tab first, since the import
  * command reads the active file.
