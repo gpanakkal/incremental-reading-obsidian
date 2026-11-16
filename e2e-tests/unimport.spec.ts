@@ -18,6 +18,7 @@ import {
   openPluginMenu,
   pendingSaves,
   pluginMenuEntries,
+  selectInEditor,
   setNativeMenus,
   setPluginSetting,
   setShowViewHeader,
@@ -789,28 +790,7 @@ test.describe("The review tab's own menu", () => {
   async function extractSnippet() {
     // Its import was chosen in Files, which left Files the active leaf
     await openNote(window, NOTE);
-    await window.evaluate((text) => {
-      const { editor } = (
-        window as unknown as {
-          app: {
-            workspace: {
-              activeEditor: {
-                editor: {
-                  getValue(): string;
-                  offsetToPos(offset: number): unknown;
-                  setSelection(from: unknown, to: unknown): void;
-                };
-              };
-            };
-          };
-        }
-      ).app.workspace.activeEditor;
-      const at = editor.getValue().indexOf(text);
-      editor.setSelection(
-        editor.offsetToPos(at),
-        editor.offsetToPos(at + text.length)
-      );
-    }, SNIPPET);
+    await selectInEditor(window, SNIPPET);
     await executeCommandById(window, 'incremental-reading:extract-selection');
     await expectExtractSettled(window, NOTE, 1);
   }
@@ -960,22 +940,6 @@ test.describe('Un-importing from a folder', () => {
   const PARENT = `${SOURCES}/Security Principles.md`;
   const SNIPPET = 'Security has become a buzzword';
 
-  /**
-   * What the page-side calls below reach. Unofficial: `window.app`,
-   * `app.plugins.plugins` and the active editor's `editor`.
-   */
-  type SnippetApp = PageApp & {
-    workspace: {
-      activeEditor: {
-        editor: {
-          getValue(): string;
-          offsetToPos(offset: number): unknown;
-          setSelection(from: unknown, to: unknown): void;
-        };
-      };
-    };
-  };
-
   /** The live articles in `SOURCES`, by path, sorted. */
   const sourceArticles = () =>
     window.evaluate(async (folder) => {
@@ -1026,15 +990,7 @@ test.describe('Un-importing from a folder', () => {
   /** Take `SNIPPET` from `PARENT`, open in the active tab. */
   async function extractSnippet() {
     await openNote(window, PARENT);
-    await window.evaluate((text) => {
-      const { editor } = (window as unknown as { app: SnippetApp }).app
-        .workspace.activeEditor;
-      const at = editor.getValue().indexOf(text);
-      editor.setSelection(
-        editor.offsetToPos(at),
-        editor.offsetToPos(at + text.length)
-      );
-    }, SNIPPET);
+    await selectInEditor(window, SNIPPET);
     await executeCommandById(window, 'incremental-reading:extract-selection');
     await expectExtractSettled(window, PARENT, 1);
   }
