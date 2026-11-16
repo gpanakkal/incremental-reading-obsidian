@@ -15,3 +15,7 @@ scripts/
 # Ignore artifacts:
 build
 coverage
+
+# Copy review worksheets: format on save would respell the copy under review
+# (drop the leading space of a sentence piece, escape a closing `**`)
+plans/*-copy.md
