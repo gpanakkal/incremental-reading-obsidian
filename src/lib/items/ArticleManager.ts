@@ -1170,7 +1170,7 @@ export class ArticleManager extends ItemManager {
         undefined) === undefined;
     if (!stillUnclaimed || JSON.stringify(now) !== JSON.stringify(shown)) {
       Obsidian.notify(
-        `Nothing was done to "${file.basename}": the article at its path, or the note, changed while you chose. Import it again to see it as it is now.`,
+        `Nothing was done to "${file.basename}" because the note or the article pointing to it changed before you confirmed. Try again.`,
         { kind: 'error' }
       );
       return false;
@@ -1187,12 +1187,14 @@ export class ArticleManager extends ItemManager {
       console.error(error);
       // Which says it is the article's note again, so nothing more is said
       Obsidian.notify(
-        `"${file.basename}" is the article's note again, but the snippets and cards taken from it couldn't be adopted`,
+        `"${file.basename}" was associated with the article, but the snippets and cards taken from it couldn't be adopted`,
         { kind: 'error', persist: true }
       );
       return false;
     }
-    report.confirm(`"${file.basename}" is the article's note again`);
+    report.confirm(
+      `"${file.basename}" was successfully associated with the article.`
+    );
     return false;
   }
 

@@ -330,7 +330,7 @@ export function queueCellTitles(row: QueueRow): Record<QueueColumnKey, string> {
       row.file === null
         ? `No file at ${row.reference}`
         : row.unlinked
-          ? `The note at ${row.reference} doesn't have this item's ir-id`
+          ? `The note at ${row.reference} doesn't have this item's ID`
           : row.reference,
     parent: `${originLabel(row.type)} ${row.parent ?? EMPTY_CELL}`,
   };

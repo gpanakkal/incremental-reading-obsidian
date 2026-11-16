@@ -356,7 +356,7 @@ export function blockedText(
 ) {
   return blocked === 'occupied'
     ? `Can't re-associate; this ${KIND_BY_TABLE[table]} already has a note.`
-    : "Can't re-associate; another item is recorded at this note's path.";
+    : "Can't re-associate; another item points to this note.";
 }
 
 /**
@@ -509,7 +509,7 @@ export function createDamagedNotesNotice(
         error
       );
       notify(
-        `Incremental reading: couldn't re-associate "${noteName(path)}". The console has the details.`,
+        `Incremental reading: couldn't re-associate "${noteName(path)}". See the console for more details.`,
         { kind: 'error' }
       );
     } finally {

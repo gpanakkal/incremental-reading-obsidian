@@ -19,9 +19,9 @@ export type BackupSource = Pick<
 
 /** What each kind of backup was taken before, as its row says. */
 const KIND_DESCRIPTIONS: Readonly<Record<BackupKind, string>> = {
-  merge: "Made before another device's changes were merged in",
-  stale: 'Made before the database was replaced',
-  migration: 'Made before a database upgrade',
+  merge: "Made before merging another device's changes in",
+  stale: 'Made before replacing the database',
+  migration: 'Made before upgrading the database',
 };
 
 /** The class of the line the picker shows when there is nothing to pick. */
@@ -104,7 +104,7 @@ export async function openBackupsFolder(app: App): Promise<void> {
       error
     );
     notify(
-      `Couldn't create the backups folder, ${folder}. Check the console for details.`,
+      `Couldn't create the backups folder ${folder}. See the console for details.`,
       { kind: 'error' }
     );
     return;
@@ -149,8 +149,8 @@ export async function restoreChosenBackup(
   } catch (error) {
     console.error('Incremental Reading - Failed to restore a backup:', error);
     notify(
-      "Couldn't restore the backup. The database was left as it was. " +
-        'Check the console for details.',
+      "Couldn't restore the backup. The database was left as-is. " +
+        'See the console for details.',
       { kind: 'error' }
     );
     return false;
@@ -190,8 +190,8 @@ export class BackupRestoreModal extends Modal {
         cls: EMPTY_CLASS,
         text:
           `There are no backups in ${BACKUP_DIRECTORY}. Only backups ` +
-          'in the vault can be restored here. Plugins have no ' +
-          "access to Obsidian Sync's version history.",
+          'in the vault can be restored here. If you use Obsidian Sync, the ' +
+          "database file's version history may contain earlier copies.",
         parent: this.contentEl,
       });
       this.#addFolderRow();
@@ -200,7 +200,7 @@ export class BackupRestoreModal extends Modal {
     createEl('p', {
       cls: INTRO_CLASS,
       text:
-        'Replace the review database with a backup. The current database will be backed up first. ' +
+        'Load a backed up copy of the database. The current database will be backed up first. ' +
         `Current plugin version: ${this.#pluginVersion}.`,
       parent: this.contentEl,
     });
@@ -214,7 +214,7 @@ export class BackupRestoreModal extends Modal {
     if (Platform.isMobile) return;
     new Setting(this.contentEl)
       .setClass(FOLDER_CLASS)
-      .setDesc(`Backups are kept in ${normalizePath(BACKUP_DIRECTORY)}.`)
+      .setDesc(`Backups are stored in ${normalizePath(BACKUP_DIRECTORY)}.`)
       .addButton((button) => {
         button.setButtonText('Open backups folder').onClick(() => {
           void openBackupsFolder(this.app);

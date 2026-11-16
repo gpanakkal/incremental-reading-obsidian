@@ -110,13 +110,13 @@ export const heldOpenings: Record<
     const state = deleted
       ? `A deleted ${kind}`
       : `${kind === 'article' ? 'An' : 'A'} ${kind} whose note is missing`;
-    return `${state} was at this note's path ("${path}"), but had a different ID than this note.`;
+    return `${state} points to this note ("${path}"), but has a different ID.`;
   },
   'no-id': ({ kind, deleted }, path) => {
     const state = deleted
       ? `A deleted ${kind}`
       : `${kind === 'article' ? 'An' : 'A'} ${kind}`;
-    return `${state} points to this note ("${path}"), but this note doesn't have an ID. If this is the right note, re-associate to fix the note.`;
+    return `${state} points to this note ("${path}"), but this note doesn't have an ID. If this is the right note, re-associate to fix it.`;
   },
 };
 
