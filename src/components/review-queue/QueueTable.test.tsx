@@ -3,17 +3,30 @@ import type { QueueRow } from '#/components/types';
 import fc from 'fast-check';
 import type { TFile } from 'obsidian';
 import { type ComponentChild, render } from 'preact';
+import { act } from 'preact/test-utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { type QueueColumnKey, buildQueueColumns } from './columns';
 import { LONG_PRESS_MS, LONG_PRESS_SLOP_PX, QueueTable } from './QueueTable';
 
 // #region HELPERS
 
+/**
+ * Render inside `act`, which runs preact's effects before it returns. Outside
+ * it, preact defers them behind a frame and a 35ms timer; a render near the end
+ * of the file leaves that timer pending past jsdom's teardown, and it then
+ * throws `cancelAnimationFrame is not defined` as an unhandled error.
+ */
+function renderNow(node: ComponentChild, container: HTMLElement): void {
+  void act(() => {
+    render(node as never, container);
+  });
+}
+
 /** Render a component into a detached jsdom container and return it. */
 function mount(node: ComponentChild): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
-  render(node as never, container);
+  renderNow(node, container);
   return container;
 }
 
@@ -743,13 +756,13 @@ describe('QueueTable row menu', () => {
   });
 
   it('opens the menu on the row as the queue has it when the press completes, or not once it is gone', async () => {
-    // Real timers throughout: preact runs effects after a frame
+    // Real timers throughout
     const wait = (ms: number) =>
       new Promise((resolve) => setTimeout(resolve, ms));
     const renamed = { ...snippet, reference: 'renamed.md', file: null };
     const { container, rowEls, onRowMenu } = mountMenuTable([article, snippet]);
     const rerender = (rows: QueueRow[]) =>
-      render(
+      renderNow(
         <QueueTable
           rows={rows}
           columns={buildQueueColumns()}
@@ -760,8 +773,6 @@ describe('QueueTable row menu', () => {
         />,
         container
       );
-    await wait(150);
-
     pointer(rowEls[1].querySelector('.ir-queue-cell')!, 'pointerdown');
     rerender([article, renamed]);
     await wait(LONG_PRESS_MS + 150);
@@ -789,15 +800,12 @@ describe('QueueTable row menu', () => {
     expect(onRowMenu).toHaveBeenCalledTimes(1);
   });
 
-  it('opens no menu for a touch still held when the table goes away', async () => {
-    const { container, rowEls, onRowMenu } = mountMenuTable([article]);
-    // Past preact's deferred effects (a frame, or 100ms without one), on real
-    // timers, so the table's cleanup is registered
-    await new Promise((resolve) => setTimeout(resolve, 150));
+  it('opens no menu for a touch still held when the table goes away', () => {
     vi.useFakeTimers();
+    const { container, rowEls, onRowMenu } = mountMenuTable([article]);
     pointer(rowEls[0].querySelector('.ir-queue-cell')!, 'pointerdown');
 
-    render(null, container);
+    renderNow(null, container);
     vi.advanceTimersByTime(LONG_PRESS_MS * 2);
 
     expect(onRowMenu).not.toHaveBeenCalled();
